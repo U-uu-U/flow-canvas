@@ -1,0 +1,23 @@
+{
+    "name": "flow-canvas",
+    "version": "1.0.0",
+    "description": "Flow 本地资源白板工具 — 零拷贝索引，实时监听，智能剪贴板",
+    "main": "electron-main/main.js",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+        "electron:build": "vite build && electron-builder"
+    },
+    "dependencies": {
+        "chokidar": "^3.6.0",
+        "konva": "^9.3.6",
+        "sharp": "^0.33.2"
+    },
+    "devDependencies": {
+        "concurrently": "^8.2.2",
+        "electron": "^28.3.3",
+        "vite": "^5.4.0",
+        "wait-on": "^7.2.0"
+    }
+}

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow Canvas</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- 标题栏（可拖拽区域） -->
+    <div class="titlebar" id="titlebar">
+        <div class="titlebar-drag">
+            <span class="titlebar-logo">◆</span>
+            <span class="titlebar-title">Flow Canvas</span>
+        </div>
+        <div class="titlebar-status" id="titlebarStatus"></div>
+    </div>
+
+    <!-- 主布局 -->
+    <div class="app-layout">
+        <!-- 左侧边栏容器 -->
+        <div class="sidebar-wrapper" id="sidebarWrapper">
+            <aside class="sidebar" id="sidebar">
+                <button class="sidebar-collapse-btn" id="collapseSidebarBtn" title="收起栏目">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                </button>
+                <div class="sidebar-content">
+                    <div class="sidebar-section">
+                        <div class="sidebar-header">
+                            <span class="sidebar-label">关联文件夹</span>
+                            <button class="sidebar-btn" id="addFolderBtn" title="添加文件夹">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19" />
+                                    <line x1="5" y1="12" x2="19" y2="12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="folder-list" id="folderList">
+                            <div class="empty-hint">点击 + 添加文件夹<br>文件将自动上墙</div>
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section">
+                        <div class="sidebar-header">
+                            <span class="sidebar-label">过滤器</span>
+                        </div>
+                        <div class="filter-chips" id="filterChips">
+                            <button class="filter-chip active" data-filter="all">全部</button>
+                            <button class="filter-chip" data-filter="image">图片</button>
+                            <button class="filter-chip" data-filter="video">视频</button>
+                            <button class="filter-chip" data-filter="audio">音频</button>
+                            <button class="filter-chip" data-filter="document">文档</button>
+                            <button class="filter-chip" data-filter="other">其他</button>
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section">
+                        <div class="sidebar-header">
+                            <span class="sidebar-label">画布</span>
+                        </div>
+                        <div class="canvas-controls">
+                            <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
+                            <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
+                            <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
+                            <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成 .md
+                                引用</button>
+                        </div>
+                    </div>
+
+                    <div class="sidebar-section">
+                        <div class="sidebar-header">
+                            <span class="sidebar-label">窗口</span>
+                        </div>
+                        <div class="window-controls">
+                            <button class="sidebar-action-btn pin-btn" id="alwaysOnTopBtn">
+                                <svg class="pin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                                    stroke="currentColor" stroke-width="2">
+                                    <path d="M12 2l0 5" />
+                                    <path d="M5 12l14 0" />
+                                    <path d="M8 7l8 0l-1 5l-2 0l0 7l-2 0l0-7l-2 0z" />
+                                </svg>
+                                <span id="alwaysOnTopLabel">置顶窗口</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="sidebar-stats" id="sidebarStats">
+                        <span>0 个文件</span>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- 画布区域 -->
+        <main class="canvas-area">
+            <div class="canvas-grid-overlay" id="canvasGrid"></div>
+            <div id="canvasContainer"></div>
+            <!-- 画布空状态 -->
+            <div class="canvas-empty" id="canvasEmpty">
+                <div class="canvas-empty-icon">◆</div>
+                <div class="canvas-empty-title">Flow Canvas</div>
+                <div class="canvas-empty-desc">关联一个本地文件夹开始使用</div>
+                <button class="canvas-empty-btn" id="emptyAddBtn">+ 添加文件夹</button>
+            </div>
+        </main>
+
+        <!-- 右侧 Agent 边栏 -->
+        <div class="agent-sidebar-wrapper" id="agentSidebarWrapper">
+            <aside class="agent-sidebar" id="agentSidebar">
+                <!-- 头部 -->
+                <div class="agent-header">
+                    <div class="agent-header-left">
+                        <button class="creation-mode-close-btn" id="creationModeCloseBtn" title="关闭创造模式">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"></line>
+                                <line x1="6" y1="6" x2="18" y2="18"></line>
+                            </svg>
+                            <span class="creation-mode-title">创造模式</span>
+                        </button>
+                    </div>
+                    <div class="agent-header-right">
+                        <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <circle cx="12" cy="12" r="3" />
+                                <path
+                                    d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                            </svg>
+                        </button>
+                        <button class="agent-collapse-btn" id="agentCollapseBtn" title="收起边栏">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 模型选择器（头部下方） -->
+                <div class="agent-model-bar">
+                    <select class="agent-model-select" id="agentModelSelect">
+                        <option value="">-- 请先添加 API --</option>
+                    </select>
+                    <button class="agent-clear-btn" id="agentClearBtn" title="清空对话">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                            </path>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- 设置面板（默认隐藏） -->
+                <div class="agent-settings" id="agentSettings">
+                    <!-- 已保存的 API 列表 -->
+                    <div class="agent-provider-list" id="agentProviderList">
+                        <!-- 动态渲染 -->
+                    </div>
+
+                    <!-- 添加 API 按钮 -->
+                    <button class="agent-add-api-btn" id="agentAddApiBtn">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        添加 API
+                    </button>
+
+                    <!-- 添加/编辑 API 表单（默认隐藏） -->
+                    <div class="agent-api-form" id="agentApiForm" style="display:none;">
+                        <div class="agent-api-form-header">
+                            <span id="agentApiFormTitle">添加新 API</span>
+                            <button class="agent-api-form-close" id="agentApiFormClose">✕</button>
+                        </div>
+
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">快速模板</label>
+                            <div class="agent-template-chips">
+                                <button class="agent-template-chip" data-template="openai">OpenAI</button>
+                                <button class="agent-template-chip" data-template="gemini">Google Gemini</button>
+                                <button class="agent-template-chip" data-template="claude">Claude</button>
+                                <button class="agent-template-chip" data-template="deepseek">DeepSeek</button>
+                                <button class="agent-template-chip" data-template="custom">自定义</button>
+                            </div>
+                        </div>
+
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">名称</label>
+                            <input type="text" class="agent-setting-input" id="agentFormName" placeholder="例：GPT-4o">
+                        </div>
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">API 格式</label>
+                            <select class="agent-setting-input" id="agentFormType">
+                                <option value="openai">OpenAI 兼容</option>
+                                <option value="google">Google Gemini</option>
+                            </select>
+                        </div>
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">API 端点</label>
+                            <input type="text" class="agent-setting-input" id="agentFormEndpoint"
+                                placeholder="https://api.openai.com/v1/chat/completions">
+                        </div>
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">API Key</label>
+                            <input type="password" class="agent-setting-input" id="agentFormKey" placeholder="sk-...">
+                        </div>
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">模型</label>
+                            <input type="text" class="agent-setting-input" id="agentFormModel" placeholder="gpt-4o">
+                        </div>
+
+                        <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
+                    </div>
+
+                    <!-- 系统提示词（独立区域） -->
+                    <div class="agent-setting-group" style="margin-top: 12px;">
+                        <label class="agent-setting-label">系统提示词（全局）</label>
+                        <textarea class="agent-setting-input agent-setting-textarea" id="agentSystemPrompt"
+                            placeholder="你是一个有用的 AI 助手..."></textarea>
+                    </div>
+                </div>
+
+                <!-- 消息区域 -->
+                <div class="agent-messages" id="agentMessages">
+                    <div class="agent-welcome">
+                        <div class="agent-welcome-icon">✦</div>
+                        <div class="agent-welcome-text">你好！我是 AI 助手。<br>有什么可以帮你的？</div>
+                    </div>
+                </div>
+
+                <!-- 输入区域 -->
+                <div class="agent-input-area">
+                    <div class="agent-input-wrapper">
+                        <textarea class="agent-input" id="agentInput" rows="1"
+                            placeholder="输入消息...（Enter 发送，Shift+Enter 换行）"></textarea>
+                        <button class="agent-send-btn" id="agentSendBtn" title="发送">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- 创造模式打开按钮（边栏关闭时显示） -->
+        <button class="agent-toggle-btn" id="agentToggleBtn" title="开启创造模式">
+            <div class="toggle-btn-glow"></div>
+            <svg class="toggle-btn-icon" viewBox="0 0 24 24" width="12" height="18" fill="currentColor">
+                <rect x="6" y="3" width="12" height="18" rx="6" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item" data-action="copy">
+            <span class="context-menu-icon">📋</span>
+            <span>复制到剪贴板</span>
+            <span class="context-menu-shortcut">Ctrl+C</span>
+        </div>
+        <div class="context-menu-item" data-action="showInExplorer">
+            <span class="context-menu-icon">📂</span>
+            <span>在资源管理器中显示</span>
+        </div>
+        <div class="context-menu-item" data-action="openFile">
+            <span class="context-menu-icon">🔗</span>
+            <span>用默认程序打开</span>
+        </div>
+        <div class="context-menu-divider"></div>
+        <div class="context-menu-item" data-action="removeFromBoard">
+            <span class="context-menu-icon">🗑️</span>
+            <span>从白板移除</span>
+            <span class="context-menu-shortcut">Del</span>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
