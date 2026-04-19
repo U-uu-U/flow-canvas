@@ -29,10 +29,11 @@
                     </svg>
                 </button>
                 <div class="sidebar-content">
-                    <div class="sidebar-section">
+                    <!-- 文件夹组 -->
+                    <div class="sidebar-section folder-groups-section">
                         <div class="sidebar-header">
-                            <span class="sidebar-label">关联文件夹</span>
-                            <button class="sidebar-btn" id="addFolderBtn" title="添加文件夹">
+                            <span class="sidebar-label">文件夹组</span>
+                            <button class="sidebar-btn" id="addGroupBtn" title="新建文件夹组">
                                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                                     stroke-width="2">
                                     <line x1="12" y1="5" x2="12" y2="19" />
@@ -40,52 +41,88 @@
                                 </svg>
                             </button>
                         </div>
-                        <div class="folder-list" id="folderList">
-                            <div class="empty-hint">点击 + 添加文件夹<br>文件将自动上墙</div>
+                        <div class="folder-group-list" id="folderGroupList">
+                            <div class="empty-hint">点击 + 新建文件夹组<br>每组独立管理文件</div>
                         </div>
                     </div>
 
-                    <div class="sidebar-section">
-                        <div class="sidebar-header">
+
+
+                    <!-- 过滤器 -->
+                    <div class="accordion-section" data-accordion>
+                        <div class="accordion-header">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+                            </svg>
                             <span class="sidebar-label">过滤器</span>
+                            <span class="accordion-chevron">▾</span>
                         </div>
-                        <div class="filter-chips" id="filterChips">
-                            <button class="filter-chip active" data-filter="all">全部</button>
-                            <button class="filter-chip" data-filter="image">图片</button>
-                            <button class="filter-chip" data-filter="video">视频</button>
-                            <button class="filter-chip" data-filter="audio">音频</button>
-                            <button class="filter-chip" data-filter="document">文档</button>
-                            <button class="filter-chip" data-filter="other">其他</button>
+                        <div class="accordion-body">
+                            <div class="accordion-body-inner">
+                                <div class="filter-chips" id="filterChips">
+                                    <button class="filter-chip active" data-filter="all">全部</button>
+                                    <button class="filter-chip" data-filter="image">图片</button>
+                                    <button class="filter-chip" data-filter="video">视频</button>
+                                    <button class="filter-chip" data-filter="audio">音频</button>
+                                    <button class="filter-chip" data-filter="document">文档</button>
+                                    <button class="filter-chip" data-filter="other">其他</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="sidebar-section">
-                        <div class="sidebar-header">
+                    <!-- 画布 -->
+                    <div class="accordion-section" data-accordion>
+                        <div class="accordion-header">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                                <line x1="3" y1="9" x2="21" y2="9" />
+                                <line x1="9" y1="21" x2="9" y2="9" />
+                            </svg>
                             <span class="sidebar-label">画布</span>
+                            <span class="accordion-chevron">▾</span>
                         </div>
-                        <div class="canvas-controls">
-                            <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
-                            <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
-                            <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
-                            <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成 .md
-                                引用</button>
+                        <div class="accordion-body">
+                            <div class="accordion-body-inner">
+                                <div class="canvas-controls">
+                                    <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
+                                    <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
+                                    <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
+                                    <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成
+                                        .md 引用</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="sidebar-section">
-                        <div class="sidebar-header">
+                    <!-- 窗口 -->
+                    <div class="accordion-section" data-accordion>
+                        <div class="accordion-header">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                                <line x1="8" y1="21" x2="16" y2="21" />
+                                <line x1="12" y1="17" x2="12" y2="21" />
+                            </svg>
                             <span class="sidebar-label">窗口</span>
+                            <span class="accordion-chevron">▾</span>
                         </div>
-                        <div class="window-controls">
-                            <button class="sidebar-action-btn pin-btn" id="alwaysOnTopBtn">
-                                <svg class="pin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none"
-                                    stroke="currentColor" stroke-width="2">
-                                    <path d="M12 2l0 5" />
-                                    <path d="M5 12l14 0" />
-                                    <path d="M8 7l8 0l-1 5l-2 0l0 7l-2 0l0-7l-2 0z" />
-                                </svg>
-                                <span id="alwaysOnTopLabel">置顶窗口</span>
-                            </button>
+                        <div class="accordion-body">
+                            <div class="accordion-body-inner">
+                                <div class="window-controls">
+                                    <button class="sidebar-action-btn pin-btn" id="alwaysOnTopBtn">
+                                        <svg class="pin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                                            stroke="currentColor" stroke-width="2">
+                                            <path d="M12 2l0 5" />
+                                            <path d="M5 12l14 0" />
+                                            <path d="M8 7l8 0l-1 5l-2 0l0 7l-2 0l0-7l-2 0z" />
+                                        </svg>
+                                        <span id="alwaysOnTopLabel">置顶窗口</span>
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
 

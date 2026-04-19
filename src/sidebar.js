@@ -1,5 +1,7 @@
+import gsap from 'gsap';
+
 // ============================================================
-// Flow Canvas — Sidebar Manager
+// Flow Canvas — Sidebar Manager (with GSAP Hover Accordion)
 // ============================================================
 
 export class SidebarManager {
@@ -7,12 +9,26 @@ export class SidebarManager {
         this.storeData = storeData;
         this.listeners = {};
 
+        // 数据迁移：如果旧数据有 watchFolders 但没有 folderGroups，自动创建默认组
+        if (!this.storeData.folderGroups) {
+            this.storeData.folderGroups = [];
+        }
+        if (this.storeData.watchFolders && this.storeData.watchFolders.length > 0 && this.storeData.folderGroups.length === 0) {
+            const defaultGroup = {
+                id: Date.now().toString(),
+                name: '默认组',
+                folders: [...this.storeData.watchFolders]
+            };
+            this.storeData.folderGroups.push(defaultGroup);
+            this.storeData.activeGroupId = defaultGroup.id;
+        }
+
         this.dom = {
             sidebar: document.getElementById('sidebar'),
             collapseBtn: document.getElementById('collapseSidebarBtn'),
-            addBtn: document.getElementById('addFolderBtn'),
+            addGroupBtn: document.getElementById('addGroupBtn'),
             emptyAddBtn: document.getElementById('emptyAddBtn'),
-            folderList: document.getElementById('folderList'),
+            folderGroupList: document.getElementById('folderGroupList'),
             filterChips: document.getElementById('filterChips'),
             fitAllBtn: document.getElementById('fitAllBtn'),
             packLayoutBtn: document.getElementById('packLayoutBtn'),
@@ -24,7 +40,7 @@ export class SidebarManager {
         };
 
         this.bindEvents();
-        this.renderFolders();
+        this.renderGroups();
 
         // 恢复侧边栏状态
         if (this.storeData.sidebarClosed) {
@@ -33,6 +49,21 @@ export class SidebarManager {
 
         // 恢复置顶状态
         this._initAlwaysOnTop();
+
+        // ── 初始化通用手风琴动画（过滤器 / 画布 / 窗口） ──
+        this._initAccordions();
+    }
+
+    // ── 获取当前激活的组 ──
+    getActiveGroup() {
+        if (!this.storeData.activeGroupId) return null;
+        return this.storeData.folderGroups.find(g => g.id === this.storeData.activeGroupId) || null;
+    }
+
+    // ── 获取当前组的 watchFolders ──
+    getActiveWatchFolders() {
+        const group = this.getActiveGroup();
+        return group ? group.folders : [];
     }
 
     async _initAlwaysOnTop() {
@@ -70,8 +101,6 @@ export class SidebarManager {
             if (window.flowCanvas && window.flowCanvas.store) {
                 window.flowCanvas.store.save(this.storeData);
             }
-            // Emit resize or change event to canvas manager if needed
-            // Wait a bit for the CSS transition to process
             setTimeout(() => {
                 const event = new Event('resize');
                 window.dispatchEvent(event);
@@ -85,7 +114,6 @@ export class SidebarManager {
             });
         }
 
-        // When closed, clicking the whole sidebar circle expands it
         if (this.dom.sidebar) {
             this.dom.sidebar.addEventListener('click', (e) => {
                 if (document.body.classList.contains('sidebar-closed')) {
@@ -94,67 +122,96 @@ export class SidebarManager {
             });
         }
 
-        // 添加文件夹
-        const handleAddFolder = async () => {
-            const folderPath = await window.flowCanvas.folder.select();
-            if (folderPath && !this.storeData.watchFolders.includes(folderPath)) {
-                this.storeData.watchFolders.push(folderPath);
-                this.renderFolders();
-                window.flowCanvas.store.save(this.storeData);
-                document.body.classList.add('has-folders');
+        // ── 新建文件夹组 ──
+        if (this.dom.addGroupBtn) {
+            this.dom.addGroupBtn.addEventListener('click', () => {
+                this._createNewGroup();
+            });
+        }
 
-                // 扫描现有文件
-                const files = await window.flowCanvas.folder.scan(folderPath);
-                console.log(`[Sidebar] Found ${files.length} files in ${folderPath}`);
-                if (files && files.length > 0) {
-                    this.emit('scanFiles', files);
+        // ── 文件夹组列表事件委托 ──
+        if (this.dom.folderGroupList) {
+            this.dom.folderGroupList.addEventListener('click', async (e) => {
+                // 点击删除组
+                if (e.target.closest('.group-remove')) {
+                    e.stopPropagation();
+                    const groupItem = e.target.closest('.folder-group-item');
+                    if (groupItem) this._removeGroup(groupItem.dataset.groupId);
+                    return;
                 }
-            }
-        };
 
-        this.dom.addBtn.addEventListener('click', handleAddFolder);
-        this.dom.emptyAddBtn.addEventListener('click', handleAddFolder);
-
-        // 移除文件夹
-        this.dom.folderList.addEventListener('click', async (e) => {
-            if (e.target.classList.contains('folder-remove')) {
-                const path = e.target.dataset.path;
-                await window.flowCanvas.folder.unwatch(path);
-
-                this.storeData.watchFolders = this.storeData.watchFolders.filter(p => p !== path);
-
-                // 同时移除该文件夹下所有文件
-                const removedItems = this.storeData.items.filter(i => i.filePath.startsWith(path));
-                this.storeData.items = this.storeData.items.filter(i => !i.filePath.startsWith(path));
-                removedItems.forEach(i => {
-                    const ev = new CustomEvent('context-remove', { detail: { filePath: i.filePath } });
-                    document.dispatchEvent(ev);
-                });
-
-                this.renderFolders();
-                window.flowCanvas.store.save(this.storeData);
-
-                if (this.storeData.watchFolders.length === 0) {
-                    document.body.classList.remove('has-folders');
+                // 点击添加文件夹 (+ 按钮)
+                if (e.target.closest('.add-folder-btn')) {
+                    e.stopPropagation();
+                    const groupItem = e.target.closest('.folder-group-item');
+                    if (groupItem) this._handleAddFolder(groupItem.dataset.groupId);
+                    return;
                 }
-            }
-        });
 
-        // 右键文件夹弹出菜单
-        this.dom.folderList.addEventListener('contextmenu', async (e) => {
-            const folderItem = e.target.closest('.folder-item');
-            if (folderItem) {
-                e.preventDefault();
-                const path = folderItem.querySelector('.folder-remove').dataset.path;
-                const action = await window.flowCanvas.folder.showContextMenu(path);
-                if (action === 'setDefault') {
-                    this.storeData.defaultSaveFolder = path;
-                    this.renderFolders();
-                    window.flowCanvas.store.save(this.storeData);
-                } else if (action === 'remove') {
-                    const removeBtn = folderItem.querySelector('.folder-remove');
-                    if (removeBtn) removeBtn.click();
+                // 点击删除文件夹
+                if (e.target.closest('.folder-remove')) {
+                    e.stopPropagation();
+                    const path = e.target.closest('.folder-remove').dataset.path;
+                    const groupItem = e.target.closest('.folder-group-item');
+                    if (groupItem) this._removeFolder(groupItem.dataset.groupId, path);
+                    return;
                 }
+
+                // 左键点击文件夹本体，但不要拦截右键或其它点击
+                if (e.target.closest('.folder-item')) {
+                    // 只处理常规点击，避免干扰
+                }
+
+                // 选中或展开折叠组 (点击 header)
+                const groupHeader = e.target.closest('.group-header');
+                if (groupHeader) {
+                    const groupItem = groupHeader.closest('.folder-group-item');
+                    if (groupItem) {
+                        this._activateGroup(groupItem.dataset.groupId);
+                    }
+                }
+            });
+
+            // 右键文件夹设置默认路径
+            this.dom.folderGroupList.addEventListener('contextmenu', async (e) => {
+                const folderItem = e.target.closest('.folder-item');
+                if (folderItem) {
+                    e.preventDefault();
+                    const path = folderItem.querySelector('.folder-remove').dataset.path;
+                    const action = await window.flowCanvas.folder.showContextMenu(path);
+                    if (action === 'setDefault') {
+                        this.storeData.defaultSaveFolder = path;
+                        this.renderGroups();
+                        this._saveStore();
+                    } else if (action === 'remove') {
+                        const groupItem = folderItem.closest('.folder-group-item');
+                        if (groupItem) this._removeFolder(groupItem.dataset.groupId, path);
+                    }
+                }
+            });
+
+            // 双击重命名
+            this.dom.folderGroupList.addEventListener('dblclick', (e) => {
+                const nameEl = e.target.closest('.group-name');
+                if (!nameEl) return;
+                const groupItem = nameEl.closest('.folder-group-item');
+                if (!groupItem) return;
+                this._startRenameGroup(groupItem.dataset.groupId, nameEl);
+            });
+        }
+
+        // 大的占位按钮 (全部为空时)
+        this.dom.emptyAddBtn.addEventListener('click', () => {
+            if (this.storeData.folderGroups.length === 0) {
+                this._createNewGroup();
+                // 等待 UI 渲染再触发添加到第一个组
+                setTimeout(() => {
+                    const firstGroup = this.storeData.folderGroups[0];
+                    if (firstGroup) this._handleAddFolder(firstGroup.id);
+                }, 100);
+            } else {
+                const activeGroup = this.getActiveGroup();
+                if (activeGroup) this._handleAddFolder(activeGroup.id);
             }
         });
 
@@ -164,23 +221,19 @@ export class SidebarManager {
                 const clickedFilter = e.target.dataset.filter;
 
                 if (clickedFilter === 'all') {
-                    // 点击"全部"：取消所有其他选中，只选全部
                     this.dom.filterChips.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
                     e.target.classList.add('active');
                 } else {
-                    // 点击具体类型：toggle 该类型，同时取消"全部"
                     const allChip = this.dom.filterChips.querySelector('[data-filter="all"]');
                     if (allChip) allChip.classList.remove('active');
                     e.target.classList.toggle('active');
 
-                    // 如果没有任何具体过滤器选中，自动恢复"全部"
                     const activeChips = this.dom.filterChips.querySelectorAll('.filter-chip.active');
                     if (activeChips.length === 0 && allChip) {
                         allChip.classList.add('active');
                     }
                 }
 
-                // 收集当前选中的过滤器
                 const activeFilters = [];
                 this.dom.filterChips.querySelectorAll('.filter-chip.active').forEach(c => {
                     activeFilters.push(c.dataset.filter);
@@ -211,30 +264,302 @@ export class SidebarManager {
         }
     }
 
-    renderFolders() {
-        const folders = this.storeData.watchFolders || [];
+    // ── 核心操作 ──
 
-        // 同步更新 body 状态，确保画布空状态正确隐藏/显示
-        if (folders.length > 0) {
+    _createNewGroup() {
+        const count = this.storeData.folderGroups.length;
+        const group = {
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
+            name: `文件夹组 ${count + 1}`,
+            folders: []
+        };
+        this.storeData.folderGroups.push(group);
+        this._activateGroup(group.id);
+        this._saveStore();
+    }
+
+    async _handleAddFolder(groupId) {
+        const targetGroup = this.storeData.folderGroups.find(g => g.id === groupId);
+        if (!targetGroup) return;
+
+        const folderPath = await window.flowCanvas.folder.select();
+        if (folderPath && !targetGroup.folders.includes(folderPath)) {
+            targetGroup.folders.push(folderPath);
+
+            // 如果当前组是激活组，同步 watchFolders
+            if (this.storeData.activeGroupId === groupId) {
+                this._syncWatchFolders();
+                document.body.classList.add('has-folders');
+
+                // 首次扫描文件
+                const files = await window.flowCanvas.folder.scan(folderPath);
+                console.log(`[Sidebar] Found ${files.length} files in ${folderPath}`);
+                if (files && files.length > 0) {
+                    this.emit('scanFiles', files);
+                }
+            }
+
+            this.renderGroups();
+            this._saveStore();
+        }
+    }
+
+    async _removeFolder(groupId, path) {
+        const group = this.storeData.folderGroups.find(g => g.id === groupId);
+        if (!group) return;
+
+        group.folders = group.folders.filter(p => p !== path);
+
+        // 如果移除的是当前激活组内的文件夹
+        if (this.storeData.activeGroupId === groupId) {
+            await window.flowCanvas.folder.unwatch(path);
+            this._syncWatchFolders();
+
+            // 同时移除画布上该路径对应的 item
+            const removedItems = this.storeData.items.filter(i => i.filePath.startsWith(path));
+            this.storeData.items = this.storeData.items.filter(i => !i.filePath.startsWith(path));
+            removedItems.forEach(i => {
+                const ev = new CustomEvent('context-remove', { detail: { filePath: i.filePath } });
+                document.dispatchEvent(ev);
+            });
+
+            if (this.getActiveWatchFolders().length === 0) {
+                document.body.classList.remove('has-folders');
+            }
+        }
+
+        this.renderGroups();
+        this._saveStore();
+    }
+
+    _removeGroup(groupId) {
+        const group = this.storeData.folderGroups.find(g => g.id === groupId);
+        if (!group) return;
+
+        // 取消监听该组的所有文件夹
+        group.folders.forEach(folder => {
+            if (window.flowCanvas && window.flowCanvas.folder) {
+                window.flowCanvas.folder.unwatch(folder);
+            }
+        });
+
+        this.storeData.folderGroups = this.storeData.folderGroups.filter(g => g.id !== groupId);
+
+        if (this.storeData.activeGroupId === groupId) {
+            if (this.storeData.folderGroups.length > 0) {
+                this._activateGroup(this.storeData.folderGroups[0].id);
+            } else {
+                this.storeData.activeGroupId = null;
+                this.storeData.watchFolders = [];
+                this.storeData.items = [];
+                this.renderGroups();
+                this.emit('switchGroup', { folders: [], items: [] });
+            }
+        } else {
+            this.renderGroups();
+        }
+
+        this._saveStore();
+    }
+
+    _activateGroup(groupId) {
+        const oldGroup = this.getActiveGroup();
+
+        if (oldGroup && oldGroup.id !== groupId) {
+            // 保存旧组的数据
+            oldGroup.savedItems = [...(this.storeData.items || [])];
+            oldGroup.savedViewport = this.storeData.viewport ? { ...this.storeData.viewport } : null;
+
+            // 取消监听旧组文件夹
+            oldGroup.folders.forEach(folder => {
+                if (window.flowCanvas && window.flowCanvas.folder) {
+                    window.flowCanvas.folder.unwatch(folder);
+                }
+            });
+        }
+
+        // 切换 ID
+        this.storeData.activeGroupId = groupId;
+        const newGroup = this.getActiveGroup();
+        if (!newGroup) return;
+
+        if (oldGroup && oldGroup.id !== groupId) {
+            this.storeData.items = newGroup.savedItems || [];
+            this.storeData.watchFolders = [...newGroup.folders];
+            if (newGroup.savedViewport) {
+                this.storeData.viewport = { ...newGroup.savedViewport };
+            }
+
+            // 监听新组文件夹
+            newGroup.folders.forEach(folder => {
+                if (window.flowCanvas && window.flowCanvas.folder) {
+                    window.flowCanvas.folder.scan(folder);
+                }
+            });
+
+            this.emit('switchGroup', {
+                folders: newGroup.folders,
+                items: this.storeData.items,
+                viewport: this.storeData.viewport
+            });
+        }
+
+        if (newGroup.folders.length > 0) {
             document.body.classList.add('has-folders');
         } else {
             document.body.classList.remove('has-folders');
         }
 
-        if (folders.length === 0) {
-            this.dom.folderList.innerHTML = '<div class="empty-hint">点击 + 添加文件夹<br>文件将自动上墙</div>';
+        this.renderGroups();
+        this._saveStore();
+    }
+
+    _startRenameGroup(groupId, nameEl) {
+        const group = this.storeData.folderGroups.find(g => g.id === groupId);
+        if (!group) return;
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'group-rename-input';
+        input.value = group.name;
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+
+        const finish = () => {
+            const newName = input.value.trim() || group.name;
+            group.name = newName;
+            this.renderGroups();
+            this._saveStore();
+        };
+
+        input.addEventListener('blur', finish);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+            if (e.key === 'Escape') { input.value = group.name; input.blur(); }
+        });
+    }
+
+    _syncWatchFolders() {
+        const activeGroup = this.getActiveGroup();
+        this.storeData.watchFolders = activeGroup ? [...activeGroup.folders] : [];
+    }
+
+    _saveStore() {
+        if (window.flowCanvas && window.flowCanvas.store) {
+            window.flowCanvas.store.save(this.storeData);
+        }
+    }
+
+    // ── 渲染与动画 ──
+
+    renderGroups() {
+        const groups = this.storeData.folderGroups || [];
+        const activeId = this.storeData.activeGroupId;
+
+        if (groups.length === 0) {
+            this.dom.folderGroupList.innerHTML = '<div class="empty-hint" style="margin-top:20px;">点击右上角 + 新建文件夹组<br>每组独立管理文件</div>';
+            document.body.classList.remove('has-folders');
             return;
         }
 
-        const defaultFolder = this.storeData.defaultSaveFolder || folders[0];
-        this.dom.folderList.innerHTML = folders.map(folder => {
-            const isDefault = folder === defaultFolder;
+        this.dom.folderGroupList.innerHTML = groups.map(group => {
+            const isActive = group.id === activeId;
+            const folders = group.folders || [];
+            const defaultFolder = this.storeData.defaultSaveFolder || folders[0];
+
+            // 构建当前组内的文件夹 HTML
+            let folderHtml = '';
+            if (folders.length === 0) {
+                folderHtml = '<div class="empty-hint" style="text-align:left; padding-left:12px;">空空如也，点击下方添加</div>';
+            } else {
+                folderHtml = folders.map(folder => {
+                    const isDefault = folder === defaultFolder;
+                    return `
+                    <div class="folder-item ${isDefault ? 'is-default' : ''}" title="${folder}">
+                        <span class="folder-path">${folder} ${isDefault ? '<span style="font-size:10px;color:#aaa;">(默认)</span>' : ''}</span>
+                        <button class="folder-remove" data-path="${folder}" title="取消关联">×</button>
+                    </div>`;
+                }).join('');
+            }
+
             return `
-      <div class="folder-item ${isDefault ? 'is-default' : ''}" title="${folder}">
-        <span class="folder-path">${folder} ${isDefault ? '<span style="font-size:10px;color:#aaa;">(默认下载位置)</span>' : ''}</span>
-        <button class="folder-remove" data-path="${folder}" title="取消关联">×</button>
-      </div>`;
+            <div class="folder-group-item ${isActive ? 'active' : ''}" data-group-id="${group.id}">
+                <div class="group-header" title="左键选中激活，双击重命名">
+                    <svg class="group-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <span class="group-name">${group.name}</span>
+                    <span class="group-folder-count">${folders.length}</span>
+                    <button class="group-remove" title="删除组">×</button>
+                </div>
+
+                <!-- 隐藏的文件夹列表容器（GSAP 操控高度） -->
+                <div class="folder-accordion-content">
+                    <div class="folder-accordion-inner">
+                        <div class="folder-list">
+                            ${folderHtml}
+                        </div>
+                        <button class="sidebar-action-btn add-folder-btn" style="margin-top: 8px;">+ 添加文件夹</button>
+                    </div>
+                </div>
+            </div>`;
         }).join('');
+
+        this._bindGSAPHover();
+    }
+
+    _bindGSAPHover() {
+        const groupItems = this.dom.folderGroupList.querySelectorAll('.folder-group-item');
+
+        groupItems.forEach(item => {
+            const accordionContent = item.querySelector('.folder-accordion-content');
+
+            item.addEventListener('mouseenter', () => {
+                gsap.to(accordionContent, {
+                    height: 'auto',
+                    duration: 0.35,
+                    ease: 'power2.out',
+                    overwrite: 'auto'
+                });
+            });
+
+            item.addEventListener('mouseleave', () => {
+                gsap.to(accordionContent, {
+                    height: 0,
+                    duration: 0.3,
+                    ease: 'power2.inOut',
+                    overwrite: 'auto'
+                });
+            });
+        });
+    }
+
+    // ── 通用手风琴（过滤器、画布、窗口）的 GSAP 悬停动画 ──
+    _initAccordions() {
+        const sections = document.querySelectorAll('[data-accordion]');
+        sections.forEach(section => {
+            const body = section.querySelector('.accordion-body');
+            if (!body) return;
+
+            section.addEventListener('mouseenter', () => {
+                gsap.to(body, {
+                    height: 'auto',
+                    duration: 0.35,
+                    ease: 'power2.out',
+                    overwrite: 'auto'
+                });
+            });
+
+            section.addEventListener('mouseleave', () => {
+                gsap.to(body, {
+                    height: 0,
+                    duration: 0.3,
+                    ease: 'power2.inOut',
+                    overwrite: 'auto'
+                });
+            });
+        });
     }
 
     updateStats(count) {

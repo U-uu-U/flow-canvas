@@ -756,6 +756,29 @@ export class CanvasManager {
         });
     }
 
+    // ── 清空画布上所有卡片（用于切换文件夹组） ──
+    clearAll() {
+        console.log('[Canvas] clearAll: 清除', this.items.size, '个卡片');
+        this.items.forEach(item => {
+            if (item.group) item.group.destroy();
+            if (item.gifDomElement) item.gifDomElement.remove();
+        });
+        this.items.clear();
+        this.selectedItems.clear();
+        this.layer.batchDraw();
+    }
+
+    // ── 设置视口位置和缩放 ──
+    setViewport(viewport) {
+        if (viewport) {
+            this.stage.position({ x: viewport.x || 0, y: viewport.y || 0 });
+            this.stage.scale({ x: viewport.scale || 1, y: viewport.scale || 1 });
+            this.stage.batchDraw();
+            this.syncGifs();
+            this.syncBackground();
+        }
+    }
+
     renderInitialItems() {
         const items = this.storeData.items || [];
         console.log('[Canvas] renderInitialItems: storeData.items 数量 =', items.length);

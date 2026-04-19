@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>GSAP Hover Accordion Demo</title>
+    <style>
+        body {
+            background-color: #0f0f14;
+            color: #e0e0e0;
+            font-family: -apple-system, sans-serif;
+            margin: 0;
+            padding: 50px;
+        }
+
+        h2 {
+            font-size: 18px;
+            margin-bottom: 20px;
+            color: #8a8f98;
+        }
+
+        .sidebar {
+            width: 260px;
+            background: #1a1a24;
+            border: 1px solid #2a2a36;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        .group-item {
+            margin-bottom: 4px;
+            border-radius: 6px;
+            background: transparent;
+            transition: background 0.2s;
+        }
+
+        .group-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .group-header {
+            padding: 12px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: color 0.2s;
+        }
+
+        .group-header:hover {
+            color: #3a7bd5;
+        }
+
+        .group-icon {
+            font-size: 12px;
+            color: #666;
+            transition: transform 0.3s;
+        }
+
+        /* 核心：初始高度为 0 并隐藏溢出 */
+        .folder-list {
+            height: 0;
+            overflow: hidden;
+        }
+
+        .folder-list-content {
+            padding: 0 16px 12px 16px;
+            /* 让内部有一定的 padding 撑开空间 */
+        }
+
+        .folder {
+            padding: 6px 0;
+            font-size: 13px;
+            color: #8a8f98;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            cursor: pointer;
+            transition: color 0.2s, background 0.2s;
+            border-radius: 4px;
+            padding-left: 8px;
+        }
+
+        .folder:hover {
+            color: #fff;
+            background: rgba(58, 123, 213, 0.2);
+        }
+    </style>
+    <!-- 直接引入 GSAP CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+
+<body>
+
+    <h2>将鼠标悬停在下方文件夹组上：</h2>
+
+    <div class="sidebar">
+
+        <!-- 组 1 -->
+        <div class="group-item">
+            <div class="group-header">文件夹组 A <span class="group-icon">▼</span></div>
+            <div class="folder-list">
+                <div class="folder-list-content">
+                    <div class="folder">📄 /项目文件/原图</div>
+                    <div class="folder">📄 /项目文件/渲染图</div>
+                    <div class="folder">📄 /项目文件/参考图</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 组 2 -->
+        <div class="group-item">
+            <div class="group-header">文件夹组 B <span class="group-icon">▼</span></div>
+            <div class="folder-list">
+                <div class="folder-list-content">
+                    <div class="folder">📄 /测试数据/第一批</div>
+                    <div class="folder">📄 /测试数据/第二批</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 组 3 -->
+        <div class="group-item">
+            <div class="group-header">文件夹组 C <span class="group-icon">▼</span></div>
+            <div class="folder-list">
+                <div class="folder-list-content">
+                    <div class="folder">📄 /临时文件夹</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const groups = document.querySelectorAll('.group-item');
+
+        groups.forEach(group => {
+            const list = group.querySelector('.folder-list');
+            const icon = group.querySelector('.group-icon');
+
+            // 鼠标移入：平滑展开
+            group.addEventListener('mouseenter', () => {
+                gsap.to(list, {
+                    height: 'auto',       // 自动计算展开后的真实高度
+                    duration: 0.35,       // 动画持续时间（秒）
+                    ease: 'power2.out'    // 缓动曲线（开头快，结尾慢）
+                });
+
+                // 顺便让小箭头旋转一下
+                gsap.to(icon, {
+                    rotation: 180,
+                    duration: 0.3
+                });
+            });
+
+            // 鼠标移出：平滑闭合
+            group.addEventListener('mouseleave', () => {
+                gsap.to(list, {
+                    height: 0,            // 高度挤压回 0
+                    duration: 0.3,
+                    ease: 'power2.inOut'  // 另一种缓动曲线
+                });
+
+                gsap.to(icon, {
+                    rotation: 0,
+                    duration: 0.3
+                });
+            });
+        });
+    </script>
+</body>
+
+</html>

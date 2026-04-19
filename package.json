@@ -6,11 +6,12 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5180 && electron .\"",
         "electron:build": "vite build && electron-builder"
     },
     "dependencies": {
         "chokidar": "^3.6.0",
+        "gsap": "^3.15.0",
         "konva": "^9.3.6",
         "sharp": "^0.33.2"
     },

@@ -42,6 +42,49 @@ async function bootstrap() {
             canvasManager.exportAsMd();
         });
 
+        // ── 文件夹组切换 ──
+        sidebarManager.on('switchGroup', async (data) => {
+            console.log('[Main] 切换文件夹组, folders:', data.folders.length, ', items:', data.items.length);
+
+            // 1. 清空当前画布
+            canvasManager.clearAll();
+
+            // 2. 恢复视口位置
+            if (data.viewport) {
+                canvasManager.setViewport(data.viewport);
+            }
+
+            // 3. 重新加载该组保存的 items
+            if (data.items && data.items.length > 0) {
+                storeData.items = data.items;
+                canvasManager.storeData = storeData;
+                canvasManager.renderInitialItems();
+            }
+
+            // 4. 如果组有文件夹但没有已保存的 items，扫描文件夹
+            if (data.items.length === 0 && data.folders.length > 0) {
+                for (const folder of data.folders) {
+                    const files = await window.flowCanvas.folder.scan(folder);
+                    if (files && files.length > 0) {
+                        const newItems = [];
+                        files.forEach(filePath => {
+                            const item = canvasManager.addFile(filePath);
+                            if (item) {
+                                storeData.items.push(item);
+                                newItems.push(item);
+                            }
+                        });
+                        if (newItems.length > 0 && newItems.length === storeData.items.length) {
+                            canvasManager.packLayout();
+                        }
+                    }
+                }
+            }
+
+            syncStats();
+            saveStoreThrottled();
+        });
+
         // 统一更新文件计数的辅助函数
         function syncStats() {
             const count = canvasManager.items.size;
@@ -63,7 +106,6 @@ async function bootstrap() {
             syncStats();
 
             // 只在首次（白板上没有已有内容）或全部都是新item时才自动排列
-            // 否则不动已有文件的位置，避免覆盖手动布局
             if (newItems.length > 0 && newItems.length === storeData.items.length) {
                 canvasManager.packLayout();
             }
@@ -127,7 +169,6 @@ async function bootstrap() {
         // 监听主进程拦截到的拖拽图片（will-navigate 拦截方式）
         window.flowCanvas.onExternalImageDropped((filePath) => {
             console.log('[Main] 收到主进程拖拽图片:', filePath);
-            // 使用 _addCapturedFile（无 dropEvent 参数时自动放在视口中心）
             canvasManager._addCapturedFile(filePath);
         });
 
@@ -146,13 +187,24 @@ function saveStoreThrottled() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
         storeData.viewport = canvasManager.getViewport();
+
+        // 同步当前 items 到激活的组
+        const activeGroup = sidebarManager?.getActiveGroup();
+        if (activeGroup) {
+            activeGroup.savedItems = [...storeData.items];
+            activeGroup.savedViewport = { ...storeData.viewport };
+        }
+
         window.flowCanvas.store.save(storeData);
         updateBodyState();
     }, 1000);
 }
 
 function updateBodyState() {
-    if (storeData && storeData.watchFolders && storeData.watchFolders.length > 0) {
+    const activeWatchFolders = sidebarManager ? sidebarManager.getActiveWatchFolders() : [];
+    if (activeWatchFolders.length > 0) {
+        document.body.classList.add('has-folders');
+    } else if (storeData && storeData.watchFolders && storeData.watchFolders.length > 0) {
         document.body.classList.add('has-folders');
     } else {
         document.body.classList.remove('has-folders');

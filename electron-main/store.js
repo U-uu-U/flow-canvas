@@ -12,6 +12,8 @@ const { app } = require('electron');
 const DEFAULT_DATA = {
     version: 1,
     watchFolders: [],
+    folderGroups: [],       // [{id, name, folders: [...paths], items: [...]}]
+    activeGroupId: null,    // 当前激活的文件夹组 ID
     items: [],
     viewport: { x: 0, y: 0, scale: 1 }
 };
