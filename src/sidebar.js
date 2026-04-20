@@ -130,6 +130,7 @@ export class SidebarManager {
         }
 
         // ── 文件夹组列表事件委托 ──
+        this._clickTimer = null; // 用于区分单击/双击
         if (this.dom.folderGroupList) {
             this.dom.folderGroupList.addEventListener('click', async (e) => {
                 // 点击删除组
@@ -162,18 +163,22 @@ export class SidebarManager {
                     // 只处理常规点击，避免干扰
                 }
 
-                // 选中或展开折叠组 (点击 header)
+                // 选中或展开折叠组 (点击 header)，延迟执行以避免与双击冲突
                 const groupHeader = e.target.closest('.group-header');
                 if (groupHeader) {
                     const groupItem = groupHeader.closest('.folder-group-item');
                     if (groupItem) {
-                        this._activateGroup(groupItem.dataset.groupId);
+                        if (this._clickTimer) clearTimeout(this._clickTimer);
+                        this._clickTimer = setTimeout(() => {
+                            this._activateGroup(groupItem.dataset.groupId);
+                        }, 250);
                     }
                 }
             });
 
-            // 右键文件夹设置默认路径
+            // 右键菜单（组头部 → 重命名/删除；文件夹 → 设为默认/取消关联）
             this.dom.folderGroupList.addEventListener('contextmenu', async (e) => {
+                // 右键文件夹
                 const folderItem = e.target.closest('.folder-item');
                 if (folderItem) {
                     e.preventDefault();
@@ -187,11 +192,23 @@ export class SidebarManager {
                         const groupItem = folderItem.closest('.folder-group-item');
                         if (groupItem) this._removeFolder(groupItem.dataset.groupId, path);
                     }
+                    return;
+                }
+
+                // 右键组头部 → 显示重命名/删除菜单
+                const groupHeader = e.target.closest('.group-header');
+                if (groupHeader) {
+                    e.preventDefault();
+                    const groupItem = groupHeader.closest('.folder-group-item');
+                    if (!groupItem) return;
+                    const groupId = groupItem.dataset.groupId;
+                    this._showGroupContextMenu(groupId, groupHeader);
                 }
             });
 
-            // 双击重命名
+            // 双击重命名（取消单击延迟的激活，直接进入重命名）
             this.dom.folderGroupList.addEventListener('dblclick', (e) => {
+                if (this._clickTimer) { clearTimeout(this._clickTimer); this._clickTimer = null; }
                 const nameEl = e.target.closest('.group-name');
                 if (!nameEl) return;
                 const groupItem = nameEl.closest('.folder-group-item');
@@ -418,6 +435,14 @@ export class SidebarManager {
         const group = this.storeData.folderGroups.find(g => g.id === groupId);
         if (!group) return;
 
+        // 如果传入的不是 DOM 元素（来自右键菜单），则手动查找
+        if (!nameEl || !nameEl.parentNode) {
+            const groupItem = this.dom.folderGroupList.querySelector(`[data-group-id="${groupId}"]`);
+            if (!groupItem) return;
+            nameEl = groupItem.querySelector('.group-name');
+            if (!nameEl) return;
+        }
+
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'group-rename-input';
@@ -426,7 +451,10 @@ export class SidebarManager {
         input.focus();
         input.select();
 
+        let finished = false;
         const finish = () => {
+            if (finished) return;
+            finished = true;
             const newName = input.value.trim() || group.name;
             group.name = newName;
             this.renderGroups();
@@ -438,6 +466,56 @@ export class SidebarManager {
             if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
             if (e.key === 'Escape') { input.value = group.name; input.blur(); }
         });
+        // 阻止事件冒泡到 group header，避免触发激活
+        input.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    // ── 组右键菜单（纯 DOM 方式，不依赖 Electron 原生菜单） ──
+    _showGroupContextMenu(groupId, anchorEl) {
+        // 移除已有菜单
+        document.querySelectorAll('.group-ctx-menu').forEach(m => m.remove());
+
+        const menu = document.createElement('div');
+        menu.className = 'group-ctx-menu';
+
+        const renameBtn = document.createElement('div');
+        renameBtn.className = 'group-ctx-item';
+        renameBtn.textContent = '✏️ 重命名';
+        renameBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            menu.remove();
+            this._startRenameGroup(groupId);
+        });
+
+        const deleteBtn = document.createElement('div');
+        deleteBtn.className = 'group-ctx-item group-ctx-danger';
+        deleteBtn.textContent = '🗑️ 删除组';
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            menu.remove();
+            this._removeGroup(groupId);
+        });
+
+        menu.appendChild(renameBtn);
+        menu.appendChild(deleteBtn);
+
+        // 定位到锚点元素附近
+        const rect = anchorEl.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left + 20}px`;
+        menu.style.top = `${rect.bottom + 4}px`;
+        menu.style.zIndex = '9999';
+
+        document.body.appendChild(menu);
+
+        // 点其他地方关闭
+        const closeMenu = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('mousedown', closeMenu);
+            }
+        };
+        setTimeout(() => document.addEventListener('mousedown', closeMenu), 0);
     }
 
     _syncWatchFolders() {

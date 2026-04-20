@@ -67,7 +67,12 @@ function createWindow() {
 
     if (isDev) {
         mainWindow.loadURL('http://localhost:5180');
-        mainWindow.webContents.openDevTools({ mode: 'detach' });
+        // DevTools 按需打开（F12），不再自动常驻，节省 ~47MB
+        mainWindow.webContents.on('before-input-event', (e, input) => {
+            if (input.key === 'F12' && input.type === 'keyDown') {
+                mainWindow.webContents.toggleDevTools();
+            }
+        });
     } else {
         mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
     }

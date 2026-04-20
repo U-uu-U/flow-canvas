@@ -42,10 +42,10 @@ class Watcher {
             ignored: /(^|[\/\\])\../, // 忽略隐藏文件
             persistent: true,
             ignoreInitial: true,
-            depth: 5,
+            depth: 2,                    // 减少监听深度，降低句柄占用
             awaitWriteFinish: {
-                stabilityThreshold: 1000,
-                pollInterval: 200
+                stabilityThreshold: 2000, // 大文件写入等待更久
+                pollInterval: 500         // 降低轮询频率
             }
         });
 

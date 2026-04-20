@@ -384,6 +384,48 @@ body.sidebar-closed .sidebar::after {
     width: 100%;
     outline: none;
     font-family: inherit;
+    flex: 1;
+}
+
+/* ── 文件夹组右键菜单 ── */
+.group-ctx-menu {
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 140px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    animation: ctxFadeIn 0.15s ease;
+}
+
+@keyframes ctxFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.group-ctx-item {
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background 0.15s;
+    white-space: nowrap;
+}
+
+.group-ctx-item:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+.group-ctx-danger:hover {
+    background: #e53e3e;
 }
 
 /* ── 手风琴内部隐藏区域 ── */

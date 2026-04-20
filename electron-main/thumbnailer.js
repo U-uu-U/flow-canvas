@@ -1,5 +1,5 @@
 // ============================================================
-// Flow Canvas — Thumbnailer Service (fs + nativeImage)
+// Flow Canvas — Thumbnailer Service (fs + nativeImage + LRU Cache)
 // ============================================================
 
 const { nativeImage } = require('electron');
@@ -11,15 +11,17 @@ const IMAGE_EXT = new Set([
 ]);
 
 class Thumbnailer {
-    constructor() { }
+    constructor() {
+        this._cache = new Map();   // filePath → { mtime, dataUrl }
+        this._maxCache = 200;
+    }
 
     isImageFile(filePath) {
         return IMAGE_EXT.has(path.extname(filePath).toLowerCase());
     }
 
     /**
-     * 获取缩略图 data URL
-     * 最可靠的方式：直接读取文件 → nativeImage → resize → toDataURL
+     * 获取缩略图 data URL（带 LRU 缓存）
      */
     async getThumbnail(filePath) {
         try {
@@ -30,6 +32,13 @@ class Thumbnailer {
             if (!fs.existsSync(filePath)) {
                 console.log('[Thumbnailer] 文件不存在:', filePath);
                 return null;
+            }
+
+            // 缓存命中检查（基于文件修改时间）
+            const stat = fs.statSync(filePath);
+            const cached = this._cache.get(filePath);
+            if (cached && cached.mtime === stat.mtimeMs) {
+                return cached.dataUrl;
             }
 
             // 直接读取文件 buffer → nativeImage
@@ -44,15 +53,21 @@ class Thumbnailer {
             // 缩小到合理大小
             const size = img.getSize();
             const maxDim = 300;
+            let dataUrl;
             if (size.width > maxDim || size.height > maxDim) {
                 const resized = img.resize({ width: maxDim });
-                const dataUrl = resized.toDataURL();
-                console.log('[Thumbnailer] 成功 (resized):', filePath);
-                return dataUrl;
+                dataUrl = resized.toDataURL();
+            } else {
+                dataUrl = img.toDataURL();
             }
 
-            const dataUrl = img.toDataURL();
-            console.log('[Thumbnailer] 成功:', filePath);
+            // 写入缓存（简易 LRU：超限删最早的）
+            if (this._cache.size >= this._maxCache) {
+                const oldestKey = this._cache.keys().next().value;
+                this._cache.delete(oldestKey);
+            }
+            this._cache.set(filePath, { mtime: stat.mtimeMs, dataUrl });
+
             return dataUrl;
         } catch (err) {
             console.error('[Thumbnailer] 失败:', filePath, err.message);

@@ -762,6 +762,14 @@ export class CanvasManager {
         this.items.forEach(item => {
             if (item.group) item.group.destroy();
             if (item.gifDomElement) item.gifDomElement.remove();
+            // 释放视频资源
+            if (item.videoAnimation) item.videoAnimation.stop();
+            if (item.videoElement) {
+                item.videoElement.pause();
+                item.videoElement.removeAttribute('src');
+                item.videoElement.load();
+                item.videoElement.remove();
+            }
         });
         this.items.clear();
         this.selectedItems.clear();
@@ -883,7 +891,7 @@ export class CanvasManager {
 
         try {
             // 加时间戳防止浏览器缓存住失败的响应
-            const imgUrl = 'local-res://' + encodeURIComponent(filePath) + '?t=' + Date.now();
+            const imgUrl = 'local-res://' + encodeURIComponent(filePath);
 
             const imgObj = new window.Image();
             imgObj.onload = () => {
@@ -1047,11 +1055,13 @@ export class CanvasManager {
                 e.evt.stopPropagation();
                 if (video.paused) {
                     video.play().then(() => {
+                        anim.start();
                         playPauseBtnText.text('⏸');
                         group.getLayer()?.batchDraw();
                     }).catch(() => { });
                 } else {
                     video.pause();
+                    anim.stop();
                     playPauseBtnText.text('▶');
                     group.getLayer()?.batchDraw();
                 }
@@ -1073,7 +1083,14 @@ export class CanvasManager {
                     progressFg.width((video.currentTime / video.duration) * (w - 45));
                 }
             }, group.getLayer());
-            anim.start();
+            // 不立即启动，视频播放时才 start
+
+            // 存储引用到 item entry，方便 clearAll/removeItemById 释放
+            const itemEntry = this.items.get(data.id);
+            if (itemEntry) {
+                itemEntry.videoElement = video;
+                itemEntry.videoAnimation = anim;
+            }
 
             // 显示隐藏控制器
             group.on('mouseenter', () => {
@@ -1133,6 +1150,14 @@ export class CanvasManager {
         if (item) {
             this.selectedItems.delete(id);
             if (item.gifDomElement) item.gifDomElement.remove();
+            // 释放视频资源
+            if (item.videoAnimation) item.videoAnimation.stop();
+            if (item.videoElement) {
+                item.videoElement.pause();
+                item.videoElement.removeAttribute('src');
+                item.videoElement.load();
+                item.videoElement.remove();
+            }
             item.group.destroy();
             this.items.delete(id);
         }
