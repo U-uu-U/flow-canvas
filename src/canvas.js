@@ -61,6 +61,11 @@ export class CanvasManager {
         this._bgCachedSvg = '';     // 缓存的 SVG data URI
         this._bgCachedSize = 0;     // 缓存的 screenSize
 
+        // ── 视口裁剪 (Viewport Culling) + LOD ──
+        this._cullPending = false;
+        this._cullTimer = null;     // 节流定时器
+        this._CULL_THROTTLE_MS = 150; // culling 检查最小间隔
+
         this.stage.on('xChange yChange scaleXChange scaleYChange', () => {
             if (!this._rafPending) {
                 this._rafPending = true;
@@ -68,6 +73,7 @@ export class CanvasManager {
                     this._rafPending = false;
                     this.syncGifs();
                     this.syncBackground();
+                    this._scheduleCullCheck();
                 });
             }
         });
@@ -717,6 +723,7 @@ export class CanvasManager {
         };
 
         this._createCard(data);
+        this._scheduleCullCheck(); // 触发视口裁剪，立即加载新卡片
         this.emit('capturedFile', data); // 通知 main.js 保存到 store
     }
 
@@ -792,6 +799,8 @@ export class CanvasManager {
         console.log('[Canvas] renderInitialItems: storeData.items 数量 =', items.length);
         items.forEach(item => this._createCard(item));
         console.log('[Canvas] renderInitialItems 完成: this.items.size =', this.items.size);
+        // 首次渲染后立即执行视口裁剪，加载可见内容
+        requestAnimationFrame(() => this._cullCheck());
     }
 
     _getFileType(filePath) {
@@ -870,18 +879,209 @@ export class CanvasManager {
         group.on('dblclick', () => window.flowCanvas.shell.openFile(data.filePath));
 
         this.layer.add(group);
-        this.items.set(data.id, { group, data });
-
-        const ext = data.filePath.split('.').pop().toLowerCase();
-        const isGif = ext === 'gif';
-
-        if (fileType === 'image' || isGif) {
-            this._loadThumbnail(group, data);
-        } else if (fileType === 'video') {
-            this._loadVideo(group, data);
-        }
+        // 标记为未加载，由 _cullCheck() 视口裁剪延迟加载
+        this.items.set(data.id, { group, data, loaded: false, isThumbnail: false });
 
         return group;
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // ── 视口裁剪 (Viewport Culling) + LOD 缩略图 ──────────
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * 获取当前视口在画布坐标系下的矩形（含缓冲区）
+     */
+    _getViewportRect() {
+        const scale = this.stage.scaleX();
+        const pos = this.stage.position();
+        const container = this.stage.container();
+        const MARGIN = 300; // 视口外 300px 缓冲区，避免快速滚动时闪烁
+        return {
+            x: (-pos.x - MARGIN) / scale,
+            y: (-pos.y - MARGIN) / scale,
+            width: (container.offsetWidth + MARGIN * 2) / scale,
+            height: (container.offsetHeight + MARGIN * 2) / scale,
+        };
+    }
+
+    /**
+     * 判断节点是否在视口内
+     */
+    _isInViewport(item, vp) {
+        const gx = item.group.x();
+        const gy = item.group.y();
+        const w = item.data.width || DOC_DEFAULT_SIZE;
+        const h = item.data.height || DOC_DEFAULT_SIZE;
+        return !(gx + w < vp.x || gx > vp.x + vp.width ||
+            gy + h < vp.y || gy > vp.y + vp.height);
+    }
+
+    /**
+     * 节流调度 _cullCheck（避免平移时高频触发）
+     */
+    _scheduleCullCheck() {
+        if (this._cullPending) return;
+        this._cullPending = true;
+        clearTimeout(this._cullTimer);
+        this._cullTimer = setTimeout(() => {
+            this._cullPending = false;
+            this._cullCheck();
+        }, this._CULL_THROTTLE_MS);
+    }
+
+    /**
+     * 视口裁剪核心循环 — 加载可见、卸载不可见、切换 LOD
+     */
+    _cullCheck() {
+        const vp = this._getViewportRect();
+        const scale = this.stage.scaleX();
+        const LOD_THRESHOLD = 0.25; // 缩放 < 25% 时使用缩略图
+        const useThumbnail = scale < LOD_THRESHOLD;
+
+        this.items.forEach(item => {
+            // 被隐藏的节点（筛选器隐藏）跳过
+            if (!item.group.isVisible()) return;
+
+            const inView = this._isInViewport(item, vp);
+
+            if (inView && !item.loaded) {
+                // 进入视口 → 加载
+                this._loadContent(item, useThumbnail);
+            } else if (!inView && item.loaded) {
+                // 离开视口 → 卸载释放纹理内存
+                this._unloadContent(item);
+            } else if (inView && item.loaded && item.isThumbnail !== useThumbnail) {
+                // 在视口内但 LOD 级别变了 → 重新加载
+                this._unloadContent(item);
+                this._loadContent(item, useThumbnail);
+            }
+        });
+    }
+
+    /**
+     * 按需加载节点内容（完整图或缩略图）
+     */
+    _loadContent(item, useThumbnail) {
+        const fileType = this._getFileType(item.data.filePath);
+        const isGif = item.data.filePath.toLowerCase().endsWith('.gif');
+
+        if (fileType === 'image' || isGif) {
+            if (useThumbnail) {
+                this._loadLowRes(item);
+            } else {
+                this._loadThumbnail(item.group, item.data);
+            }
+        } else if (fileType === 'video') {
+            if (!useThumbnail) {
+                this._loadVideo(item.group, item.data);
+            }
+            // LOD 模式下视频只显示占位框，不创建 <video> 元素
+        }
+        item.loaded = true;
+        item.isThumbnail = useThumbnail;
+    }
+
+    /**
+     * 卸载节点内容 — 释放图片纹理和视频资源
+     */
+    _unloadContent(item) {
+        // 销毁 Konva 显示节点
+        const displayNode = item.group.findOne('.displayNode');
+        if (displayNode) {
+            displayNode.image(null); // 断开 Image 引用
+            displayNode.destroy();
+        }
+
+        // 销毁视频控制组（进度条等）
+        const children = item.group.getChildren();
+        children.forEach(child => {
+            if (child.getClassName() === 'Group' && child.name() !== 'fallbackIcon') {
+                child.destroy();
+            }
+        });
+
+        // 释放视频资源
+        if (item.videoElement) {
+            item.videoElement.pause();
+            item.videoElement.removeAttribute('src');
+            item.videoElement.load();
+            item.videoElement.remove();
+            item.videoElement = null;
+        }
+        if (item.videoAnimation) {
+            item.videoAnimation.stop();
+            item.videoAnimation = null;
+        }
+
+        // 隐藏 GIF DOM 叠加层
+        if (item.gifDomElement) {
+            item.gifDomElement.style.display = 'none';
+        }
+
+        // 恢复占位框（保留尺寸信息）
+        if (!item.group.findOne('.fallbackBg')) {
+            const fileType = this._getFileType(item.data.filePath);
+            const fb = new Konva.Group({ name: 'fallbackIcon' });
+            const w = item.data.width || DOC_DEFAULT_SIZE;
+            const h = item.data.height || DOC_DEFAULT_SIZE;
+            fb.add(new Konva.Rect({
+                name: 'fallbackBg',
+                width: w, height: h,
+                fill: '#242430', cornerRadius: 8
+            }));
+            fb.add(new Konva.Text({
+                width: w, height: h,
+                text: fileType === 'image' ? '🖼️' : (fileType === 'video' ? '🎬' : '📄'),
+                fontSize: 48, fill: '#555', align: 'center', verticalAlign: 'middle'
+            }));
+            item.group.add(fb);
+        }
+
+        item.loaded = false;
+        item.isThumbnail = false;
+        item.group.getLayer()?.batchDraw();
+    }
+
+    /**
+     * 加载低分辨率缩略图（LOD 模式）— 通过 IPC 获取 thumbnail dataURL
+     */
+    async _loadLowRes(item) {
+        try {
+            const dataUrl = await window.flowCanvas.thumb.get(item.data.filePath);
+            if (!dataUrl || !item.group.getLayer()) return;
+            // 如果在等待期间已经被卸载了（用户快速滚动），跳过
+            if (!item.loaded) return;
+
+            const img = new window.Image();
+            img.onload = () => {
+                if (!item.group.getLayer() || !item.loaded) return;
+
+                const aspect = img.width / img.height;
+                const targetW = item.data.width || IMAGE_DEFAULT_WIDTH;
+                const targetH = item.data.height || (targetW / aspect);
+
+                const fallback = item.group.findOne('.fallbackIcon');
+                if (fallback) fallback.destroy();
+
+                const node = new Konva.Image({
+                    name: 'displayNode',
+                    image: img,
+                    width: targetW,
+                    height: targetH
+                });
+                item.group.add(node);
+                node.moveToBottom();
+
+                if (this.selectedItems.has(item.data.id)) {
+                    this._updateSelectionVisuals();
+                }
+                item.group.getLayer()?.batchDraw();
+            };
+            img.src = dataUrl;
+        } catch (err) {
+            console.warn('[Canvas] _loadLowRes 失败:', item.data.filePath, err);
+        }
     }
 
     async _loadThumbnail(group, data, retryCount = 0) {
@@ -890,7 +1090,6 @@ export class CanvasManager {
         const filePath = data.filePath;
 
         try {
-            // 加时间戳防止浏览器缓存住失败的响应
             const imgUrl = 'local-res://' + encodeURIComponent(filePath);
 
             const imgObj = new window.Image();
@@ -1133,6 +1332,7 @@ export class CanvasManager {
         };
 
         this._createCard(data);
+        this._scheduleCullCheck(); // 触发视口裁剪，立即加载新卡片
         return data;
     }
 

@@ -52,7 +52,7 @@ class Thumbnailer {
 
             // 缩小到合理大小
             const size = img.getSize();
-            const maxDim = 300;
+            const maxDim = 200; // LOD 模式下使用更小的缩略图
             let dataUrl;
             if (size.width > maxDim || size.height > maxDim) {
                 const resized = img.resize({ width: maxDim });
