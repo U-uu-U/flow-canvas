@@ -12,7 +12,7 @@
     <!-- 标题栏（可拖拽区域） -->
     <div class="titlebar" id="titlebar">
         <div class="titlebar-drag">
-            <span class="titlebar-logo">◆</span>
+            <span class="titlebar-logo" aria-hidden="true"></span>
             <span class="titlebar-title">Flow Canvas</span>
         </div>
         <div class="titlebar-status" id="titlebarStatus"></div>
@@ -29,6 +29,24 @@
                     </svg>
                 </button>
                 <div class="sidebar-content">
+                    <div class="resource-saver-panel">
+                        <button class="resource-saver-toggle" id="resourceSaverBtn" type="button" role="switch"
+                            aria-checked="false" title="资源节省模式：常驻缩略图，悬停后临时加载原图">
+                            <span class="resource-saver-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M12 3v18"></path>
+                                    <path d="M5 8h14"></path>
+                                    <path d="M7 16h10"></path>
+                                </svg>
+                            </span>
+                            <span class="resource-saver-copy">
+                                <span class="resource-saver-title">资源节省</span>
+                                <span class="resource-saver-state" id="resourceSaverState">关闭</span>
+                            </span>
+                            <span class="resource-saver-switch" aria-hidden="true"></span>
+                        </button>
+                    </div>
                     <!-- 文件夹组 -->
                     <div class="sidebar-section folder-groups-section">
                         <div class="sidebar-header">
@@ -90,6 +108,7 @@
                                     <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
                                     <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
                                     <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
+                                    <button class="sidebar-action-btn" id="newPlanBtn">新建规划表</button>
                                     <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成
                                         .md 引用</button>
                                 </div>
@@ -137,29 +156,60 @@
         <main class="canvas-area">
             <div class="canvas-grid-overlay" id="canvasGrid"></div>
             <div id="canvasContainer"></div>
+            <div class="board-usage" id="boardUsage" title="仅统计当前 Flow Canvas 白板窗口">
+                <span class="board-usage-label">白板</span>
+                <span class="board-usage-memory" id="boardUsageMemory">-- MB</span>
+                <span class="board-usage-detail" id="boardUsageDetail">0/0</span>
+            </div>
             <!-- 画布空状态 -->
             <div class="canvas-empty" id="canvasEmpty">
-                <div class="canvas-empty-icon">◆</div>
+                <div class="canvas-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 48 48" width="34" height="34" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <rect x="9" y="13" width="30" height="23" rx="4"></rect>
+                        <path d="M9 19h30"></path>
+                        <path d="M17 13l3-5h8l3 5"></path>
+                        <path d="M19 27h10"></path>
+                    </svg>
+                </div>
                 <div class="canvas-empty-title">Flow Canvas</div>
                 <div class="canvas-empty-desc">关联一个本地文件夹开始使用</div>
-                <button class="canvas-empty-btn" id="emptyAddBtn">+ 添加文件夹</button>
+                <button class="canvas-empty-btn" id="emptyAddBtn">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                        stroke-width="2">
+                        <path d="M12 5v14"></path>
+                        <path d="M5 12h14"></path>
+                    </svg>
+                    添加文件夹
+                </button>
             </div>
         </main>
 
         <!-- 右侧 Agent 边栏 -->
         <div class="agent-sidebar-wrapper" id="agentSidebarWrapper">
             <aside class="agent-sidebar" id="agentSidebar">
+                <div class="agent-edge-controls" aria-label="创造模式控制">
+                    <button class="agent-edge-btn agent-collapse-btn" id="agentCollapseBtn" title="收起边栏"
+                        aria-label="收起边栏">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M5 5v14"></path>
+                            <polyline points="13 17 18 12 13 7"></polyline>
+                        </svg>
+                    </button>
+                    <button class="agent-edge-btn creation-mode-close-btn" id="creationModeCloseBtn"
+                        title="结束创造模式" aria-label="结束创造模式">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 3v8"></path>
+                            <path d="M6.7 6.7a7.5 7.5 0 1 0 10.6 0"></path>
+                        </svg>
+                    </button>
+                </div>
                 <!-- 头部 -->
                 <div class="agent-header">
                     <div class="agent-header-left">
-                        <button class="creation-mode-close-btn" id="creationModeCloseBtn" title="关闭创造模式">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <line x1="18" y1="6" x2="6" y2="18"></line>
-                                <line x1="6" y1="6" x2="18" y2="18"></line>
-                            </svg>
-                            <span class="creation-mode-title">创造模式</span>
-                        </button>
+                        <span class="creation-mode-title">创造模式</span>
                     </div>
                     <div class="agent-header-right">
                         <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
@@ -170,20 +220,33 @@
                                     d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                             </svg>
                         </button>
-                        <button class="agent-collapse-btn" id="agentCollapseBtn" title="收起边栏">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <polyline points="9 18 15 12 9 6"></polyline>
-                            </svg>
-                        </button>
                     </div>
                 </div>
 
                 <!-- 模型选择器（头部下方） -->
                 <div class="agent-model-bar">
-                    <select class="agent-model-select" id="agentModelSelect">
-                        <option value="">-- 请先添加 API --</option>
-                    </select>
+                    <div class="agent-model-pickers">
+                        <label class="agent-model-picker">
+                            <span class="agent-model-picker-label">对话</span>
+                            <select class="agent-model-select" id="agentModelSelect">
+                                <option value="">-- 请先添加 API --</option>
+                            </select>
+                        </label>
+                        <label class="agent-model-picker">
+                            <span class="agent-model-picker-label">生图</span>
+                            <select class="agent-model-select" id="agentImageModelSelect">
+                                <option value="">-- 请先添加 API --</option>
+                            </select>
+                        </label>
+                    </div>
+                    <button class="agent-plan-btn" id="agentPlanBtn" title="辅助规划">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                            <path d="M3 10h18"></path>
+                            <path d="M9 4v16"></path>
+                        </svg>
+                    </button>
                     <button class="agent-clear-btn" id="agentClearBtn" title="清空对话">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -238,6 +301,7 @@
                             <select class="agent-setting-input" id="agentFormType">
                                 <option value="openai">OpenAI 兼容</option>
                                 <option value="google">Google Gemini</option>
+                                <option value="anthropic">Anthropic Claude</option>
                             </select>
                         </div>
                         <div class="agent-setting-group">
@@ -251,7 +315,14 @@
                         </div>
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">模型</label>
-                            <input type="text" class="agent-setting-input" id="agentFormModel" placeholder="gpt-4o">
+                            <div class="agent-model-field">
+                                <input type="text" class="agent-setting-input" id="agentFormModel" placeholder="gpt-4o">
+                                <button type="button" class="agent-fetch-models-btn" id="agentFetchModelsBtn">拉取模型</button>
+                            </div>
+                            <select class="agent-setting-input agent-fetched-model-select" id="agentFetchedModelSelect" hidden>
+                                <option value="">选择拉取到的模型</option>
+                            </select>
+                            <div class="agent-model-fetch-status" id="agentModelFetchStatus" aria-live="polite"></div>
                         </div>
 
                         <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
@@ -260,6 +331,21 @@
                     <!-- 系统提示词（独立区域） -->
                     <div class="agent-setting-group" style="margin-top: 12px;">
                         <label class="agent-setting-label">系统提示词（全局）</label>
+                        <div class="agent-prompt-skill-panel">
+                            <div class="agent-prompt-skill-head">
+                                <span class="agent-prompt-skill-title">技能片段</span>
+                                <span class="agent-prompt-skill-status" id="agentPromptSkillStatus">未注入技能片段</span>
+                            </div>
+                            <div class="agent-prompt-skill-actions">
+                                <button type="button" class="agent-prompt-skill-btn" id="agentFetchSkillsBtn">拉取技能列表</button>
+                                <button type="button" class="agent-prompt-skill-btn subtle" id="agentRemoveSkillBtn" disabled>移除技能</button>
+                            </div>
+                            <select class="agent-setting-input agent-skill-select" id="agentSkillSelect" hidden>
+                                <option value="">选择拉取到的技能</option>
+                            </select>
+                            <div class="agent-skill-description" id="agentSkillDescription"></div>
+                            <button type="button" class="agent-prompt-skill-btn agent-use-skill-btn" id="agentUseSkillBtn" disabled>使用选中技能</button>
+                        </div>
                         <textarea class="agent-setting-input agent-setting-textarea" id="agentSystemPrompt"
                             placeholder="你是一个有用的 AI 助手..."></textarea>
                     </div>
@@ -268,7 +354,18 @@
                 <!-- 消息区域 -->
                 <div class="agent-messages" id="agentMessages">
                     <div class="agent-welcome">
-                        <div class="agent-welcome-icon">✦</div>
+                        <div class="agent-welcome-icon" aria-hidden="true">
+                            <svg viewBox="0 0 48 48" width="30" height="30" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <rect x="12" y="10" width="24" height="25" rx="6"></rect>
+                                <path d="M18 35l-4 6"></path>
+                                <path d="M30 35l4 6"></path>
+                                <path d="M19 21h.01"></path>
+                                <path d="M29 21h.01"></path>
+                                <path d="M19 28h10"></path>
+                                <path d="M24 10V5"></path>
+                            </svg>
+                        </div>
                         <div class="agent-welcome-text">你好！我是 AI 助手。<br>有什么可以帮你的？</div>
                     </div>
                 </div>
@@ -302,21 +399,49 @@
     <!-- 右键菜单 -->
     <div class="context-menu" id="contextMenu">
         <div class="context-menu-item" data-action="copy">
-            <span class="context-menu-icon">📋</span>
+            <span class="context-menu-icon icon-copy"></span>
             <span>复制到剪贴板</span>
             <span class="context-menu-shortcut">Ctrl+C</span>
         </div>
+        <div class="context-menu-item" data-action="copyFilePath">
+            <span class="context-menu-icon icon-path"></span>
+            <span>复制文件地址</span>
+        </div>
+        <div class="context-menu-item" data-action="copyAiReference">
+            <span class="context-menu-icon icon-reference"></span>
+            <span>复制 AI 引用地址</span>
+        </div>
         <div class="context-menu-item" data-action="showInExplorer">
-            <span class="context-menu-icon">📂</span>
+            <span class="context-menu-icon icon-folder"></span>
             <span>在资源管理器中显示</span>
         </div>
         <div class="context-menu-item" data-action="openFile">
-            <span class="context-menu-icon">🔗</span>
+            <span class="context-menu-icon icon-open"></span>
             <span>用默认程序打开</span>
         </div>
+        <div class="context-menu-item" data-action="repairMaterial">
+            <span class="context-menu-icon icon-repair"></span>
+            <span>自动修补断联素材</span>
+        </div>
+        <div class="context-menu-item" data-action="relinkMaterial">
+            <span class="context-menu-icon icon-link"></span>
+            <span>手动重接素材</span>
+        </div>
         <div class="context-menu-divider"></div>
+        <div class="context-menu-item" data-action="copyToFolder">
+            <span class="context-menu-icon icon-copy"></span>
+            <span>复制到文件夹</span>
+        </div>
+        <div class="context-menu-item" data-action="copyToExplorer">
+            <span class="context-menu-icon icon-folder"></span>
+            <span>复制到当前系统文件夹</span>
+        </div>
+        <div class="context-menu-item" data-action="moveToFolder">
+            <span class="context-menu-icon icon-move"></span>
+            <span>剪切到文件夹</span>
+        </div>
         <div class="context-menu-item" data-action="removeFromBoard">
-            <span class="context-menu-icon">🗑️</span>
+            <span class="context-menu-icon icon-trash"></span>
             <span>从白板移除</span>
             <span class="context-menu-shortcut">Del</span>
         </div>

@@ -8,6 +8,8 @@ export class SidebarManager {
     constructor(storeData) {
         this.storeData = storeData;
         this.listeners = {};
+        this.pendingMove = null;
+        this._watcherSyncRunId = 0;
 
         // 数据迁移：如果旧数据有 watchFolders 但没有 folderGroups，自动创建默认组
         if (!this.storeData.folderGroups) {
@@ -23,6 +25,11 @@ export class SidebarManager {
             this.storeData.activeGroupId = defaultGroup.id;
         }
 
+        this._migrateGroupDefaults();
+        const originalWatchFolders = JSON.stringify(this.storeData.watchFolders || []);
+        const originalActiveDefault = this.storeData.activeGroupDefaultSaveFolder || null;
+        this._syncWatchFolders();
+
         this.dom = {
             sidebar: document.getElementById('sidebar'),
             collapseBtn: document.getElementById('collapseSidebarBtn'),
@@ -33,7 +40,10 @@ export class SidebarManager {
             fitAllBtn: document.getElementById('fitAllBtn'),
             packLayoutBtn: document.getElementById('packLayoutBtn'),
             seamlessLayoutBtn: document.getElementById('seamlessLayoutBtn'),
+            newPlanBtn: document.getElementById('newPlanBtn'),
             exportMdBtn: document.getElementById('exportMdBtn'),
+            resourceSaverBtn: document.getElementById('resourceSaverBtn'),
+            resourceSaverState: document.getElementById('resourceSaverState'),
             stats: document.getElementById('sidebarStats'),
             alwaysOnTopBtn: document.getElementById('alwaysOnTopBtn'),
             alwaysOnTopLabel: document.getElementById('alwaysOnTopLabel')
@@ -49,9 +59,17 @@ export class SidebarManager {
 
         // 恢复置顶状态
         this._initAlwaysOnTop();
+        this._updateResourceSaverButton(!!this.storeData.resourceSaver);
 
         // ── 初始化通用手风琴动画（过滤器 / 画布 / 窗口） ──
         this._initAccordions();
+        if (
+            JSON.stringify(this.storeData.watchFolders || []) !== originalWatchFolders ||
+            (this.storeData.activeGroupDefaultSaveFolder || null) !== originalActiveDefault
+        ) {
+            this._saveStore();
+        }
+        void this._restoreActiveGroupWatcherState();
     }
 
     // ── 获取当前激活的组 ──
@@ -64,6 +82,87 @@ export class SidebarManager {
     getActiveWatchFolders() {
         const group = this.getActiveGroup();
         return group ? group.folders : [];
+    }
+
+    _normalizePath(filePath) {
+        return String(filePath || '')
+            .replace(/\\/g, '/')
+            .replace(/\/+$/g, '')
+            .toLowerCase();
+    }
+
+    _escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    _isPathInsideFolder(filePath, folderPath) {
+        const normalizedFilePath = this._normalizePath(filePath);
+        const normalizedFolderPath = this._normalizePath(folderPath);
+        if (!normalizedFilePath || !normalizedFolderPath) return false;
+        return normalizedFilePath === normalizedFolderPath ||
+            normalizedFilePath.startsWith(`${normalizedFolderPath}/`);
+    }
+
+    _collectAllFolders() {
+        return (this.storeData.folderGroups || []).flatMap(group => group.folders || []);
+    }
+
+    async _restoreActiveGroupWatcherState() {
+        if (!window.flowCanvas?.folder?.syncWatches) return;
+        const syncRunId = ++this._watcherSyncRunId;
+        const activeFolders = this.getActiveWatchFolders();
+        const knownFolders = [
+            ...(this.storeData.watchFolders || []),
+            ...this._collectAllFolders()
+        ];
+
+        await window.flowCanvas.folder.syncWatches(activeFolders, knownFolders);
+        if (syncRunId !== this._watcherSyncRunId) return;
+    }
+
+    _migrateGroupDefaults() {
+        const groups = this.storeData.folderGroups || [];
+        groups.forEach(group => this._ensureGroupDefaultFolder(group));
+
+        const legacyDefault = this.storeData.defaultSaveFolder;
+        if (legacyDefault) {
+            const legacyGroup = groups.find(group => (group.folders || []).includes(legacyDefault));
+            if (legacyGroup) {
+                legacyGroup.defaultSaveFolder = legacyDefault;
+            }
+            delete this.storeData.defaultSaveFolder;
+        }
+    }
+
+    _ensureGroupDefaultFolder(group) {
+        if (!group) return null;
+        const folders = group.folders || [];
+        if (folders.length === 0) {
+            group.defaultSaveFolder = null;
+            if (this.getActiveGroup?.()?.id === group.id) {
+                this.storeData.activeGroupDefaultSaveFolder = null;
+            }
+            return null;
+        }
+
+        if (!group.defaultSaveFolder || !folders.includes(group.defaultSaveFolder)) {
+            group.defaultSaveFolder = folders[0];
+        }
+
+        if (this.getActiveGroup?.()?.id === group.id) {
+            this.storeData.activeGroupDefaultSaveFolder = group.defaultSaveFolder;
+        }
+
+        return group.defaultSaveFolder;
+    }
+
+    getActiveDefaultSaveFolder() {
+        return this._ensureGroupDefaultFolder(this.getActiveGroup());
     }
 
     async _initAlwaysOnTop() {
@@ -159,7 +258,15 @@ export class SidebarManager {
                 }
 
                 // 左键点击文件夹本体，但不要拦截右键或其它点击
-                if (e.target.closest('.folder-item')) {
+                const clickedFolderItem = e.target.closest('.folder-item');
+                if (clickedFolderItem) {
+                    const groupItem = clickedFolderItem.closest('.folder-group-item');
+                    if (this.pendingMove && groupItem?.dataset.groupId === this.storeData.activeGroupId) {
+                        e.stopPropagation();
+                        const folderPath = clickedFolderItem.dataset.path || clickedFolderItem.querySelector('.folder-remove')?.dataset.path;
+                        if (folderPath) this._completeMoveTarget(folderPath);
+                    }
+                    return;
                     // 只处理常规点击，避免干扰
                 }
 
@@ -183,13 +290,17 @@ export class SidebarManager {
                 if (folderItem) {
                     e.preventDefault();
                     const path = folderItem.querySelector('.folder-remove').dataset.path;
+                    const groupItem = folderItem.closest('.folder-group-item');
+                    if (!groupItem || groupItem.dataset.groupId !== this.storeData.activeGroupId) return;
                     const action = await window.flowCanvas.folder.showContextMenu(path);
                     if (action === 'setDefault') {
-                        this.storeData.defaultSaveFolder = path;
+                        const activeGroup = this.getActiveGroup();
+                        if (activeGroup && activeGroup.folders.includes(path)) {
+                            activeGroup.defaultSaveFolder = path;
+                        }
                         this.renderGroups();
                         this._saveStore();
                     } else if (action === 'remove') {
-                        const groupItem = folderItem.closest('.folder-group-item');
                         if (groupItem) this._removeFolder(groupItem.dataset.groupId, path);
                     }
                     return;
@@ -218,7 +329,7 @@ export class SidebarManager {
         }
 
         // 大的占位按钮 (全部为空时)
-        this.dom.emptyAddBtn.addEventListener('click', () => {
+        if (this.dom.emptyAddBtn) this.dom.emptyAddBtn.addEventListener('click', () => {
             if (this.storeData.folderGroups.length === 0) {
                 this._createNewGroup();
                 // 等待 UI 渲染再触发添加到第一个组
@@ -233,7 +344,7 @@ export class SidebarManager {
         });
 
         // 过滤器（多选模式）
-        this.dom.filterChips.addEventListener('click', (e) => {
+        if (this.dom.filterChips) this.dom.filterChips.addEventListener('click', (e) => {
             if (e.target.classList.contains('filter-chip')) {
                 const clickedFilter = e.target.dataset.filter;
 
@@ -269,15 +380,39 @@ export class SidebarManager {
         }
 
         // 画布控制
-        this.dom.fitAllBtn.addEventListener('click', () => this.emit('fitAll'));
+        if (this.dom.fitAllBtn) {
+            this.dom.fitAllBtn.addEventListener('click', () => this.emit('fitAll'));
+        }
         if (this.dom.packLayoutBtn) {
             this.dom.packLayoutBtn.addEventListener('click', () => this.emit('packLayout'));
         }
         if (this.dom.seamlessLayoutBtn) {
             this.dom.seamlessLayoutBtn.addEventListener('click', () => this.emit('seamlessLayout'));
         }
+        if (this.dom.newPlanBtn) {
+            this.dom.newPlanBtn.addEventListener('click', () => this.emit('newPlan'));
+        }
         if (this.dom.exportMdBtn) {
             this.dom.exportMdBtn.addEventListener('click', () => this.emit('exportMd'));
+        }
+        if (this.dom.resourceSaverBtn) {
+            this.dom.resourceSaverBtn.addEventListener('click', () => {
+                const enabled = !this.dom.resourceSaverBtn.classList.contains('active');
+                this.storeData.resourceSaver = enabled;
+                this._updateResourceSaverButton(enabled);
+                this._saveStore();
+                this.emit('resourceSaverChange', enabled);
+            });
+        }
+    }
+
+    _updateResourceSaverButton(enabled) {
+        if (this.dom.resourceSaverBtn) {
+            this.dom.resourceSaverBtn.classList.toggle('active', enabled);
+            this.dom.resourceSaverBtn.setAttribute('aria-checked', enabled ? 'true' : 'false');
+        }
+        if (this.dom.resourceSaverState) {
+            this.dom.resourceSaverState.textContent = enabled ? 'ON' : 'OFF';
         }
     }
 
@@ -288,8 +423,10 @@ export class SidebarManager {
         const group = {
             id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
             name: `文件夹组 ${count + 1}`,
-            folders: []
+            folders: [],
+            defaultSaveFolder: null
         };
+        group.plans = [];
         this.storeData.folderGroups.push(group);
         this._activateGroup(group.id);
         this._saveStore();
@@ -302,16 +439,24 @@ export class SidebarManager {
         const folderPath = await window.flowCanvas.folder.select();
         if (folderPath && !targetGroup.folders.includes(folderPath)) {
             targetGroup.folders.push(folderPath);
+            this._ensureGroupDefaultFolder(targetGroup);
 
             // 如果当前组是激活组，同步 watchFolders
             if (this.storeData.activeGroupId === groupId) {
                 this._syncWatchFolders();
+                await window.flowCanvas.folder.watch(folderPath);
                 document.body.classList.add('has-folders');
 
                 // 首次扫描文件
-                const files = await window.flowCanvas.folder.scan(folderPath);
-                console.log(`[Sidebar] Found ${files.length} files in ${folderPath}`);
-                if (files && files.length > 0) {
+                const scanResult = await window.flowCanvas.folder.scan(folderPath);
+                const files = Array.isArray(scanResult) ? scanResult : scanResult?.files;
+                const scanSucceeded = Array.isArray(scanResult) || scanResult?.success === true;
+                const canApplyScanResult =
+                    scanSucceeded &&
+                    this.storeData.activeGroupId === groupId &&
+                    targetGroup.folders.includes(folderPath);
+                if (canApplyScanResult && files && files.length > 0) {
+                    console.log(`[Sidebar] Found ${files.length} files in ${folderPath}`);
                     this.emit('scanFiles', files);
                 }
             }
@@ -326,6 +471,7 @@ export class SidebarManager {
         if (!group) return;
 
         group.folders = group.folders.filter(p => p !== path);
+        this._ensureGroupDefaultFolder(group);
 
         // 如果移除的是当前激活组内的文件夹
         if (this.storeData.activeGroupId === groupId) {
@@ -333,8 +479,8 @@ export class SidebarManager {
             this._syncWatchFolders();
 
             // 同时移除画布上该路径对应的 item
-            const removedItems = this.storeData.items.filter(i => i.filePath.startsWith(path));
-            this.storeData.items = this.storeData.items.filter(i => !i.filePath.startsWith(path));
+            const removedItems = this.storeData.items.filter(i => this._isPathInsideFolder(i.filePath, path));
+            this.storeData.items = this.storeData.items.filter(i => !this._isPathInsideFolder(i.filePath, path));
             removedItems.forEach(i => {
                 const ev = new CustomEvent('context-remove', { detail: { filePath: i.filePath } });
                 document.dispatchEvent(ev);
@@ -369,10 +515,19 @@ export class SidebarManager {
                 this.storeData.activeGroupId = null;
                 this.storeData.watchFolders = [];
                 this.storeData.items = [];
+                this.storeData.viewport = { x: 0, y: 0, scale: 1 };
                 this.renderGroups();
-                this.emit('switchGroup', { folders: [], items: [] });
+                this.emit('switchGroup', {
+                    folders: [],
+                    items: [],
+                    viewport: this.storeData.viewport,
+                    plans: []
+                });
+                void this._restoreActiveGroupWatcherState();
             }
         } else {
+            this._syncWatchFolders();
+            void this._restoreActiveGroupWatcherState();
             this.renderGroups();
         }
 
@@ -386,6 +541,7 @@ export class SidebarManager {
             // 保存旧组的数据
             oldGroup.savedItems = [...(this.storeData.items || [])];
             oldGroup.savedViewport = this.storeData.viewport ? { ...this.storeData.viewport } : null;
+            if (!Array.isArray(oldGroup.plans)) oldGroup.plans = [];
 
             // 取消监听旧组文件夹
             oldGroup.folders.forEach(folder => {
@@ -399,25 +555,24 @@ export class SidebarManager {
         this.storeData.activeGroupId = groupId;
         const newGroup = this.getActiveGroup();
         if (!newGroup) return;
+        this._ensureGroupDefaultFolder(newGroup);
 
         if (oldGroup && oldGroup.id !== groupId) {
             this.storeData.items = newGroup.savedItems || [];
             this.storeData.watchFolders = [...newGroup.folders];
-            if (newGroup.savedViewport) {
-                this.storeData.viewport = { ...newGroup.savedViewport };
-            }
+            this.storeData.activeGroupDefaultSaveFolder = newGroup.defaultSaveFolder || null;
+            this.storeData.viewport = newGroup.savedViewport
+                ? { ...newGroup.savedViewport }
+                : { x: 0, y: 0, scale: 1 };
 
             // 监听新组文件夹
-            newGroup.folders.forEach(folder => {
-                if (window.flowCanvas && window.flowCanvas.folder) {
-                    window.flowCanvas.folder.scan(folder);
-                }
-            });
+            void this._restoreActiveGroupWatcherState();
 
             this.emit('switchGroup', {
-                folders: newGroup.folders,
-                items: this.storeData.items,
-                viewport: this.storeData.viewport
+                folders: [...(newGroup.folders || [])],
+                items: [...(this.storeData.items || [])],
+                viewport: this.storeData.viewport ? { ...this.storeData.viewport } : null,
+                plans: [...(newGroup.plans || [])]
             });
         }
 
@@ -471,6 +626,76 @@ export class SidebarManager {
     }
 
     // ── 组右键菜单（纯 DOM 方式，不依赖 Electron 原生菜单） ──
+    beginMoveToFolder(payload) {
+        const group = this.getActiveGroup();
+        if (!group || !group.folders || group.folders.length === 0) {
+            this._showMoveHint('当前文件夹组没有可用文件夹');
+            return;
+        }
+
+        this.pendingMove = {
+            itemIds: payload.itemIds || [],
+            filePaths: payload.filePaths || [],
+            mode: payload.mode === 'copy' ? 'copy' : 'move'
+        };
+        document.body.classList.remove('sidebar-closed');
+        document.body.classList.add('folder-move-pending');
+        this.renderGroups();
+        this._expandActiveGroup();
+        this._showMoveHint(this.pendingMove.mode === 'copy'
+            ? '点击当前文件夹组里的目标文件夹复制'
+            : '点击当前文件夹组里的目标文件夹剪切');
+    }
+
+    cancelMoveToFolder() {
+        this.pendingMove = null;
+        document.body.classList.remove('folder-move-pending');
+        this.renderGroups();
+    }
+
+    _completeMoveTarget(targetFolder) {
+        if (!this.pendingMove) return;
+        const activeGroup = this.getActiveGroup();
+        if (!activeGroup || !activeGroup.folders.includes(targetFolder)) {
+            this._showMoveHint('只能移动到当前文件夹组中的文件夹');
+            return;
+        }
+
+        const payload = {
+            ...this.pendingMove,
+            targetFolder
+        };
+        const mode = this.pendingMove.mode;
+        this.cancelMoveToFolder();
+        this.emit(mode === 'copy' ? 'copyToFolder' : 'moveToFolder', payload);
+    }
+
+    _expandActiveGroup() {
+        const activeEl = this.dom.folderGroupList?.querySelector('.folder-group-item.active .folder-accordion-content');
+        if (activeEl) {
+            gsap.to(activeEl, {
+                height: 'auto',
+                duration: 0.25,
+                ease: 'power2.out',
+                overwrite: 'auto'
+            });
+        }
+    }
+
+    _showMoveHint(text) {
+        const status = document.getElementById('titlebarStatus');
+        if (!status) return;
+        status.textContent = text;
+        status.classList.add('status-visible');
+        clearTimeout(this.moveHintTimer);
+        this.moveHintTimer = setTimeout(() => {
+            if (status.textContent === text) {
+                status.textContent = '';
+                status.classList.remove('status-visible');
+            }
+        }, 2600);
+    }
+
     _showGroupContextMenu(groupId, anchorEl) {
         // 移除已有菜单
         document.querySelectorAll('.group-ctx-menu').forEach(m => m.remove());
@@ -480,7 +705,7 @@ export class SidebarManager {
 
         const renameBtn = document.createElement('div');
         renameBtn.className = 'group-ctx-item';
-        renameBtn.textContent = '✏️ 重命名';
+        renameBtn.textContent = '重命名';
         renameBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             menu.remove();
@@ -489,7 +714,7 @@ export class SidebarManager {
 
         const deleteBtn = document.createElement('div');
         deleteBtn.className = 'group-ctx-item group-ctx-danger';
-        deleteBtn.textContent = '🗑️ 删除组';
+        deleteBtn.textContent = '删除组';
         deleteBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             menu.remove();
@@ -521,6 +746,7 @@ export class SidebarManager {
     _syncWatchFolders() {
         const activeGroup = this.getActiveGroup();
         this.storeData.watchFolders = activeGroup ? [...activeGroup.folders] : [];
+        this.storeData.activeGroupDefaultSaveFolder = activeGroup ? this._ensureGroupDefaultFolder(activeGroup) : null;
     }
 
     _saveStore() {
@@ -544,7 +770,9 @@ export class SidebarManager {
         this.dom.folderGroupList.innerHTML = groups.map(group => {
             const isActive = group.id === activeId;
             const folders = group.folders || [];
-            const defaultFolder = this.storeData.defaultSaveFolder || folders[0];
+            const defaultFolder = this._ensureGroupDefaultFolder(group);
+            const safeGroupId = this._escapeHtml(group.id);
+            const safeGroupName = this._escapeHtml(group.name);
 
             // 构建当前组内的文件夹 HTML
             let folderHtml = '';
@@ -553,21 +781,22 @@ export class SidebarManager {
             } else {
                 folderHtml = folders.map(folder => {
                     const isDefault = folder === defaultFolder;
+                    const safeFolder = this._escapeHtml(folder);
                     return `
-                    <div class="folder-item ${isDefault ? 'is-default' : ''}" title="${folder}">
-                        <span class="folder-path">${folder} ${isDefault ? '<span style="font-size:10px;color:#aaa;">(默认)</span>' : ''}</span>
-                        <button class="folder-remove" data-path="${folder}" title="取消关联">×</button>
+                    <div class="folder-item ${isDefault ? 'is-default' : ''}" data-path="${safeFolder}" title="${safeFolder}">
+                        <span class="folder-path">${safeFolder}</span>
+                        <button class="folder-remove" data-path="${safeFolder}" title="取消关联">×</button>
                     </div>`;
                 }).join('');
             }
 
             return `
-            <div class="folder-group-item ${isActive ? 'active' : ''}" data-group-id="${group.id}">
+            <div class="folder-group-item ${isActive ? 'active' : ''}" data-group-id="${safeGroupId}">
                 <div class="group-header" title="左键选中激活，双击重命名">
                     <svg class="group-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                     </svg>
-                    <span class="group-name">${group.name}</span>
+                    <span class="group-name">${safeGroupName}</span>
                     <span class="group-folder-count">${folders.length}</span>
                     <button class="group-remove" title="删除组">×</button>
                 </div>
@@ -603,6 +832,7 @@ export class SidebarManager {
             });
 
             item.addEventListener('mouseleave', () => {
+                if (this.pendingMove && item.classList.contains('active')) return;
                 gsap.to(accordionContent, {
                     height: 0,
                     duration: 0.3,

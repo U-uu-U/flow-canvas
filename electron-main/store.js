@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
+const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 const DEFAULT_DATA = {
     version: 1,
@@ -15,7 +16,11 @@ const DEFAULT_DATA = {
     folderGroups: [],       // [{id, name, folders: [...paths], items: [...]}]
     activeGroupId: null,    // 当前激活的文件夹组 ID
     items: [],
-    viewport: { x: 0, y: 0, scale: 1 }
+    mcp: { ...DEFAULT_MCP_CONFIG },
+    viewport: { x: 0, y: 0, scale: 1 },
+    defaultSaveFolder: null,
+    activeGroupDefaultSaveFolder: null,
+    sidebarClosed: false
 };
 
 class Store {
@@ -35,23 +40,120 @@ class Store {
         try {
             if (fs.existsSync(this.filePath)) {
                 const raw = fs.readFileSync(this.filePath, 'utf-8');
-                return { ...DEFAULT_DATA, ...JSON.parse(raw) };
+                return this._normalizeData(JSON.parse(raw));
             }
         } catch (err) {
             console.error('[Store] 加载失败:', err.message);
         }
-        return { ...DEFAULT_DATA };
+        return this._normalizeData({});
     }
 
     save(data) {
         try {
-            const merged = { ...DEFAULT_DATA, ...data };
+            const merged = this._normalizeData(data);
+            const existing = this._readExistingData();
+            if (this._looksLikeAccidentalEmptyOverwrite(existing, merged)) {
+                console.warn('[Store] 拒绝可疑的空数据覆盖，已保留现有 board.json');
+                return false;
+            }
+            this._backupExistingFile(existing);
             fs.writeFileSync(this.filePath, JSON.stringify(merged, null, 2), 'utf-8');
             return true;
         } catch (err) {
             console.error('[Store] 保存失败:', err.message);
             return false;
         }
+    }
+
+    _normalizeData(data) {
+        const source = data && typeof data === 'object' ? data : {};
+        const folderGroups = Array.isArray(source.folderGroups)
+            ? source.folderGroups.map(group => this._normalizeGroup(group))
+            : [];
+        const activeGroup = folderGroups.find(group => group.id === source.activeGroupId) || null;
+
+        return {
+            ...DEFAULT_DATA,
+            ...source,
+            watchFolders: Array.isArray(source.watchFolders) ? [...source.watchFolders] : [],
+            folderGroups,
+            activeGroupId: activeGroup ? activeGroup.id : (source.activeGroupId || null),
+            items: Array.isArray(source.items) ? [...source.items] : [],
+            mcp: { ...DEFAULT_MCP_CONFIG, ...(source.mcp || {}) },
+            viewport: { ...DEFAULT_DATA.viewport, ...(source.viewport || {}) },
+            defaultSaveFolder: typeof source.defaultSaveFolder === 'string' ? source.defaultSaveFolder : null,
+            activeGroupDefaultSaveFolder: activeGroup?.defaultSaveFolder || null,
+            sidebarClosed: Boolean(source.sidebarClosed)
+        };
+    }
+
+    _normalizeGroup(group) {
+        const source = group && typeof group === 'object' ? group : {};
+        const folders = Array.isArray(source.folders) ? [...source.folders] : [];
+        const savedItems = Array.isArray(source.savedItems)
+            ? source.savedItems
+            : Array.isArray(source.items)
+                ? source.items
+                : [];
+        const savedViewport = source.savedViewport || source.viewport || null;
+        const defaultSaveFolder = folders.includes(source.defaultSaveFolder)
+            ? source.defaultSaveFolder
+            : (folders[0] || null);
+        const normalized = {
+            ...source,
+            folders,
+            savedItems: [...savedItems],
+            savedViewport: savedViewport ? { ...DEFAULT_DATA.viewport, ...savedViewport } : null,
+            defaultSaveFolder,
+            plans: Array.isArray(source.plans) ? [...source.plans] : []
+        };
+
+        delete normalized.items;
+        delete normalized.viewport;
+        return normalized;
+    }
+
+    _readExistingData() {
+        try {
+            if (!fs.existsSync(this.filePath)) return null;
+            const raw = fs.readFileSync(this.filePath, 'utf-8');
+            return JSON.parse(raw);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    _looksLikeAccidentalEmptyOverwrite(existing, next) {
+        const existingGroups = Array.isArray(existing?.folderGroups) ? existing.folderGroups.length : 0;
+        const existingWatchFolders = Array.isArray(existing?.watchFolders) ? existing.watchFolders.length : 0;
+        const existingItems = Array.isArray(existing?.items) ? existing.items.length : 0;
+        const nextGroups = Array.isArray(next?.folderGroups) ? next.folderGroups.length : 0;
+        const nextWatchFolders = Array.isArray(next?.watchFolders) ? next.watchFolders.length : 0;
+        const nextItems = Array.isArray(next?.items) ? next.items.length : 0;
+        const existingHasBoardData = existingGroups > 0 || existingWatchFolders > 0 || existingItems > 0;
+        const nextIsEmptyBoard = nextGroups === 0 && nextWatchFolders === 0 && nextItems === 0 && !next.activeGroupId;
+        return existingHasBoardData && nextIsEmptyBoard;
+    }
+
+    _backupExistingFile(existing) {
+        if (!existing || !fs.existsSync(this.filePath)) return;
+        const backupDir = path.join(this.dataDir, 'backups');
+        if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupPath = path.join(backupDir, `board-${stamp}.json`);
+        fs.copyFileSync(this.filePath, backupPath);
+
+        const backups = fs.readdirSync(backupDir)
+            .filter(name => /^board-.*\.json$/i.test(name))
+            .map(name => ({
+                name,
+                fullPath: path.join(backupDir, name),
+                mtimeMs: fs.statSync(path.join(backupDir, name)).mtimeMs
+            }))
+            .sort((a, b) => b.mtimeMs - a.mtimeMs);
+        backups.slice(30).forEach(entry => {
+            try { fs.unlinkSync(entry.fullPath); } catch (_) { }
+        });
     }
 }
 

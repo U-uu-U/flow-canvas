@@ -1,56 +1,94 @@
 // ============================================================
-// Flow Canvas — File Watcher (Auto-Sync)
-// ============================================================
-// 基于 chokidar 监听关联文件夹的文件变动
+// Flow Canvas - File Watcher (Auto-Sync)
 // ============================================================
 
 const chokidar = require('chokidar');
 const path = require('path');
 const fs = require('fs');
 
-// 支持的文件扩展名
-const SUPPORTED_EXT = new Set([
-    // 图片
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico', '.tiff', '.tif',
+const WATCH_DEPTH = 5;
+
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico', '.tiff', '.tif']);
+const VIDEO_EXT = new Set(['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v']);
+const AUDIO_EXT = new Set(['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']);
+const DOCUMENT_EXT = new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']);
+const DESIGN_EXT = new Set([
     '.psd', '.ai', '.eps', '.raw', '.cr2', '.nef', '.arw',
-    // 视频
-    '.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
-    // 音频
-    '.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a',
-    // 文档
-    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-    // 3D / 设计
-    '.obj', '.fbx', '.gltf', '.glb', '.blend', '.sketch', '.fig',
+    '.obj', '.fbx', '.gltf', '.glb', '.blend', '.sketch', '.fig'
+]);
+
+const SUPPORTED_EXT = new Set([
+    ...IMAGE_EXT,
+    ...VIDEO_EXT,
+    ...AUDIO_EXT,
+    ...DOCUMENT_EXT,
+    ...DESIGN_EXT,
 ]);
 
 class Watcher {
     constructor(store, onChange) {
         this.store = store;
         this.onChange = onChange;
-        this.watchers = new Map(); // folderPath → chokidar.FSWatcher
+        this.watchers = new Map();
     }
 
     isSupportedFile(filePath) {
+        if (this.isTemporaryFile(filePath)) return false;
         const ext = path.extname(filePath).toLowerCase();
         return SUPPORTED_EXT.has(ext);
     }
 
+    isReadyFile(filePath) {
+        if (!this.isSupportedFile(filePath)) return false;
+
+        try {
+            const stat = fs.statSync(filePath);
+            return stat.isFile() && stat.size > 0;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    isTemporaryFile(filePath) {
+        const base = path.basename(String(filePath || ''));
+        if (!base) return true;
+
+        const lower = base.toLowerCase();
+        if (base.startsWith('.') || base.startsWith('~') || base.endsWith('~')) return true;
+        if (lower === 'thumbs.db' || lower === 'desktop.ini') return true;
+        if (/\.(tmp|temp|part|partial|crdownload|download|swp|swo)$/i.test(lower)) return true;
+        if (/\.(jpg|jpeg|png|gif|webp|bmp|tif|tiff)\.(tmp|temp|part|partial|download)$/i.test(lower)) return true;
+        return false;
+    }
+
     add(folderPath) {
-        if (this.watchers.has(folderPath)) return;
+        if (!folderPath) return false;
+        if (this.watchers.has(folderPath)) return true;
+
+        try {
+            const stats = fs.statSync(folderPath);
+            if (!stats.isDirectory()) {
+                console.warn('[Watcher] Not a directory, skipped:', folderPath);
+                return false;
+            }
+        } catch (err) {
+            console.warn('[Watcher] Folder is not accessible, skipped:', folderPath, err.message);
+            return false;
+        }
 
         const watcher = chokidar.watch(folderPath, {
-            ignored: /(^|[\/\\])\../, // 忽略隐藏文件
+            ignored: /(^|[\/\\])\../,
             persistent: true,
             ignoreInitial: true,
-            depth: 2,                    // 减少监听深度，降低句柄占用
+            depth: WATCH_DEPTH,
             awaitWriteFinish: {
-                stabilityThreshold: 2000, // 大文件写入等待更久
-                pollInterval: 500         // 降低轮询频率
+                stabilityThreshold: 2000,
+                pollInterval: 500
             }
         });
 
         watcher.on('add', (filePath) => {
-            if (this.isSupportedFile(filePath)) {
+            if (this.isReadyFile(filePath)) {
                 this.onChange('add', filePath);
             }
         });
@@ -61,31 +99,55 @@ class Watcher {
             }
         });
 
+        watcher.on('error', (err) => {
+            console.error('[Watcher] Watch error:', folderPath, err.message);
+        });
+
         this.watchers.set(folderPath, watcher);
-        console.log('[Watcher] 开始监听:', folderPath);
+        console.log('[Watcher] Started:', folderPath);
+        return true;
     }
 
     remove(folderPath) {
         const watcher = this.watchers.get(folderPath);
-        if (watcher) {
-            watcher.close();
-            this.watchers.delete(folderPath);
-            console.log('[Watcher] 停止监听:', folderPath);
-        }
+        if (!watcher) return false;
+
+        watcher.close();
+        this.watchers.delete(folderPath);
+        console.log('[Watcher] Stopped:', folderPath);
+        return true;
     }
 
-    /**
-     * 扫描文件夹中已有的文件
-     * @returns {string[]} 文件路径列表
-     */
+    sync(activeFolders = [], knownFolders = []) {
+        const activeSet = new Set(activeFolders.filter(Boolean));
+        const managedFolders = new Set([
+            ...this.watchers.keys(),
+            ...knownFolders.filter(Boolean)
+        ]);
+
+        managedFolders.forEach((folderPath) => {
+            if (!activeSet.has(folderPath)) {
+                this.remove(folderPath);
+            }
+        });
+
+        let allActiveWatched = true;
+        activeSet.forEach((folderPath) => {
+            allActiveWatched = this.add(folderPath) && allActiveWatched;
+        });
+
+        return allActiveWatched;
+    }
+
     scanFolder(folderPath) {
         const files = [];
         try {
-            this._walkDir(folderPath, files, 0, 5);
+            this._walkDir(folderPath, files, 0, WATCH_DEPTH);
+            return { success: true, files };
         } catch (err) {
-            console.error('[Watcher] 扫描失败:', err.message);
+            console.error('[Watcher] Scan failed:', err.message);
+            return { success: false, files: [], error: err.message };
         }
-        return files;
     }
 
     _walkDir(dir, result, depth, maxDepth) {

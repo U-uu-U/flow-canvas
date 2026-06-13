@@ -6,7 +6,8 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5180 && electron .\"",
+        "mcp": "node mcp/flow-canvas-mcp.mjs",
+        "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",
         "electron:build": "vite build && electron-builder"
     },
     "dependencies": {

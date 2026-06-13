@@ -1,15 +1,30 @@
 import { defineConfig } from 'vite';
-import { resolve } from 'path';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const srcRoot = resolve(__dirname, 'src');
 
 export default defineConfig({
-    root: 'src',
+    root: srcRoot,
     base: './',
     build: {
-        outDir: '../dist',
-        emptyOutDir: true
+        outDir: resolve(__dirname, 'dist'),
+        emptyOutDir: true,
+        rollupOptions: {
+            input: {
+                index: resolve(srcRoot, 'index.html')
+            },
+            output: {
+                entryFileNames: 'assets/[name]-[hash].js',
+                chunkFileNames: 'assets/[name]-[hash].js',
+                assetFileNames: 'assets/[name]-[hash][extname]'
+            }
+        }
     },
     server: {
-        port: 5180,
+        host: '127.0.0.1',
+        port: 15321,
         strictPort: true
     }
 });

@@ -2,18 +2,73 @@
 // Flow Canvas — Electron Main Process
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, Menu } = require('electron');
 const path = require('path');
+const util = require('util');
 const Store = require('./store');
 const Watcher = require('./watcher');
 const Thumbnailer = require('./thumbnailer');
+const FlowCanvasBridge = require('./mcp-bridge');
+const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 let mainWindow = null;
 let store = null;
 let watcher = null;
 let thumbnailer = null;
+let flowCanvasBridge = null;
 
 const isDev = !app.isPackaged;
+
+installSafeConsole();
+
+Menu.setApplicationMenu(null);
+
+function installSafeConsole() {
+    let stdoutBroken = false;
+    let stderrBroken = false;
+
+    const isBrokenPipe = (err) => err?.code === 'EPIPE' || /broken pipe/i.test(String(err?.message || ''));
+    const markBroken = (stream) => {
+        if (stream === process.stderr) stderrBroken = true;
+        if (stream === process.stdout) stdoutBroken = true;
+    };
+    const isMarkedBroken = (stream) => {
+        return stream === process.stderr ? stderrBroken : stdoutBroken;
+    };
+
+    const swallowBrokenPipe = (stream) => {
+        stream?.on?.('error', (err) => {
+            if (isBrokenPipe(err)) {
+                markBroken(stream);
+            }
+        });
+    };
+
+    swallowBrokenPipe(process.stdout);
+    swallowBrokenPipe(process.stderr);
+
+    const safeWrite = (stream, args) => {
+        if (!stream || isMarkedBroken(stream) || stream.destroyed) return;
+        try {
+            stream.write(`${util.format(...args)}\n`);
+        } catch (err) {
+            if (isBrokenPipe(err)) {
+                markBroken(stream);
+            }
+        }
+    };
+
+    console.log = (...args) => safeWrite(process.stdout, args);
+    console.info = (...args) => safeWrite(process.stdout, args);
+    console.warn = (...args) => safeWrite(process.stderr, args);
+    console.error = (...args) => safeWrite(process.stderr, args);
+
+    process.on('uncaughtException', (err) => {
+        if (isBrokenPipe(err)) return;
+        safeWrite(process.stderr, ['[Main] Uncaught Exception:', err]);
+        dialog.showErrorBox('Flow Canvas 主进程错误', err?.stack || err?.message || String(err));
+    });
+}
 
 // 注册私有协议权限
 protocol.registerSchemesAsPrivileged([
@@ -52,7 +107,7 @@ function createWindow() {
             try {
                 // 从 store 读取默认保存文件夹
                 const data = store.load();
-                const targetDir = data.defaultSaveFolder || (data.watchFolders && data.watchFolders[0]);
+                const targetDir = getBoardDefaultSaveFolder(data);
                 const result = await downloadImageFromUrl(url, targetDir);
                 if (result.success) {
                     mainWindow.webContents.send('external-image-dropped', result.filePath);
@@ -65,14 +120,28 @@ function createWindow() {
         }
     });
 
-    if (isDev) {
-        mainWindow.loadURL('http://localhost:5180');
-        // DevTools 按需打开（F12），不再自动常驻，节省 ~47MB
-        mainWindow.webContents.on('before-input-event', (e, input) => {
-            if (input.key === 'F12' && input.type === 'keyDown') {
-                mainWindow.webContents.toggleDevTools();
+    mainWindow.webContents.on('before-input-event', (e, input) => {
+        if (input.type !== 'keyDown') return;
+        const key = String(input.key || '').toLowerCase();
+        const isRefresh = (input.control || input.meta) && key === 'r';
+        const isHardRefresh = isRefresh && input.shift;
+        if (input.key === 'F5' || isRefresh) {
+            e.preventDefault();
+            if (isHardRefresh) {
+                mainWindow.webContents.reloadIgnoringCache();
+            } else {
+                mainWindow.webContents.reload();
             }
-        });
+            return;
+        }
+        if (input.key === 'F12') {
+            e.preventDefault();
+            mainWindow.webContents.toggleDevTools();
+        }
+    });
+
+    if (isDev) {
+        mainWindow.loadURL('http://127.0.0.1:15321');
     } else {
         mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
     }
@@ -90,8 +159,342 @@ function initServices() {
 
     // 恢复上次的监听文件夹
     const boardData = store.load();
-    if (boardData.watchFolders) {
-        boardData.watchFolders.forEach(folder => watcher.add(folder));
+    const mcpConfig = {
+        ...DEFAULT_MCP_CONFIG,
+        ...(boardData.mcp || {}),
+        host: '127.0.0.1',
+        port: Number(boardData.mcp?.port) === 8765 ? DEFAULT_MCP_CONFIG.port : (boardData.mcp?.port || DEFAULT_MCP_CONFIG.port)
+    };
+
+    flowCanvasBridge = new FlowCanvasBridge({
+        store,
+        getDefaultSaveFolder: getBoardDefaultSaveFolder,
+        getFallbackSaveDir: getSaveDir,
+        getMainWindow: () => mainWindow,
+        notifyRenderer: (event, data) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('mcp:store-updated', {
+                    event,
+                    data
+                });
+            }
+        }
+    });
+    flowCanvasBridge.start(mcpConfig);
+
+    const activeGroup = (boardData.folderGroups || []).find(group => group.id === boardData.activeGroupId);
+    const activeFolders = activeGroup?.folders || boardData.watchFolders || [];
+    const knownFolders = [
+        ...(boardData.watchFolders || []),
+        ...(boardData.folderGroups || []).flatMap(group => group.folders || [])
+    ];
+    watcher.sync(activeFolders, knownFolders);
+}
+
+function buildOpenAiModelsUrl(endpoint) {
+    const url = new URL(String(endpoint || '').trim());
+    let pathName = url.pathname.replace(/\/+$/, '');
+
+    if (!pathName || pathName === '/') {
+        pathName = '/v1/models';
+    } else if (/\/(?:chat\/completions|responses|completions)$/i.test(pathName)) {
+        pathName = pathName.replace(/\/(?:chat\/completions|responses|completions)$/i, '');
+        pathName = pathName.replace(/\/+$/, '') + '/models';
+    } else if (/\/v1(?:\/.*)?$/i.test(pathName)) {
+        pathName = pathName.replace(/\/v1(?:\/.*)?$/i, '/v1/models');
+    } else if (!/\/models$/i.test(pathName)) {
+        pathName += '/models';
+    }
+
+    url.pathname = pathName;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+}
+
+function buildGeminiModelsUrl(endpoint, apiKey) {
+    const rawEndpoint = String(endpoint || '').trim() || 'https://generativelanguage.googleapis.com/v1beta/models';
+    const url = new URL(rawEndpoint);
+    const match = url.pathname.match(/\/(v1(?:beta|alpha)?|v1)\/models/i);
+    const version = match?.[1] || 'v1beta';
+    url.pathname = `/${version}/models`;
+    url.search = '';
+    url.hash = '';
+    if (apiKey) url.searchParams.set('key', apiKey);
+    return url.toString();
+}
+
+function buildAnthropicModelsUrl(endpoint) {
+    const url = new URL(String(endpoint || '').trim() || 'https://api.anthropic.com/v1/models');
+    url.pathname = '/v1/models';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+}
+
+function normalizeModelId(model, providerType) {
+    const value = String(model || '').trim();
+    if (!value) return '';
+    return providerType === 'google' ? value.replace(/^models\//, '') : value;
+}
+
+function extractModelIds(payload, providerType) {
+    const source = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.models)
+            ? payload.models
+            : Array.isArray(payload)
+                ? payload
+                : [];
+
+    const ids = source
+        .map(item => normalizeModelId(item?.id || item?.name || item?.model || item, providerType))
+        .filter(Boolean);
+
+    return [...new Set(ids)].sort((a, b) => a.localeCompare(b, 'en', {
+        numeric: true,
+        sensitivity: 'base'
+    }));
+}
+
+async function fetchModelList(config = {}) {
+    const providerType = String(config.type || 'openai').toLowerCase();
+    const endpoint = String(config.endpoint || '').trim();
+    const apiKey = String(config.apiKey || '').trim();
+
+    if (!endpoint && providerType !== 'google' && providerType !== 'anthropic') {
+        return { success: false, error: '请先填写 API 端点' };
+    }
+    if (!apiKey) {
+        return { success: false, error: '请先填写 API Key' };
+    }
+
+    try {
+        let url;
+        const headers = { Accept: 'application/json' };
+
+        if (providerType === 'google') {
+            url = buildGeminiModelsUrl(endpoint, apiKey);
+            headers['x-goog-api-key'] = apiKey;
+        } else if (providerType === 'anthropic') {
+            url = buildAnthropicModelsUrl(endpoint);
+            headers['x-api-key'] = apiKey;
+            headers['anthropic-version'] = '2023-06-01';
+        } else {
+            url = buildOpenAiModelsUrl(endpoint);
+            headers.Authorization = `Bearer ${apiKey}`;
+        }
+
+        const response = await net.fetch(url, {
+            method: 'GET',
+            headers,
+            redirect: 'follow'
+        });
+        const text = await response.text();
+
+        if (!response.ok) {
+            return {
+                success: false,
+                error: `HTTP ${response.status}: ${(text || response.statusText || '').slice(0, 500)}`
+            };
+        }
+
+        let payload;
+        try {
+            payload = JSON.parse(text);
+        } catch (err) {
+            return { success: false, error: '模型接口没有返回有效 JSON' };
+        }
+
+        const models = extractModelIds(payload, providerType);
+        if (models.length === 0) {
+            return { success: false, error: '接口响应中没有可用模型列表' };
+        }
+
+        return { success: true, models };
+    } catch (err) {
+        return { success: false, error: err.message || String(err) };
+    }
+}
+
+function normalizeChatHeaders(headers = {}) {
+    const normalized = {};
+    if (!headers || typeof headers !== 'object') return normalized;
+
+    for (const [key, value] of Object.entries(headers)) {
+        const name = String(key || '').trim();
+        if (!name || /[\r\n]/.test(name)) continue;
+        if (value == null) continue;
+        normalized[name] = String(value);
+    }
+
+    const lowerNames = new Set(Object.keys(normalized).map(name => name.toLowerCase()));
+    if (!lowerNames.has('content-type')) normalized['Content-Type'] = 'application/json';
+    if (!lowerNames.has('accept')) normalized.Accept = 'application/json';
+    return normalized;
+}
+
+async function proxyAiChat(request = {}) {
+    const targetUrl = String(request.targetUrl || '').trim();
+    if (!targetUrl) {
+        return { success: false, error: '缺少 API 端点' };
+    }
+
+    let url;
+    try {
+        url = new URL(targetUrl);
+    } catch (err) {
+        return { success: false, error: 'API 端点不是有效 URL' };
+    }
+
+    if (!/^https?:$/i.test(url.protocol)) {
+        return { success: false, error: 'API 端点只支持 HTTP/HTTPS' };
+    }
+
+    try {
+        const rawBody = typeof request.body === 'string'
+            ? request.body
+            : JSON.stringify(request.body || {});
+        const response = await net.fetch(url.toString(), {
+            method: 'POST',
+            headers: normalizeChatHeaders(request.headers),
+            body: rawBody,
+            redirect: 'follow'
+        });
+        const text = await response.text();
+
+        if (!response.ok) {
+            return {
+                success: false,
+                status: response.status,
+                error: `HTTP ${response.status}: ${(text || response.statusText || '').slice(0, 1000)}`
+            };
+        }
+
+        let payload = null;
+        try {
+            payload = JSON.parse(text);
+        } catch (err) {
+            // Some compatible APIs may return plain text. Keep it available to the renderer.
+        }
+
+        return {
+            success: true,
+            responseMode: request.responseMode || 'text',
+            payload,
+            text
+        };
+    } catch (err) {
+        return { success: false, error: err.message || String(err) };
+    }
+}
+
+function getSkillRoots() {
+    const homeDir = app.getPath('home') || process.env.USERPROFILE || process.env.HOME || '';
+    return [
+        { key: 'codex', label: 'Codex', dir: path.join(homeDir, '.codex', 'skills') },
+        { key: 'cc-switch', label: 'CC Switch', dir: path.join(homeDir, '.cc-switch', 'skills') }
+    ];
+}
+
+function findSkillMarkdownFiles(rootDir) {
+    const fsLocal = require('fs');
+    const found = [];
+    const stack = [rootDir];
+
+    while (stack.length > 0) {
+        const dir = stack.pop();
+        let entries = [];
+        try {
+            entries = fsLocal.readdirSync(dir, { withFileTypes: true });
+        } catch (err) {
+            continue;
+        }
+
+        entries.forEach(entry => {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                stack.push(fullPath);
+            } else if (entry.isFile() && entry.name.toLowerCase() === 'skill.md') {
+                found.push(fullPath);
+            }
+        });
+    }
+
+    return found;
+}
+
+function parseSkillMarkdown(filePath) {
+    const fsLocal = require('fs');
+    const content = fsLocal.readFileSync(filePath, 'utf8');
+    const frontmatter = content.match(/^---\s*([\s\S]*?)\s*---/);
+    const meta = {};
+
+    if (frontmatter) {
+        frontmatter[1].split(/\r?\n/).forEach(line => {
+            const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+            if (!match) return;
+            meta[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
+        });
+    }
+
+    return {
+        name: meta.name || path.basename(path.dirname(filePath)),
+        description: meta.description || '',
+        content
+    };
+}
+
+function listLocalSkills() {
+    const fsLocal = require('fs');
+    const skills = [];
+
+    getSkillRoots().forEach(root => {
+        if (!fsLocal.existsSync(root.dir)) return;
+        findSkillMarkdownFiles(root.dir).forEach(filePath => {
+            try {
+                const parsed = parseSkillMarkdown(filePath);
+                const relativePath = path.relative(root.dir, path.dirname(filePath)).replace(/\\/g, '/');
+                const isSystem = relativePath.split('/')[0] === '.system';
+                skills.push({
+                    id: `${root.key}:${relativePath}`,
+                    name: parsed.name,
+                    description: parsed.description,
+                    source: root.key,
+                    sourceLabel: isSystem ? `${root.label} System` : root.label,
+                    relativePath,
+                    filePath
+                });
+            } catch (err) {
+                console.warn('[Skills] Failed to parse skill:', filePath, err?.message);
+            }
+        });
+    });
+
+    return skills.sort((a, b) => {
+        const bySource = a.sourceLabel.localeCompare(b.sourceLabel, 'en', { sensitivity: 'base' });
+        if (bySource !== 0) return bySource;
+        return a.name.localeCompare(b.name, 'en', { sensitivity: 'base' });
+    });
+}
+
+function getLocalSkill(skillId) {
+    const skill = listLocalSkills().find(item => item.id === skillId);
+    if (!skill) {
+        return { success: false, error: '未找到该技能，请先重新拉取技能列表' };
+    }
+
+    try {
+        const parsed = parseSkillMarkdown(skill.filePath);
+        return {
+            success: true,
+            skill: {
+                ...skill,
+                content: parsed.content
+            }
+        };
+    } catch (err) {
+        return { success: false, error: err.message || String(err) };
     }
 }
 
@@ -100,6 +503,24 @@ function initServices() {
 // 数据存储
 ipcMain.handle('store:load', () => store.load());
 ipcMain.handle('store:save', (_, data) => store.save(data));
+ipcMain.on('store:saveSync', (event, data) => {
+    event.returnValue = store.save(data);
+});
+
+ipcMain.handle('metrics:getBoardUsage', (event) => {
+    try {
+        const pid = event.sender.getOSProcessId ? event.sender.getOSProcessId() : null;
+        const metric = app.getAppMetrics().find(item => item.pid === pid);
+        return {
+            success: true,
+            pid,
+            memory: metric?.memory || null
+        };
+    } catch (err) {
+        console.error('[Metrics] 获取白板资源占用失败:', err);
+        return { success: false, error: err.message };
+    }
+});
 
 // 文件夹管理
 ipcMain.handle('folder:select', async () => {
@@ -108,9 +529,32 @@ ipcMain.handle('folder:select', async () => {
         title: '选择要关联的文件夹'
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    const folderPath = result.filePaths[0];
-    watcher.add(folderPath);
-    return folderPath;
+    return result.filePaths[0];
+});
+
+ipcMain.handle('ai:fetchModels', async (_, config) => {
+    return await fetchModelList(config);
+});
+
+ipcMain.handle('ai:chat', async (_, request) => {
+    return await proxyAiChat(request);
+});
+
+ipcMain.handle('ai:listSkills', async () => {
+    const skills = listLocalSkills().map(({ filePath, ...skill }) => skill);
+    return { success: true, skills };
+});
+
+ipcMain.handle('ai:getSkill', async (_, skillId) => {
+    return getLocalSkill(skillId);
+});
+
+ipcMain.handle('folder:watch', (_, folderPath) => {
+    return watcher.add(folderPath);
+});
+
+ipcMain.handle('folder:syncWatches', (_, activeFolders, knownFolders = []) => {
+    return watcher.sync(activeFolders, knownFolders);
 });
 
 ipcMain.handle('folder:scan', async (_, folderPath) => {
@@ -118,10 +562,21 @@ ipcMain.handle('folder:scan', async (_, folderPath) => {
 });
 
 ipcMain.handle('folder:unwatch', (_, folderPath) => {
-    watcher.remove(folderPath);
+    return watcher.remove(folderPath);
 });
 
-const { Menu } = require('electron');
+ipcMain.handle('folder:moveFiles', async (_, filePaths, targetDir) => {
+    return await moveFilesToFolder(filePaths, targetDir);
+});
+
+ipcMain.handle('folder:copyFiles', async (_, filePaths, targetDir) => {
+    return await copyFilesToFolder(filePaths, targetDir);
+});
+
+ipcMain.handle('folder:copyFilesToExplorer', async (_, filePaths, options = {}) => {
+    return await copyFilesToCurrentExplorer(filePaths, options);
+});
+
 ipcMain.handle('folder:showContextMenu', async (_, folderPath) => {
     return new Promise((resolve) => {
         const menu = Menu.buildFromTemplate([
@@ -146,52 +601,187 @@ ipcMain.handle('folder:showContextMenu', async (_, folderPath) => {
     });
 });
 
-
-// 缩略图
-ipcMain.handle('thumb:get', async (_, filePath) => {
-    return thumbnailer.getThumbnail(filePath);
+ipcMain.handle('file:selectReplacement', async (_, options = {}) => {
+    const originalPath = String(options.originalPath || '');
+    const originalName = originalPath ? path.basename(originalPath) : '';
+    const originalExt = originalPath ? path.extname(originalPath).replace(/^\./, '').toLowerCase() : '';
+    const filters = originalExt
+        ? [{ name: `${originalExt.toUpperCase()} 文件`, extensions: [originalExt] }, { name: '所有文件', extensions: ['*'] }]
+        : [{ name: '所有文件', extensions: ['*'] }];
+    const result = await dialog.showOpenDialog(mainWindow, {
+        title: originalName ? `重接素材：${originalName}` : '选择替代素材',
+        properties: ['openFile'],
+        filters
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, canceled: true };
+    }
+    return { success: true, filePath: result.filePaths[0] };
 });
 
-// 剪贴板 — 复制文件引用（和资源管理器右键→复制一样）
-ipcMain.handle('clipboard:copy', async (_, filePath) => {
+
+// 缩略图
+ipcMain.handle('thumb:get', async (_, filePath, maxDim) => {
+    return thumbnailer.getThumbnail(filePath, maxDim);
+});
+
+function psQuoted(value) {
+    return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function writeTextWithPowerShell(text) {
+    const fs = require('fs');
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const textPath = path.join(os.tmpdir(), `flow_clipboard_text_${process.pid}_${Date.now()}.txt`);
+    const scriptPath = path.join(os.tmpdir(), `flow_clipboard_text_${process.pid}_${Date.now()}.ps1`);
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+    fs.writeFileSync(textPath, text, 'utf16le');
+    const psContent = [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        `$text = Get-Content -LiteralPath ${psQuoted(textPath)} -Raw -Encoding Unicode`,
+        '$ok = $false',
+        'for ($i = 0; $i -lt 10 -and -not $ok; $i++) {',
+        '  try {',
+        '    [System.Windows.Forms.Clipboard]::SetText($text, [System.Windows.Forms.TextDataFormat]::UnicodeText)',
+        '    $actual = [System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText)',
+        '    if ($actual -eq $text) { $ok = $true } else { Start-Sleep -Milliseconds 80 }',
+        '  } catch { Start-Sleep -Milliseconds 80 }',
+        '}',
+        'if (-not $ok) { throw "Clipboard text write failed" }',
+        'Write-Output "DONE"'
+    ].join('\r\n');
+    writePowerShellScript(scriptPath, psContent);
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+            { timeout: 8000, windowsHide: true },
+            (err, stdout) => {
+                try { fs.unlinkSync(textPath); } catch (_) { }
+                try { fs.unlinkSync(scriptPath); } catch (_) { }
+                resolve(!err && (stdout || '').includes('DONE'));
+            }
+        );
+    });
+}
+
+async function writePlainTextToClipboard(text) {
+    const value = String(text || '');
     try {
-        const fs = require('fs');
-        const os = require('os');
-        const { exec } = require('child_process');
+        clipboard.writeText(value, 'clipboard');
+        if (clipboard.readText('clipboard') === value) {
+            return { success: true, type: 'text', method: 'electron', verified: true };
+        }
+    } catch (err) {
+        console.warn('[Clipboard] Electron text write failed:', err?.message);
+    }
 
-        // 通过 PowerShell SetFileDropList 写入文件引用
-        const scriptPath = path.join(os.tmpdir(), 'flow_clipboard.ps1');
-        const psContent = [
-            'Add-Type -AssemblyName System.Windows.Forms',
-            '$col = New-Object System.Collections.Specialized.StringCollection',
-            `$col.Add("${filePath.replace(/"/g, '`"')}")`,
-            '[System.Windows.Forms.Clipboard]::SetFileDropList($col)',
-            'Write-Output "DONE"'
-        ].join('\r\n');
-        fs.writeFileSync(scriptPath, psContent, 'utf8');
+    const ok = await writeTextWithPowerShell(value);
+    if (ok) {
+        return { success: true, type: 'text', method: 'powershell', verified: true };
+    }
 
-        const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    return { success: false, error: 'Clipboard text write failed' };
+}
 
-        return new Promise((resolve) => {
-            exec(`"${psExe}" -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-                { timeout: 8000, windowsHide: true },
-                (err, stdout) => {
-                    try { fs.unlinkSync(scriptPath); } catch (_) { }
-                    if (err || !(stdout || '').includes('DONE')) {
-                        console.warn('[Clipboard] PowerShell 失败，降级为文本:', err?.message);
-                        clipboard.writeText(filePath);
-                        resolve({ success: true, type: 'text' });
-                    } else {
-                        const fileSize = fs.statSync(filePath).size;
-                        const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
-                        console.log(`[Clipboard] 文件引用写入成功: ${path.basename(filePath)} (${sizeMB}MB)`);
-                        resolve({ success: true, type: 'file', sizeMB });
-                    }
+async function writeFileDropListToClipboard(filePathOrPaths) {
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const paths = (Array.isArray(filePathOrPaths) ? filePathOrPaths : [filePathOrPaths])
+        .filter(Boolean)
+        .map(p => String(p));
+    const existingPaths = paths.filter(p => {
+        try {
+            return fs.existsSync(p) && fs.statSync(p).isFile();
+        } catch (_) {
+            return false;
+        }
+    });
+
+    if (existingPaths.length === 0) {
+        return writePlainTextToClipboard(paths.join('\r\n'));
+    }
+
+    const scriptPath = path.join(os.tmpdir(), `flow_clipboard_${process.pid}_${Date.now()}.ps1`);
+    const dataPath = path.join(os.tmpdir(), `flow_clipboard_${process.pid}_${Date.now()}.json`);
+    const asciiJson = JSON.stringify(existingPaths).replace(/[^\x00-\x7F]/g, ch => {
+        return ch.split('').map(unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+    });
+    fs.writeFileSync(dataPath, asciiJson, 'ascii');
+
+    const psContent = [
+        '$ErrorActionPreference = "Stop"',
+        'Add-Type -AssemblyName System.Windows.Forms',
+        `$paths = Get-Content -LiteralPath ${psQuoted(dataPath)} -Raw | ConvertFrom-Json`,
+        '$col = New-Object System.Collections.Specialized.StringCollection',
+        'foreach ($p in $paths) { [void]$col.Add([string]$p) }',
+        '$data = New-Object System.Windows.Forms.DataObject',
+        '$data.SetFileDropList($col)',
+        '$data.SetText(($paths -join "`r`n"), [System.Windows.Forms.TextDataFormat]::UnicodeText)',
+        '$dropEffect = [byte[]](5,0,0,0)',
+        '$stream = New-Object System.IO.MemoryStream(,$dropEffect)',
+        '$data.SetData("Preferred DropEffect", $stream)',
+        '$ok = $false',
+        'for ($i = 0; $i -lt 8 -and -not $ok; $i++) {',
+        '  try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true, 8, 80); $ok = $true }',
+        '  catch { Start-Sleep -Milliseconds 80 }',
+        '}',
+        'if (-not $ok) { throw "Clipboard write failed" }',
+        '[pscustomobject]@{ success = $true } | ConvertTo-Json -Compress'
+    ].join('\r\n');
+    writePowerShellScript(scriptPath, psContent);
+
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+            timeout: 8000,
+            windowsHide: true
+        }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(scriptPath); } catch (_) { }
+            try { fs.unlinkSync(dataPath); } catch (_) { }
+            if (err) {
+                console.warn('[Clipboard] PowerShell 失败，降级为文本:', err?.message);
+                writePlainTextToClipboard(existingPaths.join('\r\n')).then(resolve);
+                return;
+            }
+            try {
+                const parsed = JSON.parse(String(stdout || '').trim() || '{}');
+                if (!parsed?.success) {
+                    writePlainTextToClipboard(existingPaths.join('\r\n')).then(resolve);
+                    return;
                 }
-            );
+            } catch (parseErr) {
+                writePlainTextToClipboard(existingPaths.join('\r\n')).then(resolve);
+                return;
+            }
+
+            const filePath = existingPaths[0];
+            const totalBytes = existingPaths.reduce((sum, p) => sum + fs.statSync(p).size, 0);
+            const sizeMB = (totalBytes / 1024 / 1024).toFixed(1);
+            console.log(`[Clipboard] 文件引用写入成功: ${path.basename(filePath)} (${sizeMB}MB)`);
+            resolve({ success: true, type: 'file', count: existingPaths.length, sizeMB });
         });
+    });
+}
+
+// 剪贴板 — 复制文件引用（和资源管理器右键→复制一样）
+ipcMain.handle('clipboard:copy', async (_, filePathOrPaths) => {
+    try {
+        return await writeFileDropListToClipboard(filePathOrPaths);
     } catch (err) {
         console.error('[Clipboard] 复制失败:', err);
+        return { success: false, error: err.message };
+    }
+});
+
+// 剪贴板 — 写入纯文本（用于 AI IDE 引用地址）
+ipcMain.handle('clipboard:writeText', async (_, text) => {
+    try {
+        return await writePlainTextToClipboard(text);
+    } catch (err) {
+        console.error('[Clipboard] 写入文本失败:', err);
         return { success: false, error: err.message };
     }
 });
@@ -209,32 +799,84 @@ ipcMain.handle('shell:openFile', (_, filePath) => {
 ipcMain.on('drag:start', (event, filePathOrPaths) => {
     try {
         const filePaths = Array.isArray(filePathOrPaths) ? filePathOrPaths : [filePathOrPaths];
-
-        // 用第一个图片文件生成拖拽图标
-        let icon = nativeImage.createEmpty();
-        for (const fp of filePaths) {
-            const img = nativeImage.createFromPath(fp);
-            if (!img.isEmpty()) {
-                icon = img.resize({ width: 128, height: 128 });
-                break;
-            }
-        }
-
-        if (filePaths.length === 1) {
-            event.sender.startDrag({
-                file: filePaths[0],
-                icon: icon
-            });
-        } else {
-            event.sender.startDrag({
-                files: filePaths,
-                icon: icon
-            });
-        }
+        startFileDrag(event, filePaths);
     } catch (err) {
         console.error('[Main] startDrag 失败:', err);
     }
 });
+
+ipcMain.on('drag:startExportCopy', (event, filePathOrPaths) => {
+    try {
+        const sourcePaths = Array.isArray(filePathOrPaths) ? filePathOrPaths : [filePathOrPaths];
+        const exportPaths = createDragExportCopies(sourcePaths);
+        startFileDrag(event, exportPaths);
+    } catch (err) {
+        console.error('[Main] startExportCopy 失败:', err);
+    }
+});
+
+function startFileDrag(event, filePaths) {
+    const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
+    if (paths.length === 0) return;
+
+    // 用第一个图片文件生成拖拽图标
+    let icon = nativeImage.createEmpty();
+    for (const fp of paths) {
+        const img = nativeImage.createFromPath(fp);
+        if (!img.isEmpty()) {
+            icon = img.resize({ width: 128, height: 128 });
+            break;
+        }
+    }
+
+    if (paths.length === 1) {
+        event.sender.startDrag({
+            file: paths[0],
+            icon: icon
+        });
+    } else {
+        event.sender.startDrag({
+            files: paths,
+            icon: icon
+        });
+    }
+}
+
+function createDragExportCopies(filePaths) {
+    const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
+    const exportRoot = path.join(app.getPath('temp'), 'FlowCanvasDragExport');
+    const exportDir = path.join(exportRoot, `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+    fs.mkdirSync(exportDir, { recursive: true });
+    cleanupOldDragExports(exportRoot);
+
+    const copied = [];
+    paths.forEach(source => {
+        const sourcePath = path.resolve(source);
+        if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) return;
+        const targetPath = getAvailableArchivePath(exportDir, sourcePath);
+        fs.copyFileSync(sourcePath, targetPath);
+        copied.push(targetPath);
+    });
+
+    return copied;
+}
+
+function cleanupOldDragExports(exportRoot) {
+    try {
+        if (!fs.existsSync(exportRoot)) return;
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        fs.readdirSync(exportRoot, { withFileTypes: true }).forEach(entry => {
+            if (!entry.isDirectory()) return;
+            const fullPath = path.join(exportRoot, entry.name);
+            const stat = fs.statSync(fullPath);
+            if (stat.mtimeMs < cutoff) {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+            }
+        });
+    } catch (err) {
+        console.warn('[Main] 清理拖拽导出缓存失败:', err.message);
+    }
+}
 
 // 窗口置顶
 ipcMain.handle('window:setAlwaysOnTop', (_, flag) => {
@@ -258,15 +900,48 @@ const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
 
+function writePowerShellScript(scriptPath, content) {
+    fs.writeFileSync(scriptPath, `\uFEFF${content}`, 'utf8');
+}
+
+function normalizeExplorerCopyError(error) {
+    const text = String(error || '').trim();
+    if (!text) return '复制失败';
+    if (text.includes('FC_NO_WINDOW')) return '鼠标下方没有可用窗口';
+    if (text.includes('FC_NOT_EXPLORER') || text.includes('FC_RELEASE_ON_EXPLORER')) {
+        return '请把鼠标松在资源管理器文件夹窗口上';
+    }
+    if (text.includes('FC_NO_EXPLORER_FOLDER')) return '未找到打开的资源管理器文件夹';
+    if (text.includes('FC_PASTE_NO_RESULT')) return '资源管理器粘贴没有返回结果';
+    if (text.includes('FC_MOUSE_TIMEOUT')) return '拖拽超时，未检测到鼠标松开';
+    return text;
+}
+
 function getSaveDir() {
     const dir = path.join(app.getPath('userData'), 'data', 'captured');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     return dir;
 }
 
+function getBoardDefaultSaveFolder(data) {
+    const groups = data?.folderGroups || [];
+    const activeGroup = groups.find(group => group.id === data?.activeGroupId);
+    const activeFolders = activeGroup?.folders || [];
+
+    if (activeGroup?.defaultSaveFolder && activeFolders.includes(activeGroup.defaultSaveFolder)) {
+        return activeGroup.defaultSaveFolder;
+    }
+
+    return activeFolders[0] || (data?.watchFolders && data.watchFolders[0]) || data?.activeGroupDefaultSaveFolder || null;
+}
+
 // 从 URL 下载图片到本地（saveDir 由前端传入）
 ipcMain.handle('image:downloadFromUrl', async (_, url, targetDir) => {
     return await downloadImageFromUrl(url, targetDir);
+});
+
+ipcMain.handle('image:archiveLocalFile', async (_, filePath, targetDir) => {
+    return await archiveLocalFile(filePath, targetDir);
 });
 
 // 从剪贴板读取图片并保存
@@ -305,6 +980,484 @@ ipcMain.handle('image:pasteFromClipboard', async (_, targetDir) => {
 });
 
 // 共享下载函数
+ipcMain.handle('mcp:image:generate', async (_, body) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...(await flowCanvasBridge.generateImageFromRenderer(body || {})) };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+function isPathInside(parentDir, filePath) {
+    const relative = path.relative(path.resolve(parentDir), path.resolve(filePath));
+    return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function getAvailableArchivePath(saveDir, sourcePath) {
+    const parsed = path.parse(path.basename(sourcePath));
+    const firstChoice = path.join(saveDir, path.basename(sourcePath));
+    if (!fs.existsSync(firstChoice)) return firstChoice;
+
+    const sourceKey = crypto.createHash('md5').update(path.resolve(sourcePath)).digest('hex').slice(0, 8);
+    const hashedChoice = path.join(saveDir, `${parsed.name}_${sourceKey}${parsed.ext}`);
+    if (!fs.existsSync(hashedChoice)) return hashedChoice;
+
+    for (let i = 2; i < 1000; i++) {
+        const candidate = path.join(saveDir, `${parsed.name}_${sourceKey}_${i}${parsed.ext}`);
+        if (!fs.existsSync(candidate)) return candidate;
+    }
+
+    throw new Error('No available archive filename');
+}
+
+async function archiveLocalFile(filePath, targetDir) {
+    try {
+        if (!filePath) {
+            return { success: false, error: 'Missing file path' };
+        }
+
+        const sourcePath = path.resolve(String(filePath));
+        if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+            return { success: false, error: 'Source file does not exist' };
+        }
+
+        const saveDir = path.resolve(targetDir || getSaveDir());
+        if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+
+        if (isPathInside(saveDir, sourcePath)) {
+            return { success: true, filePath: sourcePath, archived: false, reason: 'already-in-target' };
+        }
+
+        const archivedPath = getAvailableArchivePath(saveDir, sourcePath);
+        await fs.promises.copyFile(sourcePath, archivedPath);
+        return { success: true, filePath: archivedPath, archived: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+
+async function moveFilesToFolder(filePaths, targetDir) {
+    try {
+        const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
+        if (!targetDir) {
+            return { success: false, error: 'Missing target folder', moved: [] };
+        }
+
+        const saveDir = path.resolve(String(targetDir));
+        if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+
+        const moved = [];
+        const errors = [];
+
+        for (const source of paths) {
+            try {
+                const sourcePath = path.resolve(source);
+                if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+                    errors.push({ source, error: 'Source file does not exist' });
+                    continue;
+                }
+
+                if (isPathInside(saveDir, sourcePath)) {
+                    moved.push({ oldPath: sourcePath, newPath: sourcePath, moved: false, reason: 'already-in-target' });
+                    continue;
+                }
+
+                const targetPath = getAvailableArchivePath(saveDir, sourcePath);
+                await fs.promises.rename(sourcePath, targetPath);
+                moved.push({ oldPath: sourcePath, newPath: targetPath, moved: true });
+            } catch (err) {
+                errors.push({ source, error: err.message });
+            }
+        }
+
+        return {
+            success: moved.length > 0,
+            moved,
+            errors
+        };
+    } catch (err) {
+        return { success: false, error: err.message, moved: [] };
+    }
+}
+
+async function copyFilesToFolder(filePaths, targetDir) {
+    try {
+        const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
+        if (!targetDir) {
+            return { success: false, error: 'Missing target folder', copied: [] };
+        }
+
+        const saveDir = path.resolve(String(targetDir));
+        if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+
+        const copied = [];
+        const errors = [];
+
+        for (const source of paths) {
+            try {
+                const sourcePath = path.resolve(source);
+                if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
+                    errors.push({ source, error: 'Source file does not exist' });
+                    continue;
+                }
+
+                if (isPathInside(saveDir, sourcePath)) {
+                    copied.push({ oldPath: sourcePath, newPath: sourcePath, copied: false, reason: 'already-in-target' });
+                    continue;
+                }
+
+                const targetPath = getAvailableArchivePath(saveDir, sourcePath);
+                await fs.promises.copyFile(sourcePath, targetPath);
+                copied.push({ oldPath: sourcePath, newPath: targetPath, copied: true });
+            } catch (err) {
+                errors.push({ source, error: err.message });
+            }
+        }
+
+        return {
+            success: copied.length > 0,
+            copied,
+            errors
+        };
+    } catch (err) {
+        return { success: false, error: err.message, copied: [] };
+    }
+}
+
+async function copyFilesToCurrentExplorer(filePaths, options = {}) {
+    try {
+        const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
+        if (paths.length === 0) {
+            return { success: false, error: 'No files selected', copied: [] };
+        }
+
+        if (options?.waitForMouseUp) {
+            const released = await waitForPrimaryMouseRelease(options.timeoutMs);
+            if (!released.success) {
+                return { success: false, error: released.error || '未检测到鼠标松开', copied: [] };
+            }
+        }
+
+        const explorer = await getCurrentExplorerFolder({
+            requireUnderMouse: options?.requireExplorerUnderMouse === true
+        });
+        if (!explorer?.success || !explorer.path) {
+            const pasted = await pasteFilesIntoExplorerUnderMouse(paths);
+            if (pasted?.success) {
+                return {
+                    success: true,
+                    copied: paths.map(source => ({ oldPath: source, newPath: null, copied: true, pasted: true })),
+                    pasted: true,
+                    explorerMethod: pasted.method || 'clipboard-paste'
+                };
+            }
+
+            return {
+                success: false,
+                error: pasted?.error || explorer?.error || '未找到打开的资源管理器文件夹',
+                copied: [],
+                clipboardReady: pasted?.clipboardReady === true
+            };
+        }
+
+        const result = await copyFilesToFolder(paths, explorer.path);
+        return {
+            ...result,
+            targetDir: explorer.path,
+            explorerMethod: explorer.method || null
+        };
+    } catch (err) {
+        return { success: false, error: err.message, copied: [] };
+    }
+}
+
+function waitForPrimaryMouseRelease(timeoutMs = 8000) {
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const scriptPath = path.join(os.tmpdir(), `flow_canvas_mouseup_${process.pid}_${Date.now()}.ps1`);
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const timeout = Math.max(500, Math.min(Number(timeoutMs) || 8000, 15000));
+    const script = [
+        '$ErrorActionPreference = "Stop"',
+        'Add-Type -AssemblyName System.Windows.Forms',
+        `for ($i = 0; $i -lt ${Math.ceil(timeout / 40)}; $i++) {`,
+        '  if (-not ([System.Windows.Forms.Control]::MouseButtons -band [System.Windows.Forms.MouseButtons]::Left)) {',
+        '    [pscustomobject]@{ success = $true } | ConvertTo-Json -Compress',
+        '    exit 0',
+        '  }',
+        '  Start-Sleep -Milliseconds 40',
+        '}',
+        '[pscustomobject]@{ success = $false; error = "FC_MOUSE_TIMEOUT" } | ConvertTo-Json -Compress'
+    ].join('\r\n');
+
+    writePowerShellScript(scriptPath, script);
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+            timeout: timeout + 2000,
+            windowsHide: true
+        }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(scriptPath); } catch (_) { }
+            if (err) {
+                resolve({ success: false, error: normalizeExplorerCopyError(stderr?.trim() || err.message) });
+                return;
+            }
+            try {
+                const parsed = JSON.parse(String(stdout || '').trim() || '{}');
+                if (parsed?.error) parsed.error = normalizeExplorerCopyError(parsed.error);
+                resolve(parsed);
+            } catch (parseErr) {
+                resolve({ success: false, error: parseErr.message });
+            }
+        });
+    });
+}
+
+async function pasteFilesIntoExplorerUnderMouse(filePaths) {
+    const explorerTarget = await verifyExplorerUnderMouse();
+    if (!explorerTarget?.success) {
+        return {
+            success: false,
+            error: explorerTarget?.error || '请把鼠标松在资源管理器文件夹窗口上',
+            clipboardReady: false
+        };
+    }
+
+    const clipboardResult = await writeFileDropListToClipboard(filePaths);
+    if (!clipboardResult?.success || clipboardResult.type !== 'file') {
+        return {
+            success: false,
+            error: clipboardResult?.error || '写入系统文件剪贴板失败',
+            clipboardReady: false
+        };
+    }
+
+    const pasteResult = await sendPasteToExplorerUnderMouse();
+    if (pasteResult?.success) {
+        return {
+            success: true,
+            method: pasteResult.method || 'clipboard-paste',
+            clipboardReady: true
+        };
+    }
+
+    return {
+        success: false,
+        error: pasteResult?.error || '未找到鼠标下方的资源管理器窗口，文件已放入剪贴板，可在目标文件夹按 Ctrl+V',
+        clipboardReady: true
+    };
+}
+
+function verifyExplorerUnderMouse() {
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const scriptPath = path.join(os.tmpdir(), `flow_canvas_explorer_check_${process.pid}_${Date.now()}.ps1`);
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const script = [
+        '$ErrorActionPreference = "Stop"',
+        'Add-Type -TypeDefinition @"',
+        'using System;',
+        'using System.Runtime.InteropServices;',
+        'public static class Win32FlowCanvasExplorerCheck {',
+        '  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }',
+        '  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);',
+        '  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);',
+        '  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);',
+        '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+        '}',
+        '"@',
+        '$point = New-Object Win32FlowCanvasExplorerCheck+POINT',
+        '[void][Win32FlowCanvasExplorerCheck]::GetCursorPos([ref]$point)',
+        '$hwnd = [Win32FlowCanvasExplorerCheck]::WindowFromPoint($point)',
+        'if ($hwnd -eq [IntPtr]::Zero) { throw "FC_NO_WINDOW" }',
+        '$root = [Win32FlowCanvasExplorerCheck]::GetAncestor($hwnd, 2)',
+        'if ($root -eq [IntPtr]::Zero) { $root = $hwnd }',
+        '$pidValue = 0',
+        '[void][Win32FlowCanvasExplorerCheck]::GetWindowThreadProcessId($root, [ref]$pidValue)',
+        '$processName = ""',
+        'try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}',
+        'if ($processName -ne "explorer") { throw "FC_RELEASE_ON_EXPLORER" }',
+        '[pscustomobject]@{ success = $true } | ConvertTo-Json -Compress'
+    ].join('\r\n');
+
+    writePowerShellScript(scriptPath, script);
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+            timeout: 5000,
+            windowsHide: true
+        }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(scriptPath); } catch (_) { }
+            if (err) {
+                resolve({ success: false, error: normalizeExplorerCopyError(stderr?.trim() || err.message) });
+                return;
+            }
+            try {
+                resolve(JSON.parse(String(stdout || '').trim() || '{}'));
+            } catch (parseErr) {
+                resolve({ success: false, error: parseErr.message });
+            }
+        });
+    });
+}
+
+function sendPasteToExplorerUnderMouse() {
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const scriptPath = path.join(os.tmpdir(), `flow_canvas_explorer_paste_${process.pid}_${Date.now()}.ps1`);
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const script = [
+        '$ErrorActionPreference = "Stop"',
+        'Add-Type -AssemblyName System.Windows.Forms',
+        'Add-Type -TypeDefinition @"',
+        'using System;',
+        'using System.Text;',
+        'using System.Runtime.InteropServices;',
+        'public static class Win32FlowCanvas {',
+        '  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }',
+        '  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);',
+        '  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);',
+        '  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);',
+        '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+        '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);',
+        '  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);',
+        '}',
+        '"@',
+        '$point = New-Object Win32FlowCanvas+POINT',
+        '[void][Win32FlowCanvas]::GetCursorPos([ref]$point)',
+        '$hwnd = [Win32FlowCanvas]::WindowFromPoint($point)',
+        'if ($hwnd -eq [IntPtr]::Zero) { throw "FC_NO_WINDOW" }',
+        '$root = [Win32FlowCanvas]::GetAncestor($hwnd, 2)',
+        'if ($root -eq [IntPtr]::Zero) { $root = $hwnd }',
+        '$pidValue = 0',
+        '[void][Win32FlowCanvas]::GetWindowThreadProcessId($root, [ref]$pidValue)',
+        '$processName = ""',
+        'try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}',
+        'if ($processName -ne "explorer") { throw "FC_NOT_EXPLORER" }',
+        '[void][Win32FlowCanvas]::ShowWindowAsync($root, 9)',
+        '[void][Win32FlowCanvas]::SetForegroundWindow($root)',
+        'Start-Sleep -Milliseconds 120',
+        '[System.Windows.Forms.SendKeys]::SendWait("^v")',
+        '[pscustomobject]@{ success = $true; method = "clipboard-paste-under-mouse" } | ConvertTo-Json -Compress'
+    ].join('\r\n');
+
+    writePowerShellScript(scriptPath, script);
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+            timeout: 8000,
+            windowsHide: true
+        }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(scriptPath); } catch (_) { }
+            if (err) {
+                resolve({ success: false, error: normalizeExplorerCopyError(stderr?.trim() || err.message) });
+                return;
+            }
+            try {
+                const text = String(stdout || '').trim();
+                if (!text) {
+                    resolve({ success: false, error: normalizeExplorerCopyError('FC_PASTE_NO_RESULT') });
+                    return;
+                }
+                resolve(JSON.parse(text));
+            } catch (parseErr) {
+                resolve({ success: false, error: parseErr.message });
+            }
+        });
+    });
+}
+
+function getCurrentExplorerFolder(options = {}) {
+    const os = require('os');
+    const { execFile } = require('child_process');
+    const scriptPath = path.join(os.tmpdir(), `flow_canvas_explorer_${process.pid}_${Date.now()}.ps1`);
+    const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const requireUnderMouse = options?.requireUnderMouse === true;
+    const script = [
+        '$ErrorActionPreference = "Stop"',
+        `$requireUnderMouse = ${requireUnderMouse ? '$true' : '$false'}`,
+        'Add-Type -AssemblyName System.Windows.Forms',
+        'Add-Type -TypeDefinition @"',
+        'using System;',
+        'using System.Runtime.InteropServices;',
+        'public static class Win32FlowCanvasExplorer {',
+        '  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }',
+        '  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);',
+        '  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);',
+        '  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);',
+        '}',
+        '"@',
+        '$mouse = [System.Windows.Forms.Cursor]::Position',
+        '$point = New-Object Win32FlowCanvasExplorer+POINT',
+        '[void][Win32FlowCanvasExplorer]::GetCursorPos([ref]$point)',
+        '$mouseRoot = [Win32FlowCanvasExplorer]::GetAncestor([Win32FlowCanvasExplorer]::WindowFromPoint($point), 2)',
+        '$mouseRootHandle = if ($mouseRoot -ne [IntPtr]::Zero) { $mouseRoot.ToInt64() } else { 0 }',
+        '$shell = New-Object -ComObject Shell.Application',
+        '$items = @()',
+        'foreach ($w in @($shell.Windows())) {',
+        '  try {',
+        '    $fullName = [string]$w.FullName',
+        '    if ([string]::IsNullOrWhiteSpace($fullName) -or ($fullName -notmatch "(?i)explorer\\.exe$")) { continue }',
+        '    $path = [string]$w.Document.Folder.Self.Path',
+        '    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) { continue }',
+        '    $left = [int]$w.Left; $top = [int]$w.Top; $width = [int]$w.Width; $height = [int]$w.Height',
+        '    $underMouse = ($mouse.X -ge $left -and $mouse.X -le ($left + $width) -and $mouse.Y -ge $top -and $mouse.Y -le ($top + $height))',
+        '    $handleMatch = ([int64]$w.HWND -eq $mouseRootHandle)',
+        '    $items += [pscustomobject]@{ Path = $path; HandleMatch = $handleMatch; UnderMouse = $underMouse; Left = $left; Top = $top; Width = $width; Height = $height }',
+        '  } catch {}',
+        '}',
+        '$target = $items | Where-Object { $_.HandleMatch } | Select-Object -First 1',
+        '$method = "window-handle"',
+        'if (-not $target) {',
+        '  $target = $items | Where-Object { $_.UnderMouse } | Select-Object -First 1',
+        '  $method = "under-mouse"',
+        '}',
+        'if ($requireUnderMouse -and -not $target) {',
+        '  [pscustomobject]@{ success = $false; error = "FC_RELEASE_ON_EXPLORER" } | ConvertTo-Json -Compress',
+        '  exit 0',
+        '}',
+        'if (-not $target) {',
+        '  $target = $items | Select-Object -Last 1',
+        '  $method = "last-open"',
+        '}',
+        'if ($target) {',
+        '  [pscustomobject]@{ success = $true; path = $target.Path; method = $method; count = @($items).Count } | ConvertTo-Json -Compress',
+        '} else {',
+        '  [pscustomobject]@{ success = $false; error = "FC_NO_EXPLORER_FOLDER" } | ConvertTo-Json -Compress',
+        '}'
+    ].join('\r\n');
+
+    writePowerShellScript(scriptPath, script);
+
+    return new Promise((resolve) => {
+        execFile(psExe, ['-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+            timeout: 6000,
+            windowsHide: true
+        }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(scriptPath); } catch (_) { }
+            if (err) {
+                resolve({ success: false, error: normalizeExplorerCopyError(stderr?.trim() || err.message) });
+                return;
+            }
+            try {
+                const text = String(stdout || '').trim();
+                if (!text) {
+                    resolve({ success: false, error: normalizeExplorerCopyError('FC_NO_EXPLORER_FOLDER') });
+                    return;
+                }
+                const parsed = JSON.parse(text || '{}');
+                if (parsed?.error) parsed.error = normalizeExplorerCopyError(parsed.error);
+                resolve(parsed);
+            } catch (parseErr) {
+                resolve({ success: false, error: parseErr.message });
+            }
+        });
+    });
+}
+
 async function downloadImageFromUrl(url, targetDir) {
     try {
         const saveDir = targetDir || getSaveDir();
@@ -351,6 +1504,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
     if (watcher) watcher.closeAll();
+    if (flowCanvasBridge) flowCanvasBridge.stop();
     if (process.platform !== 'darwin') app.quit();
 });
 

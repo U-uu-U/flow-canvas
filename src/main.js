@@ -2,24 +2,45 @@ import { CanvasManager } from './canvas.js';
 import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
+import { PlanService } from './plan-service.js';
 
 let storeData = null;
 let canvasManager = null;
 let sidebarManager = null;
 let contextMenu = null;
 let agentSidebar = null;
+let planService = null;
+const HISTORY_LIMIT = 100;
+let undoStack = [];
+let redoStack = [];
+let isRestoringHistory = false;
+let historyCommitTimer = null;
+let lastHistoryKey = '';
+let switchGroupRunId = 0;
 
 async function bootstrap() {
     try {
+        if (!window.flowCanvas?.store?.load) {
+            throw new Error('Flow Canvas preload bridge is unavailable');
+        }
+
         // 1. 加载数据
         storeData = await window.flowCanvas.store.load();
+        storeData.items = Array.isArray(storeData.items) ? storeData.items : [];
+        storeData.folderGroups = Array.isArray(storeData.folderGroups) ? storeData.folderGroups : [];
+        planService = new PlanService(storeData);
         console.log('[Main] 数据加载完成', storeData);
 
         // 2. 初始化核心模块
-        sidebarManager = new SidebarManager(storeData);
-        contextMenu = new ContextMenu();
-        canvasManager = new CanvasManager('canvasContainer', storeData, contextMenu);
-        agentSidebar = new AgentSidebar();
+        sidebarManager = initRequiredModule('sidebar', () => new SidebarManager(storeData));
+        contextMenu = initRequiredModule('context-menu', () => new ContextMenu());
+        canvasManager = initRequiredModule('canvas', () => new CanvasManager('canvasContainer', storeData, contextMenu, planService, {
+            getImageProvider: () => agentSidebar?.getImageProviderConfig?.() || null
+        }));
+        agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
+            getPlanningContext: () => planService.getAgentContext(canvasManager?.getSelectedFilePaths?.() || []),
+            applyPlanSuggestion: (rows) => applyAgentPlanRows(rows)
+        }));
 
         // 3. 关联事件
         sidebarManager.on('filter', (types) => {
@@ -42,53 +63,132 @@ async function bootstrap() {
             canvasManager.exportAsMd();
         });
 
+        sidebarManager.on('newPlan', () => {
+            const plan = canvasManager.addPlan();
+            if (plan) {
+                saveStoreThrottled();
+                commitHistory('new-plan');
+            }
+        });
+
+        sidebarManager.on('resourceSaverChange', (enabled) => {
+            canvasManager.setResourceSaverMode(enabled);
+            saveStoreThrottled();
+        });
+
+        document.addEventListener('history-undo', () => {
+            undoHistory();
+        });
+
+        document.addEventListener('history-redo', () => {
+            redoHistory();
+        });
+
+        document.addEventListener('context-move-to-folder', (e) => {
+            sidebarManager.beginMoveToFolder({ ...(e.detail || {}), mode: 'move' });
+        });
+
+        document.addEventListener('context-copy-to-folder', (e) => {
+            sidebarManager.beginMoveToFolder({ ...(e.detail || {}), mode: 'copy' });
+        });
+
+        document.addEventListener('context-repair-material', (e) => {
+            repairDisconnectedMaterials(e.detail || {}, { manual: false });
+        });
+
+        document.addEventListener('context-relink-material', (e) => {
+            repairDisconnectedMaterials(e.detail || {}, { manual: true });
+        });
+
+        sidebarManager.on('moveToFolder', async ({ itemIds = [], filePaths = [], targetFolder }) => {
+            if (!targetFolder || filePaths.length === 0) return;
+            const result = await window.flowCanvas.folder.moveFiles(filePaths, targetFolder);
+            if (!result?.success) {
+                console.warn('[Main] moveToFolder failed:', result?.error || result?.errors);
+                return;
+            }
+
+            try {
+                isRestoringHistory = true;
+                const idByPath = new Map();
+                itemIds.forEach(id => {
+                    const item = storeData.items.find(entry => entry.id === id);
+                    if (item?.filePath) idByPath.set(item.filePath, id);
+                });
+
+                (result.moved || []).forEach(({ oldPath, newPath }) => {
+                    const id = idByPath.get(oldPath);
+                    if (!id || !newPath) return;
+                    const item = storeData.items.find(entry => entry.id === id);
+                    if (item) item.filePath = newPath;
+                    canvasManager.updateItemFilePath(id, newPath);
+                });
+            } finally {
+                isRestoringHistory = false;
+            }
+
+            const movedNewPaths = new Set((result.moved || []).map(entry => entry.newPath).filter(Boolean));
+            storeData.items = storeData.items.filter((item, index, items) => {
+                if (!movedNewPaths.has(item.filePath)) return true;
+                return items.findIndex(other => other.filePath === item.filePath) === index;
+            });
+
+            saveStoreThrottled();
+            syncStats();
+            resetHistory('move-to-folder');
+        });
+
+        sidebarManager.on('copyToFolder', async ({ filePaths = [], targetFolder }) => {
+            if (!targetFolder || filePaths.length === 0) return;
+            const result = await window.flowCanvas.folder.copyFiles(filePaths, targetFolder);
+            if (!result?.success) {
+                console.warn('[Main] copyToFolder failed:', result?.error || result?.errors);
+                showHistoryStatus('复制失败');
+                return;
+            }
+            const count = result.copied?.length || 0;
+            showHistoryStatus(count > 1 ? `已复制 ${count} 个文件` : '已复制文件');
+        });
+
         // ── 文件夹组切换 ──
-        sidebarManager.on('switchGroup', async (data) => {
-            console.log('[Main] 切换文件夹组, folders:', data.folders.length, ', items:', data.items.length);
+        sidebarManager.on('switchGroup', async (data = {}) => {
+            const currentSwitchRun = ++switchGroupRunId;
+            const folders = Array.isArray(data.folders) ? data.folders : [];
+            const items = Array.isArray(data.items) ? data.items : [];
+            console.log('[Main] 切换文件夹组, folders:', folders.length, ', items:', items.length);
 
-            // 1. 清空当前画布
             canvasManager.clearAll();
+            planService.migrateStoreData();
 
-            // 2. 恢复视口位置
+            storeData.items = [...items];
+            canvasManager.storeData = storeData;
+
             if (data.viewport) {
                 canvasManager.setViewport(data.viewport);
+            } else {
+                canvasManager.setViewport({ x: 0, y: 0, scale: 1 });
             }
 
-            // 3. 重新加载该组保存的 items
-            if (data.items && data.items.length > 0) {
-                storeData.items = data.items;
-                canvasManager.storeData = storeData;
+            if (storeData.items.length > 0) {
                 canvasManager.renderInitialItems();
+            } else {
+                canvasManager.renderPlans();
             }
 
-            // 4. 如果组有文件夹但没有已保存的 items，扫描文件夹
-            if (data.items.length === 0 && data.folders.length > 0) {
-                for (const folder of data.folders) {
-                    const files = await window.flowCanvas.folder.scan(folder);
-                    if (files && files.length > 0) {
-                        const newItems = [];
-                        files.forEach(filePath => {
-                            const item = canvasManager.addFile(filePath);
-                            if (item) {
-                                storeData.items.push(item);
-                                newItems.push(item);
-                            }
-                        });
-                        if (newItems.length > 0 && newItems.length === storeData.items.length) {
-                            canvasManager.packLayout();
-                        }
-                    }
-                }
+            if (folders.length > 0) {
+                await reconcileGroupFiles(folders, currentSwitchRun);
+                if (currentSwitchRun !== switchGroupRunId) return;
             }
 
             syncStats();
             saveStoreThrottled();
+            resetHistory('switch-group');
         });
 
         // 统一更新文件计数的辅助函数
         function syncStats() {
-            const count = canvasManager.items.size;
-            console.log('[Main] syncStats: canvasManager.items.size =', count, ', storeData.items.length =', storeData.items.length);
+            const count = storeData.items.length;
+            console.log('[Main] syncStats: canvasManager.items.size =', canvasManager.items.size, ', storeData.items.length =', count);
             sidebarManager.updateStats(count);
         }
 
@@ -96,6 +196,7 @@ async function bootstrap() {
         sidebarManager.on('scanFiles', (files) => {
             const newItems = [];
             files.forEach(filePath => {
+                if (!isWatchedBoardFile(filePath)) return;
                 const item = canvasManager.addFile(filePath);
                 if (item) {
                     storeData.items.push(item);
@@ -109,6 +210,9 @@ async function bootstrap() {
             if (newItems.length > 0 && newItems.length === storeData.items.length) {
                 canvasManager.packLayout();
             }
+            if (newItems.length > 0) {
+                commitHistory('scan-files');
+            }
         });
 
         // 监听后端文件变更
@@ -116,16 +220,23 @@ async function bootstrap() {
             const { event, filePath } = msg;
             console.log('[Main] 收到文件变更:', event, filePath);
 
+            if (!isWatchedBoardFile(filePath)) {
+                console.log('[Main] 忽略非当前组或不支持的文件变更:', filePath);
+                return;
+            }
+
             if (event === 'add') {
                 const item = canvasManager.addFile(filePath);
                 if (item) {
                     storeData.items.push(item);
                     saveStoreThrottled();
+                    commitHistory('file-add');
                 }
             } else if (event === 'remove') {
                 canvasManager.removeFile(filePath);
                 storeData.items = storeData.items.filter(i => i.filePath !== filePath);
                 saveStoreThrottled();
+                commitHistory('file-remove');
             }
 
             syncStats();
@@ -144,12 +255,19 @@ async function bootstrap() {
             }
             saveStoreThrottled();
             syncStats();
+            commitHistory('remove');
         });
 
         // 监听画布变更
         canvasManager.on('change', () => {
             saveStoreThrottled();
             syncStats();
+            scheduleHistoryCommit('canvas-change');
+        });
+
+        canvasManager.on('plansChanged', () => {
+            saveStoreThrottled();
+            scheduleHistoryCommit('plans-change');
         });
 
         // 监听网页图片摘取
@@ -157,6 +275,7 @@ async function bootstrap() {
             storeData.items.push(data);
             saveStoreThrottled();
             syncStats();
+            commitHistory('captured-file');
         });
 
         // 监听 Ctrl+拖拽复制产生的新卡片
@@ -164,40 +283,705 @@ async function bootstrap() {
             clonedDataList.forEach(data => storeData.items.push(data));
             saveStoreThrottled();
             syncStats();
+            scheduleHistoryCommit('cloned-items');
         });
 
         // 监听主进程拦截到的拖拽图片（will-navigate 拦截方式）
-        window.flowCanvas.onExternalImageDropped((filePath) => {
+        window.flowCanvas.onExternalImageDropped?.((filePath) => {
             console.log('[Main] 收到主进程拖拽图片:', filePath);
             canvasManager._addCapturedFile(filePath);
         });
 
+        if (window.flowCanvas.onMcpStoreUpdated) {
+            window.flowCanvas.onMcpStoreUpdated((payload) => {
+                handleExternalStoreUpdate(payload);
+            });
+        }
+
         // 初始状态更新
         syncStats();
         updateBodyState();
+        resetHistory('initial');
+        startBoardUsageMonitor();
 
     } catch (err) {
         console.error('[Main] 启动失败:', err);
+        showStartupError(err);
     }
+}
+
+function initRequiredModule(name, factory) {
+    try {
+        return factory();
+    } catch (err) {
+        console.error(`[Main] ${name} init failed:`, err);
+        showStartupError(err, name);
+        throw err;
+    }
+}
+
+function initOptionalModule(name, factory) {
+    try {
+        return factory();
+    } catch (err) {
+        console.error(`[Main] ${name} init skipped:`, err);
+        showStartupError(err, name);
+        return null;
+    }
+}
+
+function showStartupError(err, area = 'startup') {
+    const status = document.getElementById('titlebarStatus');
+    if (status) {
+        status.textContent = `Flow Canvas ${area} error: ${err?.message || err}`;
+        status.classList.add('status-visible');
+    }
+    document.body.classList.add('app-startup-error');
+}
+
+function handleExternalStoreUpdate(payload) {
+    if (!payload?.data || !canvasManager || !sidebarManager) return;
+
+    isRestoringHistory = true;
+    clearTimeout(historyCommitTimer);
+    historyCommitTimer = null;
+    clearTimeout(saveTimer);
+
+    try {
+        storeData = payload.data;
+        planService = new PlanService(storeData);
+
+        sidebarManager.storeData = storeData;
+        canvasManager.storeData = storeData;
+        canvasManager.planService = planService;
+
+        canvasManager.clearAll();
+        canvasManager.setViewport(storeData.viewport || { x: 0, y: 0, scale: 1 });
+        canvasManager.renderInitialItems();
+        sidebarManager.renderGroups();
+        sidebarManager.updateStats(storeData.items?.length || 0);
+        updateBodyState();
+        resetHistory(payload.event || 'mcp-store-update');
+        console.log('[Main] MCP store update applied:', payload.event);
+    } finally {
+        isRestoringHistory = false;
+    }
+}
+
+let boardUsageTimer = null;
+function startBoardUsageMonitor() {
+    const memoryEl = document.getElementById('boardUsageMemory');
+    const detailEl = document.getElementById('boardUsageDetail');
+    if (!memoryEl || !detailEl || !window.flowCanvas?.metrics?.getBoardUsage) return;
+
+    const formatMB = (kb) => {
+        if (!Number.isFinite(kb)) return '-- MB';
+        return `${Math.round(kb / 1024)} MB`;
+    };
+
+    const update = async () => {
+        try {
+            const usage = await window.flowCanvas.metrics.getBoardUsage();
+            const stats = canvasManager?.getResourceUsageStats?.() || {};
+            const workingSetKB = usage?.memory?.workingSetSize || usage?.memory?.privateBytes || 0;
+            memoryEl.textContent = formatMB(workingSetKB);
+            detailEl.textContent = `${stats.loaded || 0}/${stats.total || 0}`;
+            detailEl.title = `loaded ${stats.loaded || 0}, loading ${stats.loading || 0}, queued ${stats.queued || 0}`;
+        } catch (err) {
+            memoryEl.textContent = '-- MB';
+            detailEl.textContent = '0/0';
+        }
+    };
+
+    clearInterval(boardUsageTimer);
+    update();
+    boardUsageTimer = setInterval(update, 2000);
+}
+
+function cloneData(value) {
+    if (value == null) return value;
+    return JSON.parse(JSON.stringify(value));
+}
+
+function getCurrentViewport() {
+    if (canvasManager) return canvasManager.getViewport();
+    return cloneData(storeData?.viewport || { x: 0, y: 0, scale: 1 });
+}
+
+function applyAgentPlanRows(rows) {
+    if (!Array.isArray(rows) || !planService || !canvasManager) return false;
+    let plan = planService.listPlans()[0];
+    if (!plan) {
+        plan = canvasManager.addPlan();
+    }
+    if (!plan) return false;
+
+    const normalizedRows = rows.map((row, index) => {
+        const base = planService.createRow(index);
+        const cells = row.cells || row;
+        plan.columns.forEach(column => {
+            if (cells[column.key] != null) {
+                base.cells[column.key] = String(cells[column.key]);
+            } else if (cells[column.label] != null) {
+                base.cells[column.key] = String(cells[column.label]);
+            }
+        });
+        return base;
+    });
+
+    planService.updatePlan(plan.id, { rows: normalizedRows });
+    canvasManager.renderPlans();
+    saveStoreThrottled();
+    commitHistory('agent-plan-apply');
+    return true;
+}
+
+function snapshotBoardState() {
+    if (!storeData) return null;
+
+    return {
+        activeGroupId: storeData.activeGroupId || null,
+        items: cloneData(storeData.items || []),
+        plans: cloneData(planService?.listPlans?.() || []),
+        viewport: cloneData(getCurrentViewport())
+    };
+}
+
+function historyKey(snapshot) {
+    return JSON.stringify(snapshot);
+}
+
+function resetHistory(reason = 'reset') {
+    clearTimeout(historyCommitTimer);
+    const snapshot = snapshotBoardState();
+    if (!snapshot) return;
+
+    undoStack = [snapshot];
+    redoStack = [];
+    lastHistoryKey = historyKey(snapshot);
+    console.log('[History] reset:', reason);
+}
+
+function commitHistory(reason = 'change') {
+    if (isRestoringHistory) return;
+
+    clearTimeout(historyCommitTimer);
+    historyCommitTimer = null;
+
+    const snapshot = snapshotBoardState();
+    if (!snapshot) return;
+
+    const key = historyKey(snapshot);
+    if (key === lastHistoryKey) return;
+
+    undoStack.push(snapshot);
+    if (undoStack.length > HISTORY_LIMIT) {
+        undoStack.shift();
+    }
+    redoStack = [];
+    lastHistoryKey = key;
+    console.log('[History] commit:', reason, 'undo:', undoStack.length);
+}
+
+function scheduleHistoryCommit(reason = 'change') {
+    if (isRestoringHistory) return;
+
+    clearTimeout(historyCommitTimer);
+    historyCommitTimer = setTimeout(() => {
+        commitHistory(reason);
+    }, 250);
+}
+
+function restoreHistorySnapshot(snapshot) {
+    if (!snapshot || !storeData || !canvasManager) return;
+
+    isRestoringHistory = true;
+    clearTimeout(historyCommitTimer);
+    historyCommitTimer = null;
+    clearTimeout(saveTimer);
+
+    const restoredItems = cloneData(snapshot.items || []);
+    const restoredPlans = cloneData(snapshot.plans || []);
+    const restoredViewport = cloneData(snapshot.viewport || { x: 0, y: 0, scale: 1 });
+
+    storeData.items = restoredItems;
+    storeData.viewport = restoredViewport;
+    const activeGroup = sidebarManager?.getActiveGroup();
+    if (activeGroup) {
+        activeGroup.plans = restoredPlans;
+    }
+    planService?.migrateStoreData?.();
+
+    canvasManager.clearAll();
+    canvasManager.storeData = storeData;
+    canvasManager.setViewport(restoredViewport);
+    canvasManager.renderInitialItems();
+
+    sidebarManager?.updateStats?.(storeData.items.length);
+    saveStoreNow();
+
+    lastHistoryKey = historyKey(snapshot);
+    isRestoringHistory = false;
+}
+
+function undoHistory() {
+    if (isRestoringHistory) return;
+
+    commitHistory('before-undo');
+    if (undoStack.length <= 1) {
+        showHistoryStatus('没有可撤销的操作');
+        return;
+    }
+
+    const current = undoStack.pop();
+    redoStack.push(current);
+    const target = undoStack[undoStack.length - 1];
+    restoreHistorySnapshot(target);
+    showHistoryStatus('已撤销');
+}
+
+function redoHistory() {
+    if (isRestoringHistory) return;
+
+    commitHistory('before-redo');
+
+    if (redoStack.length === 0) {
+        showHistoryStatus('没有可前进的操作');
+        return;
+    }
+
+    const target = redoStack.pop();
+    undoStack.push(target);
+    if (undoStack.length > HISTORY_LIMIT) {
+        undoStack.shift();
+    }
+    restoreHistorySnapshot(target);
+    showHistoryStatus('已前进');
+}
+
+function showHistoryStatus(text) {
+    const status = document.getElementById('titlebarStatus');
+    if (!status) return;
+
+    status.textContent = text;
+    status.classList.add('status-visible');
+    clearTimeout(showHistoryStatus.timer);
+    showHistoryStatus.timer = setTimeout(() => {
+        status.textContent = '';
+        status.classList.remove('status-visible');
+    }, 1200);
+}
+
+async function reconcileGroupFiles(folders, currentSwitchRun) {
+    if (!window.flowCanvas?.folder?.scan || !canvasManager || !storeData) return;
+
+    const successfulFolders = [];
+    const discoveredFiles = new Set();
+    const addedItems = [];
+    const existingFilePaths = new Set(
+        (storeData.items || [])
+            .map(item => item?.filePath)
+            .filter(Boolean)
+            .map(filePath => normalizeFsPath(filePath))
+    );
+
+    for (const folder of folders) {
+        if (currentSwitchRun !== switchGroupRunId) return;
+
+        let scanResult = null;
+        try {
+            scanResult = await window.flowCanvas.folder.scan(folder);
+        } catch (err) {
+            console.warn('[Main] folder scan failed:', folder, err);
+            continue;
+        }
+
+        if (currentSwitchRun !== switchGroupRunId) return;
+
+        const parsed = parseScanResult(scanResult);
+        if (!parsed.success) {
+            console.warn('[Main] folder scan skipped:', folder, parsed.error || 'unknown error');
+            continue;
+        }
+
+        successfulFolders.push(folder);
+        parsed.files.forEach(filePath => {
+            if (!isSupportedBoardFile(filePath) || isTemporaryBoardFile(filePath)) return;
+            const normalizedFilePath = normalizeFsPath(filePath);
+            discoveredFiles.add(normalizedFilePath);
+            if (existingFilePaths.has(normalizedFilePath)) return;
+            const item = canvasManager.addFile(filePath);
+            if (item) {
+                storeData.items.push(item);
+                addedItems.push(item);
+                existingFilePaths.add(normalizedFilePath);
+            }
+        });
+    }
+
+    if (currentSwitchRun !== switchGroupRunId) return;
+
+    if (successfulFolders.length > 0) {
+        const removedItems = storeData.items.filter(item => {
+            if (!item?.filePath) return false;
+            return successfulFolders.some(folder => isPathInsideFolder(item.filePath, folder)) &&
+                !discoveredFiles.has(normalizeFsPath(item.filePath));
+        });
+
+        removedItems.forEach(item => {
+            canvasManager.removeItemById(item.id);
+        });
+        const removedIds = new Set(removedItems.map(item => item.id));
+        storeData.items = storeData.items.filter(item => !removedIds.has(item.id));
+    }
+
+    if (addedItems.length > 0 && addedItems.length === storeData.items.length) {
+        canvasManager.packLayout();
+    }
+}
+
+function parseScanResult(scanResult) {
+    if (Array.isArray(scanResult)) {
+        return { success: true, files: scanResult, error: null };
+    }
+    return {
+        success: scanResult?.success === true,
+        files: Array.isArray(scanResult?.files) ? scanResult.files : [],
+        error: scanResult?.error || null
+    };
+}
+
+async function repairDisconnectedMaterials(detail = {}, options = {}) {
+    if (!canvasManager || !storeData) return;
+    const itemIds = (detail.itemIds || []).filter(Boolean);
+    const candidateIds = itemIds.length > 0
+        ? itemIds
+        : (detail.itemId ? [detail.itemId] : []);
+    if (candidateIds.length === 0) return;
+
+    const items = candidateIds
+        .map(id => storeData.items.find(item => item.id === id))
+        .filter(Boolean);
+    if (items.length === 0) return;
+
+    let repaired = 0;
+    if (options.manual) {
+        if (items.length !== 1) {
+            showHistoryStatus('手动重接一次只能选择 1 个素材');
+            return;
+        }
+        repaired = await relinkMaterialManually(items[0]);
+    } else {
+        repaired = await repairMaterialsAutomatically(items);
+    }
+
+    if (repaired > 0) {
+        saveStoreNow();
+        sidebarManager?.updateStats?.(storeData.items?.length || 0);
+        commitHistory(options.manual ? 'relink-material' : 'repair-materials');
+    }
+}
+
+async function relinkMaterialManually(item) {
+    if (!window.flowCanvas?.file?.selectReplacement) {
+        showHistoryStatus('当前版本不支持选择替代文件');
+        return 0;
+    }
+    const result = await window.flowCanvas.file.selectReplacement({ originalPath: item.filePath });
+    if (!result?.success || !result.filePath) {
+        if (!result?.canceled) showHistoryStatus('未选择替代文件');
+        return 0;
+    }
+    if (!isSupportedBoardFile(result.filePath) || isTemporaryBoardFile(result.filePath)) {
+        showHistoryStatus('请选择 Flow Canvas 支持的素材文件');
+        return 0;
+    }
+    applyMaterialRelink(item, result.filePath);
+    showHistoryStatus('已重接素材');
+    return 1;
+}
+
+async function repairMaterialsAutomatically(items) {
+    const folders = sidebarManager?.getActiveWatchFolders?.() || storeData?.watchFolders || [];
+    if (!window.flowCanvas?.folder?.scan || folders.length === 0) {
+        showHistoryStatus('请先关联素材文件夹，或使用“手动重接素材”');
+        return 0;
+    }
+
+    const nameMap = new Map();
+    const candidates = [];
+    for (const folder of folders) {
+        let scanResult = null;
+        try {
+            scanResult = await window.flowCanvas.folder.scan(folder);
+        } catch (err) {
+            console.warn('[Main] repair scan failed:', folder, err);
+            continue;
+        }
+        const parsed = parseScanResult(scanResult);
+        if (!parsed.success) continue;
+        parsed.files.forEach(filePath => {
+            if (!isSupportedBoardFile(filePath) || isTemporaryBoardFile(filePath)) return;
+            const nameKey = getFileNameKey(filePath);
+            candidates.push(filePath);
+            if (!nameKey || !nameMap.has(nameKey)) {
+                nameMap.set(nameKey, filePath);
+            }
+        });
+    }
+
+    let repaired = 0;
+    items.forEach(item => {
+        const match = nameMap.get(getFileNameKey(item.filePath)) || findLikelyMaterialMatch(item.filePath, candidates);
+        if (!match) return;
+        applyMaterialRelink(item, match);
+        repaired += 1;
+    });
+
+    showHistoryStatus(repaired > 0 ? `已修补 ${repaired} 个素材` : '没有在当前文件夹里找到同名素材');
+    return repaired;
+}
+
+function applyMaterialRelink(item, nextPath) {
+    const oldPath = item.filePath;
+    const updated = canvasManager.updateItemFilePath(item.id, nextPath, {
+        reflowToNewAspect: true,
+        forceReload: true
+    });
+    if (!updated) item.filePath = nextPath;
+    console.log('[Main] 素材已重接:', oldPath, '=>', nextPath);
+}
+
+function getFileNameKey(filePath) {
+    return String(filePath || '').split(/[/\\]/).pop()?.toLowerCase() || '';
+}
+
+function findLikelyMaterialMatch(originalPath, candidates = []) {
+    const originalName = getFileNameKey(originalPath);
+    const originalExt = getFileExt(originalName);
+    const originalRawStem = stripFileExt(originalName);
+    const originalStem = normalizeMaterialName(originalRawStem);
+    if (!originalStem) return null;
+
+    const scored = [];
+    candidates.forEach(candidatePath => {
+        const candidateName = getFileNameKey(candidatePath);
+        const candidateExt = getFileExt(candidateName);
+        const sameExt = originalExt && candidateExt === originalExt;
+        const compatibleExt = sameExt || areCompatibleMediaExts(originalExt, candidateExt);
+        if (originalExt && candidateExt && !compatibleExt) return;
+        const candidateRawStem = stripFileExt(candidateName);
+        const candidateStem = normalizeMaterialName(candidateRawStem);
+        if (!candidateStem) return;
+
+        const score = scoreMaterialNameMatch({
+            originalStem,
+            candidateStem,
+            originalRawStem,
+            candidateRawStem,
+            extensionBoost: sameExt ? 0.08 : 0
+        });
+        scored.push({ path: candidatePath, score });
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    if (!best) return null;
+
+    const secondScore = scored[1]?.score || 0;
+    const confident = best.score >= 0.56 && (best.score >= 0.72 || best.score - secondScore >= 0.08);
+    console.log('[Main] 自动修补候选:', originalName, scored.slice(0, 3));
+    return confident ? best.path : null;
+}
+
+function getFileExt(fileName) {
+    const match = String(fileName || '').match(/\.([^.]+)$/);
+    return match ? match[1].toLowerCase() : '';
+}
+
+function stripFileExt(fileName) {
+    return String(fileName || '').replace(/\.[^.]+$/, '');
+}
+
+function normalizeMaterialName(name) {
+    return String(name || '')
+        .toLowerCase()
+        .replace(/[_\-\s()[\]{}，,。.!！?？"'“”‘’·:：/\\]+/g, '')
+        .replace(/\d{8,}/g, '')
+        .replace(/\d+k/g, '')
+        .replace(/copy|副本|拷贝|最终|导出|结果|原图|图片|图像|素材/g, '');
+}
+
+function scoreMaterialNameMatch({ originalStem, candidateStem, originalRawStem, candidateRawStem, extensionBoost = 0 }) {
+    if (candidateStem === originalStem) return 1;
+
+    const containment = candidateStem.includes(originalStem) || originalStem.includes(candidateStem)
+        ? Math.min(candidateStem.length, originalStem.length) / Math.max(candidateStem.length, originalStem.length)
+        : 0;
+    const substring = longestCommonSubstringRatio(originalStem, candidateStem);
+    const dice = diceCoefficient(originalStem, candidateStem);
+    const token = tokenOverlapRatio(originalRawStem, candidateRawStem);
+    const phrase = phraseContainmentScore(originalStem, candidateStem);
+
+    return Math.min(1, Math.max(
+        containment * 0.9,
+        substring * 0.78,
+        dice * 0.78,
+        token * 0.72,
+        phrase * 0.88
+    ) + extensionBoost);
+}
+
+function areCompatibleMediaExts(a, b) {
+    const image = new Set(['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif', 'gif']);
+    const video = new Set(['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'webm', 'm4v']);
+    if (image.has(a) && image.has(b)) return true;
+    if (video.has(a) && video.has(b)) return true;
+    return false;
+}
+
+function diceCoefficient(a, b) {
+    const left = charBigrams(a);
+    const right = charBigrams(b);
+    if (left.length === 0 || right.length === 0) return 0;
+    const counts = new Map();
+    left.forEach(pair => counts.set(pair, (counts.get(pair) || 0) + 1));
+    let hits = 0;
+    right.forEach(pair => {
+        const count = counts.get(pair) || 0;
+        if (count > 0) {
+            hits += 1;
+            counts.set(pair, count - 1);
+        }
+    });
+    return (2 * hits) / (left.length + right.length);
+}
+
+function charBigrams(value) {
+    const text = String(value || '');
+    if (text.length < 2) return text ? [text] : [];
+    const pairs = [];
+    for (let index = 0; index < text.length - 1; index += 1) {
+        pairs.push(text.slice(index, index + 2));
+    }
+    return pairs;
+}
+
+function tokenOverlapRatio(a, b) {
+    const left = tokenizeMaterialName(a);
+    const right = tokenizeMaterialName(b);
+    if (left.length === 0 || right.length === 0) return 0;
+    const rightSet = new Set(right);
+    const hits = left.filter(token => rightSet.has(token)).length;
+    return hits / Math.min(left.length, right.length);
+}
+
+function tokenizeMaterialName(value) {
+    return String(value || '')
+        .toLowerCase()
+        .split(/[_\-\s()[\]{}，,。.!！?？"'“”‘’·:：/\\]+/)
+        .map(token => normalizeMaterialName(token))
+        .filter(token => token.length >= 2 && !/^\d+$/.test(token));
+}
+
+function phraseContainmentScore(a, b) {
+    const shorter = a.length <= b.length ? a : b;
+    const longer = a.length > b.length ? a : b;
+    if (shorter.length < 4) return 0;
+    const minPhrase = Math.min(8, Math.max(4, Math.floor(shorter.length * 0.42)));
+    for (let length = shorter.length; length >= minPhrase; length -= 1) {
+        for (let start = 0; start + length <= shorter.length; start += 1) {
+            if (longer.includes(shorter.slice(start, start + length))) {
+                return length / Math.max(a.length, b.length);
+            }
+        }
+    }
+    return 0;
+}
+
+function longestCommonSubstringRatio(a, b) {
+    if (!a || !b) return 0;
+    const shorter = a.length <= b.length ? a : b;
+    const longer = a.length > b.length ? a : b;
+    let best = 0;
+    for (let start = 0; start < shorter.length; start += 1) {
+        for (let end = start + best + 1; end <= shorter.length; end += 1) {
+            if (longer.includes(shorter.slice(start, end))) {
+                best = end - start;
+            }
+        }
+    }
+    return best / Math.max(a.length, b.length);
+}
+
+function isWatchedBoardFile(filePath) {
+    if (!filePath || !isSupportedBoardFile(filePath) || isTemporaryBoardFile(filePath)) {
+        return false;
+    }
+
+    const folders = sidebarManager?.getActiveWatchFolders?.() || storeData?.watchFolders || [];
+    if (folders.length === 0) return true;
+
+    const normalizedPath = normalizeFsPath(filePath);
+    return folders.some(folder => isPathInsideFolder(normalizedPath, folder));
+}
+
+function isSupportedBoardFile(filePath) {
+    return /\.(jpg|jpeg|png|gif|webp|bmp|tiff|tif|svg|ico|mp4|mov|avi|mkv|wmv|flv|webm|m4v|mp3|wav|aac|flac|ogg|wma|m4a|pdf|doc|docx|txt|ppt|pptx|xls|xlsx)$/i.test(filePath);
+}
+
+function isTemporaryBoardFile(filePath) {
+    const name = String(filePath).split(/[/\\]/).pop() || '';
+    const lower = name.toLowerCase();
+    if (!name || name.startsWith('.') || name.startsWith('~') || name.endsWith('~')) return true;
+    if (lower === 'thumbs.db' || lower === 'desktop.ini') return true;
+    if (/\.(tmp|temp|part|partial|crdownload|download|swp|swo)$/i.test(lower)) return true;
+    if (/\.(jpg|jpeg|png|gif|webp|bmp|tif|tiff)\.(tmp|temp|part|partial|download)$/i.test(lower)) return true;
+    return false;
+}
+
+function normalizeFsPath(filePath) {
+    return String(filePath || '')
+        .replace(/\//g, '\\')
+        .replace(/\\+$/g, '')
+        .toLowerCase();
+}
+
+function isPathInsideFolder(filePath, folderPath) {
+    const normalizedPath = normalizeFsPath(filePath);
+    const normalizedFolder = normalizeFsPath(folderPath);
+    if (!normalizedPath || !normalizedFolder) return false;
+    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}\\`);
 }
 
 // 节流保存
 let saveTimer = null;
 function saveStoreThrottled() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-        storeData.viewport = canvasManager.getViewport();
+    saveTimer = setTimeout(saveStoreNow, 1000);
+}
 
-        // 同步当前 items 到激活的组
-        const activeGroup = sidebarManager?.getActiveGroup();
-        if (activeGroup) {
-            activeGroup.savedItems = [...storeData.items];
-            activeGroup.savedViewport = { ...storeData.viewport };
-        }
+function saveStoreNow(useSync = false) {
+    if (!storeData || !canvasManager) return;
+    clearTimeout(saveTimer);
+    saveTimer = null;
 
+    storeData.viewport = canvasManager.getViewport();
+
+    // 同步当前 items 到激活的组
+    const activeGroup = sidebarManager?.getActiveGroup();
+    if (activeGroup) {
+        activeGroup.savedItems = cloneData(storeData.items || []);
+        activeGroup.savedViewport = cloneData(storeData.viewport);
+        activeGroup.plans = cloneData(planService?.listPlans?.() || activeGroup.plans || []);
+    }
+
+    if (useSync && window.flowCanvas?.store?.saveSync) {
+        window.flowCanvas.store.saveSync(storeData);
+    } else {
         window.flowCanvas.store.save(storeData);
-        updateBodyState();
-    }, 1000);
+    }
+    updateBodyState();
 }
 
 function updateBodyState() {
@@ -213,3 +997,7 @@ function updateBodyState() {
 
 // 启动
 bootstrap();
+
+window.addEventListener('beforeunload', () => {
+    saveStoreNow(true);
+});
