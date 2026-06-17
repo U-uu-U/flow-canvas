@@ -362,6 +362,82 @@ export class CanvasManager {
         let isPanning = false;
         let lastPanX = 0, lastPanY = 0;
 
+        const setCanvasDragEnabled = (enabled) => {
+            this.stage.draggable(enabled);
+            this._forEachNode(item => item.group.draggable(enabled));
+        };
+
+        const detachPanningEndListeners = () => {
+            document.removeEventListener('mouseup', finishPanning, true);
+            document.removeEventListener('pointerup', finishPanning, true);
+            document.removeEventListener('pointercancel', finishPanning, true);
+            window.removeEventListener('blur', finishPanning);
+        };
+
+        const finishPanning = () => {
+            if (!isPanning) return;
+            isPanning = false;
+            document.body.style.cursor = 'default';
+            setCanvasDragEnabled(true);
+            detachPanningEndListeners();
+            this.emit('change');
+        };
+
+        const attachPanningEndListeners = () => {
+            detachPanningEndListeners();
+            document.addEventListener('mouseup', finishPanning, true);
+            document.addEventListener('pointerup', finishPanning, true);
+            document.addEventListener('pointercancel', finishPanning, true);
+            window.addEventListener('blur', finishPanning);
+        };
+
+        const detachSelectionEndListeners = () => {
+            document.removeEventListener('mouseup', finishSelection, true);
+            document.removeEventListener('pointerup', finishSelection, true);
+            document.removeEventListener('pointercancel', finishSelection, true);
+            window.removeEventListener('blur', finishSelection);
+        };
+
+        const finishSelection = (event = null) => {
+            this.stage.draggable(true);
+            if (!isSelecting) return;
+
+            isSelecting = false;
+            detachSelectionEndListeners();
+            this.selectionRect.visible(false);
+
+            const box = this.selectionRect.getClientRect();
+            const ctrlKey = Boolean(event?.ctrlKey);
+            const shiftKey = Boolean(event?.shiftKey);
+            if (box.width === 0 && box.height === 0) {
+                if (!ctrlKey && !shiftKey) {
+                    this.clearSelection();
+                }
+                return;
+            }
+
+            if (!ctrlKey && !shiftKey) {
+                this.clearSelection();
+            }
+
+            const selBox = this.selectionRect.getClientRect();
+            const shapes = this.stage.find('.nodeGroup');
+            shapes.forEach(shape => {
+                const shapeBox = shape.getClientRect();
+                if (Konva.Util.haveIntersection(selBox, shapeBox)) {
+                    this.selectItem(shape.attrs.id, true);
+                }
+            });
+        };
+
+        const attachSelectionEndListeners = () => {
+            detachSelectionEndListeners();
+            document.addEventListener('mouseup', finishSelection, true);
+            document.addEventListener('pointerup', finishSelection, true);
+            document.addEventListener('pointercancel', finishSelection, true);
+            window.addEventListener('blur', finishSelection);
+        };
+
         this.stage.on('mousedown', (e) => {
             if (e.evt.button === 1 || e.evt.button === 2) {
                 // Middle or Right click: 只平移画布，不拖动图片
@@ -369,13 +445,13 @@ export class CanvasManager {
                 isPanning = true;
 
                 // ── 关键：临时禁用 stage 和所有图片的 draggable ──
-                this.stage.draggable(false);
-                this._forEachNode(item => item.group.draggable(false));
+                setCanvasDragEnabled(false);
 
                 const pos = this.stage.getPointerPosition();
                 lastPanX = pos.x;
                 lastPanY = pos.y;
                 document.body.style.cursor = 'grabbing';
+                attachPanningEndListeners();
                 return;
             }
             if (this._activePlanReferencePick && e.evt.button === 0 && (e.target === this.stage || e.target === this.selectionRect)) {
@@ -408,8 +484,7 @@ export class CanvasManager {
 
                         const filePaths = this._getSelectedFilePathsForExternalDrag(group);
                         if (filePaths.length > 0) {
-                            this.stage.draggable(false);
-                            this._forEachNode(item => item.group.draggable(false));
+                            setCanvasDragEnabled(false);
                             group.stopDrag();
                             document.body.style.cursor = 'copy';
                             this._showCanvasStatus(filePaths.length > 1
@@ -418,13 +493,21 @@ export class CanvasManager {
 
                             this._copyFilesToExplorerAfterPointerRelease(filePaths);
 
+                            let restored = false;
                             const restoreDrag = () => {
-                                this.stage.draggable(true);
-                                this._forEachNode(item => item.group.draggable(true));
+                                if (restored) return;
+                                restored = true;
+                                setCanvasDragEnabled(true);
                                 document.body.style.cursor = 'default';
-                                document.removeEventListener('mouseup', restoreDrag);
+                                document.removeEventListener('mouseup', restoreDrag, true);
+                                document.removeEventListener('pointerup', restoreDrag, true);
+                                document.removeEventListener('pointercancel', restoreDrag, true);
+                                window.removeEventListener('blur', restoreDrag);
                             };
-                            document.addEventListener('mouseup', restoreDrag);
+                            document.addEventListener('mouseup', restoreDrag, true);
+                            document.addEventListener('pointerup', restoreDrag, true);
+                            document.addEventListener('pointercancel', restoreDrag, true);
+                            window.addEventListener('blur', restoreDrag);
                             setTimeout(restoreDrag, 8200);
                         }
                         return;
@@ -443,6 +526,7 @@ export class CanvasManager {
             this.stage.draggable(false);
 
             isSelecting = true;
+            attachSelectionEndListeners();
             const pos = this._getRelativePointerPos();
             x1 = pos.x;
             y1 = pos.y;
@@ -494,44 +578,11 @@ export class CanvasManager {
 
         this.stage.on('mouseup', (e) => {
             if (isPanning) {
-                isPanning = false;
-                document.body.style.cursor = 'default';
-
-                // ── 恢复 stage 和所有图片的 draggable ──
-                this.stage.draggable(true);
-                this._forEachNode(item => item.group.draggable(true));
-
-                this.emit('change');
+                finishPanning();
                 return;
             }
 
-            this.stage.draggable(true);
-            if (!isSelecting) return;
-
-            isSelecting = false;
-            this.selectionRect.visible(false);
-
-            const box = this.selectionRect.getClientRect();
-            if (box.width === 0 && box.height === 0) {
-                if (!e.evt.ctrlKey && !e.evt.shiftKey) {
-                    this.clearSelection();
-                }
-                return;
-            }
-
-            if (!e.evt.ctrlKey && !e.evt.shiftKey) {
-                this.clearSelection();
-            }
-
-            // Find overlapping items
-            const selBox = this.selectionRect.getClientRect();
-            const shapes = this.stage.find('.nodeGroup');
-            shapes.forEach(shape => {
-                const shapeBox = shape.getClientRect();
-                if (Konva.Util.haveIntersection(selBox, shapeBox)) {
-                    this.selectItem(shape.attrs.id, true);
-                }
-            });
+            finishSelection(e.evt);
         });
 
         this.stage.on('dragend', (e) => {
@@ -578,6 +629,9 @@ export class CanvasManager {
                 const deltaY = group.y() - group.getAttr('lastY');
                 group.setAttr('lastX', group.x());
                 group.setAttr('lastY', group.y());
+                if (movingEntry) {
+                    this._setEntryNodePosition(movingEntry, group.x(), group.y());
+                }
 
                 this.selectedItems.forEach(id => {
                     if (id === group.attrs.id) return;
@@ -591,9 +645,8 @@ export class CanvasManager {
 
                 if (movingEntry?.kind === 'plan') {
                     this._positionPlanInlineEditor(group.attrs.id);
-                } else {
-                    this._scheduleDragConnectionRefresh(movingEntry);
                 }
+                this._scheduleDragConnectionRefresh(movingEntry);
             }
         });
 
@@ -3487,7 +3540,7 @@ export class CanvasManager {
             const nextY = startY + (moveEvent.clientY - startClientY) / scale;
             entry.group.position({ x: nextX, y: nextY });
             this._setEntryNodePosition(entry, nextX, nextY);
-            this.layer.batchDraw();
+            this._scheduleDragConnectionRefresh(entry);
         };
 
         const stop = () => {
@@ -3836,28 +3889,22 @@ export class CanvasManager {
     }
 
     _canRefreshConnectionsDuringDrag(movingEntry) {
-        if (!movingEntry || movingEntry.kind === 'plan' || this.plans.size === 0) return false;
-        for (const id of this.selectedItems) {
-            if (this.plans.has(id)) return false;
-        }
-        return true;
+        return Boolean(movingEntry && this.plans.size > 0);
     }
 
     _scheduleDragConnectionRefresh(movingEntry) {
         if (!this._canRefreshConnectionsDuringDrag(movingEntry)) return;
-        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        const delay = Math.max(0, 80 - (now - this._lastDragConnectionRefreshAt));
         if (this._dragConnectionRefreshTimer) return;
-        this._dragConnectionRefreshTimer = setTimeout(() => {
+        this._dragConnectionRefreshTimer = requestAnimationFrame(() => {
             this._dragConnectionRefreshTimer = null;
             this._lastDragConnectionRefreshAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
             this._refreshPlanConnectionGraphicsOnly();
-        }, delay);
+        });
     }
 
     _flushDragConnectionRefresh() {
         if (this._dragConnectionRefreshTimer) {
-            clearTimeout(this._dragConnectionRefreshTimer);
+            cancelAnimationFrame(this._dragConnectionRefreshTimer);
             this._dragConnectionRefreshTimer = null;
         }
     }
