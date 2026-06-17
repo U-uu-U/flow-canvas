@@ -1667,18 +1667,11 @@ export class CanvasManager {
             nodeKind: 'plan'
         });
 
-        const hitArea = new Konva.Rect({
-            name: 'planHitArea displayNode',
-            x: PLAN_HANDLE_X - PLAN_HANDLE_RADIUS - 8,
-            width: width - PLAN_HANDLE_X + PLAN_OUTPUT_HANDLE_X_OFFSET + PLAN_HANDLE_RADIUS + 8,
-            height,
-            fill: 'rgba(0,0,0,0.01)',
-            stroke: 'transparent',
-            strokeWidth: 0
-        });
-
-        group.add(hitArea);
         this._drawPlanPreview(group, plan, width, height);
+
+        const getCurrentPlan = () => this.plans.get(plan.id)?.data
+            || this.planService?.getPlan?.(plan.id)
+            || plan;
 
         group.on('mouseenter', () => {
             document.body.style.cursor = 'pointer';
@@ -1715,7 +1708,7 @@ export class CanvasManager {
             if (!this.selectedItems.has(plan.id)) {
                 this.selectItem(plan.id, false);
             }
-            this._showPlanContextMenu(e, plan);
+            this._showPlanContextMenu(e, getCurrentPlan());
         });
         this.layer.add(group);
         this.plans.set(plan.id, { kind: 'plan', group, data: plan });
@@ -1726,6 +1719,18 @@ export class CanvasManager {
     }
 
     _drawPlanPreview(group, plan, width, height) {
+        group.destroyChildren();
+        const hitArea = new Konva.Rect({
+            name: 'planHitArea displayNode',
+            x: PLAN_HANDLE_X - PLAN_HANDLE_RADIUS - 8,
+            width: width - PLAN_HANDLE_X + PLAN_OUTPUT_HANDLE_X_OFFSET + PLAN_HANDLE_RADIUS + 8,
+            height,
+            fill: 'rgba(0,0,0,0.01)',
+            stroke: 'transparent',
+            strokeWidth: 0
+        });
+        group.add(hitArea);
+
         const metrics = this._getPlanTableMetrics({
             ...plan,
             node: { ...(plan.node || {}), width, height }
@@ -3474,8 +3479,10 @@ export class CanvasManager {
             this.syncGifs();
         };
 
-        const stop = () => {
+        const stop = (stopEvent = null) => {
             if (this._activeCanvasPanStop !== stop) return;
+            stopEvent?.preventDefault?.();
+            stopEvent?.stopPropagation?.();
             this._activeCanvasPanStop = null;
             document.body.style.cursor = 'default';
             if (passthroughElement) {
@@ -3491,17 +3498,13 @@ export class CanvasManager {
             document.removeEventListener('pointermove', move, true);
             document.removeEventListener('mouseup', stop, true);
             document.removeEventListener('pointerup', stop, true);
-            document.removeEventListener('pointercancel', preventCancel, true);
+            document.removeEventListener('pointercancel', stop, true);
             pointerCaptureElement?.removeEventListener?.('pointermove', move, true);
             pointerCaptureElement?.removeEventListener?.('pointerup', stop, true);
-            pointerCaptureElement?.removeEventListener?.('pointercancel', preventCancel, true);
+            pointerCaptureElement?.removeEventListener?.('pointercancel', stop, true);
+            pointerCaptureElement?.removeEventListener?.('lostpointercapture', stop, true);
             window.removeEventListener('blur', stop);
             this.emit('change');
-        };
-
-        const preventCancel = (cancelEvent) => {
-            cancelEvent.preventDefault();
-            cancelEvent.stopPropagation();
         };
 
         this._activeCanvasPanStop = stop;
@@ -3509,10 +3512,11 @@ export class CanvasManager {
         document.addEventListener('pointermove', move, true);
         document.addEventListener('mouseup', stop, true);
         document.addEventListener('pointerup', stop, true);
-        document.addEventListener('pointercancel', preventCancel, true);
+        document.addEventListener('pointercancel', stop, true);
         pointerCaptureElement?.addEventListener?.('pointermove', move, true);
         pointerCaptureElement?.addEventListener?.('pointerup', stop, true);
-        pointerCaptureElement?.addEventListener?.('pointercancel', preventCancel, true);
+        pointerCaptureElement?.addEventListener?.('pointercancel', stop, true);
+        pointerCaptureElement?.addEventListener?.('lostpointercapture', stop, true);
         window.addEventListener('blur', stop);
     }
 
@@ -3522,6 +3526,9 @@ export class CanvasManager {
     }
 
     _startInlinePlanDrag(planId, event) {
+        if (this._activeInlinePlanDragStop) {
+            this._activeInlinePlanDragStop();
+        }
         const entry = this.plans.get(planId);
         if (!entry) return;
         event.preventDefault();
@@ -3533,9 +3540,15 @@ export class CanvasManager {
         const startClientY = event.clientY;
         const startX = entry.group.x();
         const startY = entry.group.y();
+        let lastMoveStamp = null;
+        document.body.style.cursor = 'grabbing';
 
         const move = (moveEvent) => {
             moveEvent.preventDefault();
+            moveEvent.stopPropagation();
+            const stamp = `${moveEvent.timeStamp}:${moveEvent.clientX}:${moveEvent.clientY}`;
+            if (stamp === lastMoveStamp) return;
+            lastMoveStamp = stamp;
             const nextX = startX + (moveEvent.clientX - startClientX) / scale;
             const nextY = startY + (moveEvent.clientY - startClientY) / scale;
             entry.group.position({ x: nextX, y: nextY });
@@ -3544,15 +3557,28 @@ export class CanvasManager {
         };
 
         const stop = () => {
-            document.removeEventListener('mousemove', move);
-            document.removeEventListener('mouseup', stop);
+            if (this._activeInlinePlanDragStop !== stop) return;
+            this._activeInlinePlanDragStop = null;
+            document.body.style.cursor = 'default';
+            document.removeEventListener('mousemove', move, true);
+            document.removeEventListener('pointermove', move, true);
+            document.removeEventListener('mouseup', stop, true);
+            document.removeEventListener('pointerup', stop, true);
+            document.removeEventListener('pointercancel', stop, true);
+            window.removeEventListener('blur', stop);
+            this._flushDragConnectionRefresh();
             this._refreshVisiblePlanConnections();
             this.emit('plansChanged');
             this.emit('change');
         };
 
-        document.addEventListener('mousemove', move);
-        document.addEventListener('mouseup', stop);
+        this._activeInlinePlanDragStop = stop;
+        document.addEventListener('mousemove', move, true);
+        document.addEventListener('pointermove', move, true);
+        document.addEventListener('mouseup', stop, true);
+        document.addEventListener('pointerup', stop, true);
+        document.addEventListener('pointercancel', stop, true);
+        window.addEventListener('blur', stop);
     }
 
     _updateInlinePlanCell(planId, rowId, columnKey, value) {
@@ -3873,10 +3899,32 @@ export class CanvasManager {
     _refreshPlanConnectionGraphicsOnly() {
         if (this.plans.size === 0) return;
         const selected = new Set(this.selectedItems);
-        this.plans.forEach(plan => plan.group?.destroy());
-        this.plans.clear();
         const plans = this.planService?.listPlans?.() || [];
-        plans.forEach(plan => this._createPlanNode(plan, { mountInlineEditor: false }));
+        plans.forEach(plan => {
+            const entry = this.plans.get(plan.id);
+            if (!entry?.group) {
+                this._createPlanNode(plan, { mountInlineEditor: false });
+                return;
+            }
+            const node = plan.node || {};
+            const metrics = this._getPlanTableMetrics({ ...plan, node });
+            const width = metrics.width;
+            const height = metrics.height;
+            plan.x = node.x || 0;
+            plan.y = node.y || 0;
+            plan.width = width;
+            plan.height = height;
+            plan.node = { ...node, width, height };
+            entry.data = plan;
+            entry.group.position({ x: plan.x, y: plan.y });
+            this._drawPlanPreview(entry.group, plan, width, height);
+        });
+        this.plans.forEach((entry, planId) => {
+            if (!plans.some(plan => plan.id === planId)) {
+                entry.group?.destroy();
+                this.plans.delete(planId);
+            }
+        });
         this.selectedItems = selected;
         this._applyPlanFilterVisibility();
         this._updateSelectionVisuals();
