@@ -135,6 +135,7 @@ export class CanvasManager {
         this._activePlanReferencePick = null;
         this._planReferencePickTargetId = null;
         this._referenceHighlightIds = new Set();
+        this._isDraggingPlanReference = false;
         this._isGeneratingPlanRow = false;
         this._dragConnectionRefreshTimer = null;
         this._lastDragConnectionRefreshAt = 0;
@@ -3939,6 +3940,10 @@ export class CanvasManager {
     }
 
     _refreshConnectionInteractionState() {
+        if (this._isDraggingPlanReference) {
+            this._syncPlanInlineActiveRows();
+            return;
+        }
         this._refreshPlanConnectionGraphicsOnly();
         this._syncPlanInlineActiveRows();
     }
@@ -4075,6 +4080,7 @@ export class CanvasManager {
     }
 
     _startPlanReferenceDrag(handle) {
+        this._isDraggingPlanReference = true;
         const origin = handle.getAbsolutePosition(this.layer);
         handle.setAttr('dragOriginX', origin.x);
         handle.setAttr('dragOriginY', origin.y);
@@ -4216,6 +4222,7 @@ export class CanvasManager {
     }
 
     _stopPlanReferenceDrag() {
+        this._isDraggingPlanReference = false;
         this._hidePlanConnectionHint();
         if (this.connectionPreviewGroup) {
             this.connectionPreviewGroup.destroy();
