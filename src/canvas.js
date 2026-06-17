@@ -364,7 +364,10 @@ export class CanvasManager {
 
         const setCanvasDragEnabled = (enabled) => {
             this.stage.draggable(enabled);
-            this._forEachNode(item => item.group.draggable(enabled));
+            this._forEachNode(item => {
+                item.group.draggable(enabled);
+                item.group.find?.('.planRowHandle').forEach(handle => handle.draggable(enabled));
+            });
         };
 
         const detachPanningEndListeners = () => {
@@ -399,10 +402,10 @@ export class CanvasManager {
         };
 
         const finishSelection = (event = null) => {
-            this.stage.draggable(true);
             if (!isSelecting) return;
 
             isSelecting = false;
+            this.stage.draggable(true);
             detachSelectionEndListeners();
             this.selectionRect.visible(false);
 
@@ -1826,6 +1829,10 @@ export class CanvasManager {
             });
             handle.on('dragstart', e => {
                 e.cancelBubble = true;
+                if (e.evt && e.evt.button !== 0) {
+                    handle.stopDrag();
+                    return;
+                }
                 group.draggable(false);
                 this._hidePlanConnectionHint();
                 handle.moveToTop();
