@@ -1128,25 +1128,46 @@ export class CanvasManager {
         this.emit('capturedFile', data); // 通知 main.js 保存到 store
     }
 
-    selectItem(id, add = false) {
-        if (!add) this.clearSelection();
-        this.selectedItems.add(id);
+    _selectionHasPlan(selection = this.selectedItems) {
+        if (!selection) return false;
+        for (const id of selection) {
+            if (this.plans.has(id)) return true;
+        }
+        return false;
+    }
+
+    _refreshSelectionVisualState(previousSelection = null, hadSelectedConnection = false) {
+        if (
+            hadSelectedConnection
+            || this._selectionHasPlan(previousSelection)
+            || this._selectionHasPlan(this.selectedItems)
+        ) {
+            this._refreshConnectionInteractionState();
+            return;
+        }
         this._updateSelectionVisuals();
     }
 
-    clearSelection() {
+    selectItem(id, add = false) {
+        const previousSelection = new Set(this.selectedItems);
+        const hadSelectedConnection = Boolean(this._selectedPlanConnection);
+        if (!add) this.clearSelection({ skipVisualRefresh: true });
+        this.selectedItems.add(id);
+        this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
+    }
+
+    clearSelection(options = {}) {
+        const previousSelection = new Set(this.selectedItems);
         const hadSelectedConnection = Boolean(this._selectedPlanConnection);
         this.selectedItems.clear();
         this._selectedPlanConnection = null;
         if (hadSelectedConnection) this._clearPlanConnectionFocusState();
-        if (hadSelectedConnection) {
-            this._refreshConnectionInteractionState();
-        } else {
-            this._updateSelectionVisuals();
-        }
+        if (options.skipVisualRefresh) return;
+        this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
     }
 
     selectAll() {
+        const previousSelection = new Set(this.selectedItems);
         const hadSelectedConnection = Boolean(this._selectedPlanConnection);
         this._selectedPlanConnection = null;
         if (hadSelectedConnection) this._clearPlanConnectionFocusState();
@@ -1160,11 +1181,7 @@ export class CanvasManager {
                 this.selectedItems.add(plan.data.id);
             }
         });
-        if (hadSelectedConnection) {
-            this._refreshConnectionInteractionState();
-        } else {
-            this._updateSelectionVisuals();
-        }
+        this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
     }
 
     async copySelectionToClipboard() {
@@ -1544,8 +1561,9 @@ export class CanvasManager {
             }
             if (e.evt.ctrlKey || e.evt.shiftKey) {
                 if (this.selectedItems.has(data.id)) {
+                    const previousSelection = new Set(this.selectedItems);
                     this.selectedItems.delete(data.id);
-                    this._updateSelectionVisuals();
+                    this._refreshSelectionVisualState(previousSelection);
                 } else {
                     this.selectItem(data.id, true);
                 }
@@ -1696,8 +1714,9 @@ export class CanvasManager {
             if (e.evt.button === 2) return;
             if (e.evt.ctrlKey || e.evt.shiftKey) {
                 if (this.selectedItems.has(plan.id)) {
+                    const previousSelection = new Set(this.selectedItems);
                     this.selectedItems.delete(plan.id);
-                    this._updateSelectionVisuals();
+                    this._refreshSelectionVisualState(previousSelection);
                 } else {
                     this.selectItem(plan.id, true);
                 }
@@ -3468,7 +3487,10 @@ export class CanvasManager {
         if (passthroughElement) passthroughElement.classList.add('is-canvas-panning');
         document.body.style.cursor = 'grabbing';
         this.stage.draggable(false);
-        this._forEachNode(item => item.group.draggable(false));
+        this._forEachNode(item => {
+            item.group.draggable(false);
+            item.group.find?.('.planRowHandle').forEach(handle => handle.draggable(false));
+        });
         let lastMoveStamp = null;
 
         const move = (moveEvent) => {
@@ -3501,7 +3523,10 @@ export class CanvasManager {
                 try { pointerCaptureElement.releasePointerCapture(pointerId); } catch (_) { }
             }
             this.stage.draggable(true);
-            this._forEachNode(item => item.group.draggable(true));
+            this._forEachNode(item => {
+                item.group.draggable(true);
+                item.group.find?.('.planRowHandle').forEach(handle => handle.draggable(true));
+            });
             document.removeEventListener('mousemove', move, true);
             document.removeEventListener('pointermove', move, true);
             document.removeEventListener('mouseup', stop, true);
@@ -3831,9 +3856,8 @@ export class CanvasManager {
         let matched = null;
         this.items.forEach((entry, id) => {
             if (matched || excludeIds.has(id) || !entry.group?.isVisible()) return;
-            const node = entry.group.findOne('.displayNode') || entry.group.findOne('.fallbackBg');
-            if (!node) return;
-            const rect = node.getClientRect({ relativeTo: this.layer });
+            const rect = this._getEntryContentRect(entry);
+            if (!rect) return;
             if (
                 point.x >= rect.x &&
                 point.x <= rect.x + rect.width &&
@@ -3857,10 +3881,19 @@ export class CanvasManager {
         return null;
     }
 
-    _getItemCenter(entry) {
+    _getEntryContentRect(entry) {
         const node = entry?.group?.findOne('.displayNode') || entry?.group?.findOne('.fallbackBg');
         if (!node) return null;
-        const rect = node.getClientRect({ relativeTo: this.layer });
+        return node.getClientRect({
+            relativeTo: this.layer,
+            skipStroke: true,
+            skipShadow: true
+        });
+    }
+
+    _getItemCenter(entry) {
+        const rect = this._getEntryContentRect(entry);
+        if (!rect) return null;
         return {
             x: rect.x + rect.width / 2,
             y: rect.y + rect.height / 2
@@ -3868,9 +3901,8 @@ export class CanvasManager {
     }
 
     _getConnectionPointForItem(entry, fromPoint) {
-        const node = entry?.group?.findOne('.displayNode') || entry?.group?.findOne('.fallbackBg');
-        if (!node || !fromPoint) return this._getItemCenter(entry);
-        const rect = node.getClientRect({ relativeTo: this.layer });
+        const rect = this._getEntryContentRect(entry);
+        if (!rect || !fromPoint) return this._getItemCenter(entry);
         const cx = rect.x + rect.width / 2;
         const cy = rect.y + rect.height / 2;
         const dx = fromPoint.x - cx;
@@ -5432,16 +5464,22 @@ export class CanvasManager {
     _applyPlanFilterVisibility() {
         const types = Array.isArray(this.currentFilter) ? this.currentFilter : [this.currentFilter];
         const showPlans = types.includes('all') || types.length === 0 || types.includes('other');
+        const previousSelection = new Set(this.selectedItems);
+        let removedSelectedPlan = false;
         this.plans.forEach((plan, id) => {
             if (showPlans) {
                 plan.group.show();
             } else {
                 plan.group.hide();
+                if (this.selectedItems.has(id)) removedSelectedPlan = true;
                 this.selectedItems.delete(id);
             }
             const editor = this.planInlineEditors?.get(id);
             if (editor) editor.style.display = showPlans ? '' : 'none';
         });
+        if (removedSelectedPlan) {
+            this._refreshSelectionVisualState(previousSelection);
+        }
     }
 
     setFilter(types) {
