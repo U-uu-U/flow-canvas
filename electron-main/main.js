@@ -1163,6 +1163,26 @@ async function copyFilesToCurrentExplorer(filePaths, options = {}) {
             };
         }
 
+        if (!isUsableExplorerFolderPath(explorer.path)) {
+            const pasted = await pasteFilesIntoExplorerUnderMouse(paths);
+            if (pasted?.success) {
+                return {
+                    success: true,
+                    copied: paths.map(source => ({ oldPath: source, newPath: null, copied: true, pasted: true })),
+                    pasted: true,
+                    explorerMethod: pasted.method || 'clipboard-paste'
+                };
+            }
+
+            return {
+                success: false,
+                error: pasted?.error || 'Explorer folder path encoding failed',
+                copied: [],
+                clipboardReady: pasted?.clipboardReady === true,
+                targetDir: explorer.path
+            };
+        }
+
         const result = await copyFilesToFolder(paths, explorer.path);
         return {
             ...result,
@@ -1370,14 +1390,31 @@ function sendPasteToExplorerUnderMouse() {
     });
 }
 
+function isUsableExplorerFolderPath(folderPath) {
+    const value = String(folderPath || '');
+    if (!value || value.includes('\uFFFD')) return false;
+    try {
+        return fs.existsSync(value) && fs.statSync(value).isDirectory();
+    } catch (_) {
+        return false;
+    }
+}
+
 function getCurrentExplorerFolder(options = {}) {
     const os = require('os');
     const { execFile } = require('child_process');
     const scriptPath = path.join(os.tmpdir(), `flow_canvas_explorer_${process.pid}_${Date.now()}.ps1`);
+    const outputPath = path.join(os.tmpdir(), `flow_canvas_explorer_${process.pid}_${Date.now()}.json`);
     const psExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     const requireUnderMouse = options?.requireUnderMouse === true;
     const script = [
         '$ErrorActionPreference = "Stop"',
+        `$outputPath = ${psQuoted(outputPath)}`,
+        'function Write-FlowCanvasResult($payload) {',
+        '  $json = $payload | ConvertTo-Json -Compress',
+        '  $utf8 = New-Object System.Text.UTF8Encoding($false)',
+        '  [System.IO.File]::WriteAllText($outputPath, $json, $utf8)',
+        '}',
         `$requireUnderMouse = ${requireUnderMouse ? '$true' : '$false'}`,
         'Add-Type -AssemblyName System.Windows.Forms',
         'Add-Type -TypeDefinition @"',
@@ -1416,7 +1453,7 @@ function getCurrentExplorerFolder(options = {}) {
         '  $method = "under-mouse"',
         '}',
         'if ($requireUnderMouse -and -not $target) {',
-        '  [pscustomobject]@{ success = $false; error = "FC_RELEASE_ON_EXPLORER" } | ConvertTo-Json -Compress',
+        '  Write-FlowCanvasResult ([pscustomobject]@{ success = $false; error = "FC_RELEASE_ON_EXPLORER" })',
         '  exit 0',
         '}',
         'if (-not $target) {',
@@ -1424,9 +1461,9 @@ function getCurrentExplorerFolder(options = {}) {
         '  $method = "last-open"',
         '}',
         'if ($target) {',
-        '  [pscustomobject]@{ success = $true; path = $target.Path; method = $method; count = @($items).Count } | ConvertTo-Json -Compress',
+        '  Write-FlowCanvasResult ([pscustomobject]@{ success = $true; path = $target.Path; method = $method; count = @($items).Count })',
         '} else {',
-        '  [pscustomobject]@{ success = $false; error = "FC_NO_EXPLORER_FOLDER" } | ConvertTo-Json -Compress',
+        '  Write-FlowCanvasResult ([pscustomobject]@{ success = $false; error = "FC_NO_EXPLORER_FOLDER" })',
         '}'
     ].join('\r\n');
 
@@ -1439,19 +1476,28 @@ function getCurrentExplorerFolder(options = {}) {
         }, (err, stdout, stderr) => {
             try { fs.unlinkSync(scriptPath); } catch (_) { }
             if (err) {
+                try { fs.unlinkSync(outputPath); } catch (_) { }
                 resolve({ success: false, error: normalizeExplorerCopyError(stderr?.trim() || err.message) });
                 return;
             }
             try {
-                const text = String(stdout || '').trim();
+                const text = fs.existsSync(outputPath)
+                    ? fs.readFileSync(outputPath, 'utf8').trim()
+                    : String(stdout || '').trim();
+                try { fs.unlinkSync(outputPath); } catch (_) { }
                 if (!text) {
                     resolve({ success: false, error: normalizeExplorerCopyError('FC_NO_EXPLORER_FOLDER') });
                     return;
                 }
                 const parsed = JSON.parse(text || '{}');
                 if (parsed?.error) parsed.error = normalizeExplorerCopyError(parsed.error);
+                if (parsed?.success && parsed.path && !isUsableExplorerFolderPath(parsed.path)) {
+                    parsed.success = false;
+                    parsed.error = 'Explorer folder path encoding failed';
+                }
                 resolve(parsed);
             } catch (parseErr) {
+                try { fs.unlinkSync(outputPath); } catch (_) { }
                 resolve({ success: false, error: parseErr.message });
             }
         });
