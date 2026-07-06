@@ -303,6 +303,28 @@ export class AgentSidebar {
         return this._findProvider(this.globalConfig.imageProviderId);
     }
 
+    _getProviderFallbackChain(kind) {
+        const selectedId = kind === 'image'
+            ? this.globalConfig.imageProviderId
+            : (this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
+        const isMatchingKind = provider => kind === 'image'
+            ? this._isImageProvider(provider)
+            : !this._isImageProvider(provider);
+
+        const selected = this._findProvider(selectedId);
+        const candidates = [
+            selected && isMatchingKind(selected) ? selected : null,
+            ...this.providers.filter(provider => provider?.id !== selectedId && isMatchingKind(provider))
+        ].filter(provider => provider?.apiKey && provider?.endpoint && provider?.model);
+
+        return candidates.slice(0, 2);
+    }
+
+    _providerLabel(provider) {
+        if (!provider) return '未知 API';
+        return `${provider.name || '未命名 API'}（${provider.model || '未设置模型'}）`;
+    }
+
     getImageProviderConfig() {
         const provider = this._getImageProvider();
         return provider ? { ...provider } : null;
@@ -1236,17 +1258,114 @@ export class AgentSidebar {
         return null;
     }
 
+    _isImageGenerationRequest(text) {
+        const value = String(text || '').trim();
+        if (!value) return false;
+
+        const isTroubleshootingQuestion = /(怎么|为什么|为何|哪里|用不了|不能用|失效|报错|错误|看看|检查|排查|修|坏了|debug)/i.test(value);
+        const hasDirectAction = /(直接|现在|马上|立刻|按|用|帮我|给我|开始).{0,18}(生图|出图|生成|画|image\s*2|image2|gpt-image)/i.test(value);
+        if (isTroubleshootingQuestion && !hasDirectAction) return false;
+
+        return /(生图|出图|生成.{0,12}(图片|图像|图|海报|主视觉|插画|封面|头像)|画一?张|用\s*(image\s*2|image2|gpt-image)[^\n]*(生图|生成|出图)|generate.{0,20}image)/i.test(value);
+    }
+
+    _extractPromptFromFencedBlocks(content) {
+        const blocks = [...String(content || '').matchAll(/```(?:text|prompt|markdown|md)?\s*([\s\S]*?)```/gi)]
+            .map(match => match[1].trim())
+            .filter(Boolean);
+        if (blocks.length === 0) return '';
+
+        const positiveBlock = blocks.find(block => !/^(负向|负面|negative|avoid|不要|反向)\s*[:：]/i.test(block));
+        return positiveBlock || blocks[0];
+    }
+
+    _stripImageCommandText(text) {
+        return String(text || '')
+            .replace(/^(请|麻烦|帮我|给我|你)?\s*(直接|现在|马上|立刻)?\s*(用\s*(image\s*2|image2|gpt-image(?:-\d+(?:\.\d+)?)?)\s*)?/i, '')
+            .replace(/^(按|根据|照着)?\s*(上面|上一个|刚才|这个|这版|这条|该)\s*(提示词|prompt|内容)?\s*/i, '')
+            .replace(/^(生图|出图|生成(?:一张)?(?:图片|图像|图)?|画一?张)\s*[:：，,。 ]*/i, '')
+            .trim();
+    }
+
+    _resolveImageGenerationPrompt(text) {
+        const explicitMatch = String(text || '').match(/(?:生图|出图|生成(?:一张)?(?:图片|图像|图)?|画一?张)\s*[:：]\s*([\s\S]+)/i);
+        const explicitPrompt = explicitMatch?.[1]?.trim();
+        if (explicitPrompt && explicitPrompt.length >= 12) return explicitPrompt;
+
+        const stripped = this._stripImageCommandText(text);
+        if (stripped.length >= 24 || /[，。,.、\n]/.test(stripped)) return stripped;
+
+        const lastAssistant = [...this.messages].reverse().find(message => message.role === 'assistant')?.content || '';
+        const fencedPrompt = this._extractPromptFromFencedBlocks(lastAssistant);
+        if (fencedPrompt) return fencedPrompt;
+
+        return stripped || String(text || '').trim();
+    }
+
+    async _generateImageFromChat(text, imageProvider = this._getImageProvider()) {
+        if (!imageProvider?.apiKey || !imageProvider?.model || !imageProvider?.endpoint) {
+            throw new Error('请先在设置中选择可用的生图 API');
+        }
+        if (!window.flowCanvas?.mcp?.generateImage) {
+            throw new Error('本地生图接口不可用，请完全退出并重新启动应用后再试');
+        }
+
+        const prompt = this._resolveImageGenerationPrompt(text);
+        if (!prompt) throw new Error('没有找到可用于生图的提示词');
+
+        const result = await window.flowCanvas.mcp.generateImage({
+            provider: 'openai',
+            providerConfig: imageProvider,
+            prompt,
+            title: 'Agent chat image',
+            width: 1024,
+            height: 1024,
+            addToCanvas: true
+        });
+
+        if (!result?.success && result?.error) throw new Error(result.error);
+        const lines = [
+            `已用 ${this._providerLabel(imageProvider)} 生成图片，并添加到白板。`,
+            result?.filePath ? `文件：${result.filePath}` : '',
+            result?.targetDirFallback ? `保存目录回退：${result.targetDirFallback}` : ''
+        ].filter(Boolean);
+        return lines.join('\n');
+    }
+
+    async _tryProviderChain(providers, action) {
+        const errors = [];
+        for (let index = 0; index < providers.length; index += 1) {
+            const provider = providers[index];
+            try {
+                const content = await action(provider, index);
+                return {
+                    provider,
+                    switched: index > 0,
+                    previousErrors: errors,
+                    content
+                };
+            } catch (err) {
+                const message = err?.message || String(err);
+                errors.push(`${this._providerLabel(provider)}：${message}`);
+                console.warn('[Agent] provider request failed:', provider?.name || provider?.id, err);
+            }
+        }
+
+        throw new Error(errors.length ? errors.join('\n') : '没有可用 API');
+    }
+
     // ── 发送消息 ──
     async _send() {
         if (!this.inputEl || !this.sendBtn) return;
         const text = this.inputEl.value.trim();
         if (!text || this.isStreaming) return;
 
-        const provider = this._getActiveProvider();
+        const wantsImageGeneration = this._isImageGenerationRequest(text);
+        const providerChain = this._getProviderFallbackChain(wantsImageGeneration ? 'image' : 'chat');
 
         // 检查 API 配置
-        if (!provider || !provider.apiKey) {
-            this._addErrorMessage('请先在设置中添加并选择有效的 API');
+        if (providerChain.length === 0) {
+            this._addErrorMessage(wantsImageGeneration ? '请先在设置中添加并选择有效的生图 API' : '请先在设置中添加并选择有效的对话 API');
             this.settingsPanel.classList.add('show');
             return;
         }
@@ -1266,21 +1385,39 @@ export class AgentSidebar {
         const typingEl = this._addTypingIndicator();
 
         try {
-            const request = this._buildRequestPayload(provider);
-            const result = await this._requestChatCompletion(request);
-            const resultMode = result.responseMode || request.responseMode;
+            let fullContent = '';
+            let msgEl = null;
 
-            // 移除打字动画
-            typingEl?.remove();
+            if (wantsImageGeneration) {
+                const result = await this._tryProviderChain(providerChain, provider => this._generateImageFromChat(text, provider));
+                fullContent = [
+                    result.switched ? `第一条 API 请求失败，已自动切换到备用 API：${this._providerLabel(result.provider)}` : '',
+                    result.content
+                ].filter(Boolean).join('\n');
+                typingEl?.remove();
+                msgEl = this._addMessage('assistant', fullContent);
+            } else {
+                const result = await this._tryProviderChain(providerChain, async provider => {
+                    const request = this._buildRequestPayload(provider);
+                    const response = await this._requestChatCompletion(request);
+                    const resultMode = response.responseMode || request.responseMode;
+                    const content = this._extractChatResultText(resultMode, response.payload, response.text).trim()
+                        || this._emptyChatResponseMessage(resultMode);
+                    return { content, resultMode };
+                });
 
-            // 创建 assistant 消息气泡
-            const msgEl = this._addMessage('assistant', '');
-            const fullContent = this._extractChatResultText(resultMode, result.payload, result.text).trim();
-            if (msgEl) msgEl.textContent = fullContent || this._emptyChatResponseMessage(resultMode);
-            this._scrollToBottom();
+                typingEl?.remove();
+                msgEl = this._addMessage('assistant', '');
+                fullContent = [
+                    result.switched ? `第一条 API 请求失败，已自动切换到备用 API：${this._providerLabel(result.provider)}\n` : '',
+                    result.content.content
+                ].filter(Boolean).join('');
+                if (msgEl) msgEl.textContent = fullContent;
+            }
 
             this.messages.push({ role: 'assistant', content: fullContent });
             this._attachPlanApplyAction(msgEl, fullContent);
+            this._scrollToBottom();
 
         } catch (err) {
             typingEl?.remove();
