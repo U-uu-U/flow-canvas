@@ -1,0 +1,34 @@
+:root {
+  color-scheme: dark;
+  font-family: "Microsoft YaHei UI", sans-serif;
+  background: #181a1d;
+  color: #eef0f2;
+}
+
+* { box-sizing: border-box; }
+body { width: 320px; margin: 0; background: #181a1d; }
+main { padding: 16px; }
+header { display: grid; grid-template-columns: 38px 1fr 10px; align-items: center; gap: 10px; padding-bottom: 14px; border-bottom: 1px solid #30343a; }
+.mark { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 7px; background: #e9ecef; color: #17191c; font-size: 12px; font-weight: 800; }
+h1 { margin: 0; font-size: 14px; }
+header p { margin: 4px 0 0; color: #858b94; font-size: 10px; }
+header i { width: 8px; height: 8px; border-radius: 50%; background: #b95454; }
+header i.connected { background: #59b77d; }
+.controls { padding: 9px 0; border-bottom: 1px solid #30343a; }
+.controls label { display: flex; min-height: 38px; align-items: center; justify-content: space-between; color: #c9cdd2; font-size: 11px; }
+input { accent-color: #65a7ee; }
+.folder-setting { padding: 11px 0; border-bottom: 1px solid #30343a; }
+.folder-setting > label { display: block; margin-bottom: 7px; color: #8f959e; font-size: 9px; }
+.folder-setting div { display: grid; grid-template-columns: 1fr 52px; gap: 6px; }
+.folder-setting input { width: 100%; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid #383d44; border-radius: 5px; outline: 0; background: #202328; color: #dfe2e6; font: inherit; font-size: 10px; }
+.folder-setting input:focus { border-color: #596b7d; }
+.folder-setting button { height: 30px; padding: 0; }
+.stats { display: grid; grid-template-columns: 1fr 1fr; margin: 12px 0; border: 1px solid #30343a; border-radius: 7px; }
+.stats div { display: flex; align-items: baseline; gap: 6px; padding: 10px; }
+.stats div + div { border-left: 1px solid #30343a; }
+.stats b { font-size: 15px; }
+.stats span { color: #7f858e; font-size: 9px; }
+button { border: 1px solid #4d5967; border-radius: 6px; background: #29333e; color: #dce9f7; font: inherit; font-size: 11px; cursor: pointer; }
+button:hover { background: #344352; }
+.primary { width: 100%; height: 34px; }
+.hint { margin: 10px 2px 0; color: #737982; font-size: 9px; line-height: 1.5; }

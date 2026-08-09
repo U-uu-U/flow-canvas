@@ -20,6 +20,8 @@ const DEFAULT_DATA = {
     viewport: { x: 0, y: 0, scale: 1 },
     defaultSaveFolder: null,
     activeGroupDefaultSaveFolder: null,
+    removedFromBoardPaths: [],
+    removedFromBoardPathsInitialized: false,
     sidebarClosed: false
 };
 
@@ -79,6 +81,10 @@ class Store {
             folderGroups,
             activeGroupId: activeGroup ? activeGroup.id : (source.activeGroupId || null),
             items: Array.isArray(source.items) ? [...source.items] : [],
+            removedFromBoardPaths: Array.isArray(source.removedFromBoardPaths)
+                ? [...source.removedFromBoardPaths]
+                : [],
+            removedFromBoardPathsInitialized: source.removedFromBoardPathsInitialized === true,
             mcp: { ...DEFAULT_MCP_CONFIG, ...(source.mcp || {}) },
             viewport: { ...DEFAULT_DATA.viewport, ...(source.viewport || {}) },
             defaultSaveFolder: typeof source.defaultSaveFolder === 'string' ? source.defaultSaveFolder : null,
@@ -105,6 +111,10 @@ class Store {
             savedItems: [...savedItems],
             savedViewport: savedViewport ? { ...DEFAULT_DATA.viewport, ...savedViewport } : null,
             defaultSaveFolder,
+            removedFromBoardPaths: Array.isArray(source.removedFromBoardPaths)
+                ? [...source.removedFromBoardPaths]
+                : [],
+            removedFromBoardPathsInitialized: source.removedFromBoardPathsInitialized === true,
             plans: Array.isArray(source.plans) ? [...source.plans] : []
         };
 

@@ -34,6 +34,7 @@ const DEFAULT_MCP_CONFIG = {
         'flow_canvas.plan.delete',
         'flow_canvas.plan.export',
         'flow_canvas.image.generate',
+        'flow_canvas.video.generate',
         'flow_canvas.item.list',
         'flow_canvas.item.get',
         'flow_canvas.item.add',

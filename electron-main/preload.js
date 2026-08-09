@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     shell: {
         showInExplorer: (filePath) => ipcRenderer.invoke('shell:showInExplorer', filePath),
         openFile: (filePath) => ipcRenderer.invoke('shell:openFile', filePath),
+        openRavenHash: (site) => ipcRenderer.invoke('shell:openRavenHash', site),
     },
 
     file: {
@@ -50,6 +51,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     win: {
         setAlwaysOnTop: (flag) => ipcRenderer.invoke('window:setAlwaysOnTop', flag),
         getAlwaysOnTop: () => ipcRenderer.invoke('window:getAlwaysOnTop'),
+        collapseToOrb: () => ipcRenderer.invoke('window:collapseToOrb'),
     },
 
     metrics: {
@@ -73,6 +75,14 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 原生文件拖出到外部应用（支持单文件或多文件数组）
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
+        generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
+    },
+
+    browserSync: {
+        getEvents: () => ipcRenderer.invoke('browser-sync:get-events'),
+        onTaskSubmitted: (callback) => {
+            ipcRenderer.on('generation:task-submitted', (_, payload) => callback(payload));
+        }
     },
 
     drag: {

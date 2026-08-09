@@ -2,20 +2,26 @@
 // Flow Canvas — Electron Main Process
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, Menu, screen } = require('electron');
 const path = require('path');
 const util = require('util');
 const Store = require('./store');
 const Watcher = require('./watcher');
 const Thumbnailer = require('./thumbnailer');
 const FlowCanvasBridge = require('./mcp-bridge');
+const BrowserSyncService = require('./browser-sync');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 let mainWindow = null;
+let orbWindow = null;
+let orbPosition = null;
+let orbDragTimer = null;
+let isQuitting = false;
 let store = null;
 let watcher = null;
 let thumbnailer = null;
 let flowCanvasBridge = null;
+let browserSyncService = null;
 
 const isDev = !app.isPackaged;
 
@@ -145,11 +151,182 @@ function createWindow() {
     } else {
         mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
     }
+
+    mainWindow.on('closed', () => {
+        mainWindow = null;
+        if (orbWindow && !orbWindow.isDestroyed()) {
+            orbWindow.destroy();
+        }
+    });
+}
+
+const ORB_WINDOW_SIZE = 80;
+const ORB_VISUAL_SIZE = 54;
+const ORB_VISUAL_INSET = (ORB_WINDOW_SIZE - ORB_VISUAL_SIZE) / 2;
+const ORB_DRAG_INTERVAL_MS = 8;
+
+function clampOrbPosition(x, y) {
+    const display = screen.getDisplayNearestPoint({
+        x: Math.round(x + (ORB_WINDOW_SIZE / 2)),
+        y: Math.round(y + (ORB_WINDOW_SIZE / 2))
+    });
+    const { bounds } = display;
+    const minX = bounds.x - ORB_VISUAL_INSET;
+    const minY = bounds.y - ORB_VISUAL_INSET;
+    const maxX = bounds.x + bounds.width - ORB_VISUAL_SIZE - ORB_VISUAL_INSET;
+    const maxY = bounds.y + bounds.height - ORB_VISUAL_SIZE - ORB_VISUAL_INSET;
+
+    return {
+        x: Math.round(Math.max(minX, Math.min(x, maxX))),
+        y: Math.round(Math.max(minY, Math.min(y, maxY)))
+    };
+}
+
+function positionOrbWindow() {
+    if (!mainWindow || mainWindow.isDestroyed() || !orbWindow || orbWindow.isDestroyed()) return;
+
+    if (!orbPosition) {
+        const mainBounds = mainWindow.getBounds();
+        const buttonCenterInset = 46;
+        orbPosition = {
+            x: mainBounds.x + mainBounds.width - buttonCenterInset - (ORB_WINDOW_SIZE / 2),
+            y: mainBounds.y + mainBounds.height - buttonCenterInset - (ORB_WINDOW_SIZE / 2)
+        };
+    }
+
+    orbPosition = clampOrbPosition(orbPosition.x, orbPosition.y);
+    orbWindow.setPosition(orbPosition.x, orbPosition.y, false);
+}
+
+function moveOrbWindow(x, y) {
+    if (!orbWindow || orbWindow.isDestroyed()) return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+    orbPosition = clampOrbPosition(x, y);
+    orbWindow.setPosition(orbPosition.x, orbPosition.y, false);
+}
+
+function stopOrbDrag() {
+    if (orbDragTimer) {
+        clearInterval(orbDragTimer);
+        orbDragTimer = null;
+    }
+}
+
+function startOrbDrag() {
+    stopOrbDrag();
+    if (!orbWindow || orbWindow.isDestroyed()) return;
+
+    const startCursor = screen.getCursorScreenPoint();
+    const [startX, startY] = orbWindow.getPosition();
+    let lastCursor = startCursor;
+
+    const updatePosition = () => {
+        if (!orbWindow || orbWindow.isDestroyed() || !orbWindow.isVisible()) {
+            stopOrbDrag();
+            return;
+        }
+        const cursor = screen.getCursorScreenPoint();
+        if (cursor.x === lastCursor.x && cursor.y === lastCursor.y) return;
+        lastCursor = cursor;
+        moveOrbWindow(
+            startX + cursor.x - startCursor.x,
+            startY + cursor.y - startCursor.y
+        );
+    };
+
+    orbDragTimer = setInterval(updatePosition, ORB_DRAG_INTERVAL_MS);
+    orbDragTimer.unref?.();
+}
+
+async function createOrbWindow() {
+    if (orbWindow && !orbWindow.isDestroyed()) return orbWindow;
+
+    const nextOrbWindow = new BrowserWindow({
+        width: ORB_WINDOW_SIZE,
+        height: ORB_WINDOW_SIZE,
+        useContentSize: true,
+        transparent: true,
+        backgroundColor: '#00000000',
+        frame: false,
+        thickFrame: false,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        hasShadow: false,
+        show: false,
+        webPreferences: {
+            preload: path.join(__dirname, 'orb-preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: false,
+            backgroundThrottling: false
+        }
+    });
+
+    orbWindow = nextOrbWindow;
+    nextOrbWindow.setBackgroundColor('#00000000');
+    nextOrbWindow.setAlwaysOnTop(true, 'screen-saver');
+    nextOrbWindow.setSkipTaskbar(true);
+
+    try {
+        nextOrbWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    } catch (err) {
+        console.warn('[Main] Unable to show the floating button on every workspace:', err.message);
+    }
+
+    nextOrbWindow.on('closed', () => {
+        stopOrbDrag();
+        if (orbWindow === nextOrbWindow) orbWindow = null;
+        if (!isQuitting && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+            mainWindow.show();
+            mainWindow.focus();
+        }
+    });
+
+    try {
+        await nextOrbWindow.loadFile(path.join(__dirname, 'orb.html'));
+    } catch (err) {
+        if (!nextOrbWindow.isDestroyed()) nextOrbWindow.destroy();
+        throw err;
+    }
+
+    return nextOrbWindow;
+}
+
+async function collapseMainWindowToOrb() {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+
+    const nextOrbWindow = await createOrbWindow();
+    if (!nextOrbWindow || nextOrbWindow.isDestroyed()) return false;
+
+    positionOrbWindow();
+    nextOrbWindow.showInactive();
+    mainWindow.hide();
+    return true;
+}
+
+function restoreMainWindowFromOrb() {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+
+    stopOrbDrag();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+
+    if (orbWindow && !orbWindow.isDestroyed()) {
+        orbWindow.hide();
+    }
+    return true;
 }
 
 // ── 初始化服务 ──────────────────────────────────────────
 function initServices() {
     store = new Store();
+    browserSyncService = new BrowserSyncService(store);
     thumbnailer = new Thumbnailer();
     watcher = new Watcher(store, (event, filePath) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -178,6 +355,15 @@ function initServices() {
                     data
                 });
             }
+        },
+        notifyTaskSubmitted: (event) => {
+            browserSyncService?.registerTaskRoute(event);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('generation:task-submitted', event);
+            }
+        },
+        notifyTaskCompleted: (event) => {
+            browserSyncService?.markTaskCompleted(event.remoteTaskId, event.filePath);
         }
     });
     flowCanvasBridge.start(mcpConfig);
@@ -795,6 +981,18 @@ ipcMain.handle('shell:openFile', (_, filePath) => {
     shell.openPath(filePath);
 });
 
+const RAVENHASH_URLS = Object.freeze({
+    ai: 'https://ai.ravenhash.org/',
+    art: 'https://art.ravenhash.org/'
+});
+
+ipcMain.handle('shell:openRavenHash', async (_, site) => {
+    const targetUrl = RAVENHASH_URLS[site];
+    if (!targetUrl) throw new Error('Unknown RavenHash site');
+    await shell.openExternal(targetUrl);
+    return true;
+});
+
 // 原生文件拖放到外部应用（支持单文件或多文件）
 ipcMain.on('drag:start', (event, filePathOrPaths) => {
     try {
@@ -894,6 +1092,17 @@ ipcMain.handle('window:getAlwaysOnTop', () => {
     return false;
 });
 
+ipcMain.handle('window:collapseToOrb', () => collapseMainWindowToOrb());
+ipcMain.handle('window:restoreFromOrb', () => restoreMainWindowFromOrb());
+ipcMain.on('window:startOrbDrag', (event) => {
+    if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return;
+    startOrbDrag();
+});
+ipcMain.on('window:stopOrbDrag', (event) => {
+    if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return;
+    stopOrbDrag();
+});
+
 // ── 网页图片摘取 ────────────────────────────────────────
 const fs = require('fs');
 const https = require('https');
@@ -989,6 +1198,21 @@ ipcMain.handle('mcp:image:generate', async (_, body) => {
     } catch (err) {
         return { success: false, error: err.message };
     }
+});
+
+ipcMain.handle('mcp:video:generate', async (_, body) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...(await flowCanvasBridge.generateVideoFromRenderer(body || {})) };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('browser-sync:get-events', async () => {
+    return browserSyncService?.getEvents?.() || [];
 });
 
 function isPathInside(parentDir, filePath) {
@@ -1548,6 +1772,10 @@ app.whenReady().then(() => {
     createWindow();
 });
 
+app.on('before-quit', () => {
+    isQuitting = true;
+});
+
 app.on('window-all-closed', () => {
     if (watcher) watcher.closeAll();
     if (flowCanvasBridge) flowCanvasBridge.stop();
@@ -1555,5 +1783,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        restoreMainWindowFromOrb();
+    } else if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+    }
 });

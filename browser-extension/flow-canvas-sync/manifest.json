@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Flow Download Manager + Task Sync",
+  "version": "2.0.0",
+  "description": "保留自定义下载归档，并同步视频任务到 Flow Canvas。",
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://ai.ravenhash.org/*",
+        "https://art.ravenhash.org/*"
+      ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://ai.ravenhash.org/*",
+        "https://art.ravenhash.org/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Flow Canvas Task Sync"
+  }
+}

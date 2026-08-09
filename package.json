@@ -19,7 +19,45 @@
     "devDependencies": {
         "concurrently": "^8.2.2",
         "electron": "^28.3.3",
+        "electron-builder": "^26.0.12",
         "vite": "^5.4.0",
         "wait-on": "^7.2.0"
+    },
+    "build": {
+        "appId": "org.ravenhash.flowcanvas",
+        "productName": "Flow Canvas",
+        "asar": true,
+        "directories": {
+            "output": "release"
+        },
+        "files": [
+            "dist/**/*",
+            "electron-main/**/*",
+            "shared/**/*",
+            "mcp/**/*",
+            "package.json"
+        ],
+        "win": {
+            "target": [
+                {
+                    "target": "nsis",
+                    "arch": [
+                        "x64"
+                    ]
+                },
+                {
+                    "target": "portable",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ]
+        },
+        "nsis": {
+            "oneClick": false,
+            "allowToChangeInstallationDirectory": true,
+            "createDesktopShortcut": true,
+            "createStartMenuShortcut": true
+        }
     }
 }

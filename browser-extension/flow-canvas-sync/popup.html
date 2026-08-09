@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flow Canvas Task Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="mark">FC</div>
+      <div>
+        <h1>任务同步</h1>
+        <p id="connectionText">正在检查本地连接</p>
+      </div>
+      <i id="connectionDot"></i>
+    </header>
+
+    <section class="controls">
+      <label><span>启用同步</span><input id="enabled" type="checkbox"></label>
+      <label><span>自动下载新视频</span><input id="autoDownload" type="checkbox"></label>
+      <label><span>下载已有历史任务</span><input id="downloadExisting" type="checkbox"></label>
+      <label><span>归档其他普通下载</span><input id="archiveOtherDownloads" type="checkbox"></label>
+    </section>
+
+    <section class="folder-setting">
+      <label for="targetFolder">普通下载目标目录</label>
+      <div><input id="targetFolder" type="text" placeholder="例如 D:\\Downloads\\Archive"><button id="applyFolder" type="button">应用</button></div>
+    </section>
+
+    <div class="stats">
+      <div><b id="taskCount">0</b><span>已同步</span></div>
+      <div><b id="downloadCount">0</b><span>下载中</span></div>
+    </div>
+
+    <button class="primary" id="scanNow" type="button">立即同步</button>
+    <p class="hint">目标目录跟随 Flow Canvas 发起任务时的画板目录。</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "com.flow.canvas_sync",
+  "description": "Flow Canvas browser task sync and download archive host",
+  "path": "REPLACED_BY_INSTALLER",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://REPLACED_BY_INSTALLER/"
+  ]
+}

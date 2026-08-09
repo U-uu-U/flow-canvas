@@ -183,12 +183,84 @@
                     添加文件夹
                 </button>
             </div>
+            <section class="creation-prompt-dock video-prompt-dock" id="videoPromptDock" hidden aria-label="视频创作提示词">
+                <label class="creation-prompt-field">
+                    <textarea id="videoPromptInput" rows="3" placeholder="Start typing a prompt to create 视频创作..."></textarea>
+                </label>
+                <div class="creation-source-card">
+                    <div class="creation-source-actions" role="group" aria-label="添加视频参考素材">
+                        <button class="creation-source-add" id="videoAddImageBtn" type="button">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                                <circle cx="8.5" cy="9" r="1.5"></circle>
+                                <path d="m4 17 5-5 4 4 3-3 4 4"></path>
+                            </svg>
+                            <span>添加图片</span>
+                        </button>
+                        <button class="creation-source-add" id="videoAddVideoBtn" type="button">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <rect x="3" y="5" width="13" height="14" rx="2"></rect>
+                                <path d="m16 10 5-3v10l-5-3z"></path>
+                            </svg>
+                            <span>添加视频</span>
+                        </button>
+                        <button class="creation-source-add" id="videoAddAudioBtn" type="button">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M9 18V5l10-2v13"></path>
+                                <circle cx="6" cy="18" r="3"></circle>
+                                <circle cx="16" cy="16" r="3"></circle>
+                            </svg>
+                            <span>添加音频</span>
+                        </button>
+                        <button class="creation-source-clear" id="videoClearSourcesBtn" type="button" title="清空参考素材" aria-label="清空参考素材">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M4 7h16"></path>
+                                <path d="M9 7V4h6v3"></path>
+                                <path d="m7 7 1 13h8l1-13"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="creation-source-card-head">
+                        <span>参考素材</span>
+                        <span id="videoSourceCount">0 个</span>
+                    </div>
+                    <div class="creation-source-lane">
+                        <span class="creation-source-lane-label">图片 <b id="videoImageSourceCount">0 / 9</b></span>
+                        <div class="creation-source-strip" id="videoImageSourceStrip">
+                            <span class="creation-source-empty">点击“添加图片”，再按顺序点选画布图片</span>
+                        </div>
+                    </div>
+                    <div class="creation-source-lane">
+                        <span class="creation-source-lane-label">视频 <b id="videoVideoSourceCount">0 / 3</b></span>
+                        <div class="creation-source-strip" id="videoVideoSourceStrip">
+                            <span class="creation-source-empty">点击“添加视频”，再按顺序点选画布视频</span>
+                        </div>
+                    </div>
+                    <div class="creation-source-lane">
+                        <span class="creation-source-lane-label">音频 <b id="videoAudioSourceCount">0 / 3</b></span>
+                        <div class="creation-source-strip" id="videoAudioSourceStrip">
+                            <span class="creation-source-empty">点击“添加音频”，再按顺序点选画布音频</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="creation-prompt-dock-actions">
+                    <div class="creation-prompt-meta">
+                        <span class="creation-prompt-chip key" id="videoPromptProviderChip">未配置视频 API</span>
+                        <button class="creation-prompt-chip model" id="videoPromptModelChip" type="button">未选择模型</button>
+                        <span class="creation-prompt-dock-hint">参考素材按点选顺序发送</span>
+                    </div>
+                    <button class="creation-generate-btn" id="videoGenerateBtn" type="button">
+                        <span class="creation-generate-icon" aria-hidden="true">▶</span>
+                        Run
+                    </button>
+                </div>
+            </section>
         </main>
 
         <!-- 右侧 Agent 边栏 -->
         <div class="agent-sidebar-wrapper" id="agentSidebarWrapper">
             <aside class="agent-sidebar" id="agentSidebar">
-                <div class="agent-edge-controls" aria-label="创造模式控制">
+                <div class="agent-edge-controls" aria-label="模式控制">
                     <button class="agent-edge-btn agent-collapse-btn" id="agentCollapseBtn" title="收起边栏"
                         aria-label="收起边栏">
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
@@ -198,7 +270,7 @@
                         </svg>
                     </button>
                     <button class="agent-edge-btn creation-mode-close-btn" id="creationModeCloseBtn"
-                        title="结束创造模式" aria-label="结束创造模式">
+                        title="退出当前模式" aria-label="退出当前模式">
                         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M12 3v8"></path>
@@ -209,7 +281,18 @@
                 <!-- 头部 -->
                 <div class="agent-header">
                     <div class="agent-header-left">
-                        <span class="creation-mode-title">创造模式</span>
+                        <span class="creation-mode-title" id="creationModeTitle">设置模式</span>
+                        <button class="agent-task-history-btn" id="agentTaskHistoryBtn" type="button"
+                            title="打开任务记录" aria-label="打开任务记录" aria-expanded="false">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
+                                <path d="M3 3v5h5"></path>
+                                <path d="M12 7v5l3 2"></path>
+                            </svg>
+                            <span>任务记录</span>
+                            <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
+                        </button>
                     </div>
                     <div class="agent-header-right">
                         <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
@@ -223,6 +306,24 @@
                     </div>
                 </div>
 
+                <section class="agent-task-history" id="agentTaskHistory" aria-label="任务记录" hidden>
+                    <div class="agent-task-history-toolbar">
+                        <div>
+                            <h2>任务记录</h2>
+                            <p id="agentTaskHistorySummary">还没有生成任务</p>
+                        </div>
+                        <button class="agent-task-history-close" id="agentTaskHistoryClose" type="button"
+                            title="返回当前模式" aria-label="返回当前模式">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M19 12H5"></path>
+                                <path d="m12 19-7-7 7-7"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="agent-task-history-list" id="agentTaskHistoryList"></div>
+                </section>
+
                 <!-- 模型选择器（头部下方） -->
                 <div class="agent-model-bar">
                     <div class="agent-model-pickers">
@@ -235,6 +336,12 @@
                         <label class="agent-model-picker">
                             <span class="agent-model-picker-label">生图</span>
                             <select class="agent-model-select" id="agentImageModelSelect">
+                                <option value="">-- 请先添加 API --</option>
+                            </select>
+                        </label>
+                        <label class="agent-model-picker">
+                            <span class="agent-model-picker-label">视频</span>
+                            <select class="agent-model-select" id="agentVideoModelSelect">
                                 <option value="">-- 请先添加 API --</option>
                             </select>
                         </label>
@@ -257,7 +364,154 @@
                     </button>
                 </div>
 
-                <!-- 设置面板（默认隐藏） -->
+                <section class="video-model-picker" id="videoModelPicker" hidden aria-label="选择视频模型">
+                    <div class="video-model-picker-header">
+                        <div class="video-model-picker-title">
+                            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+                                <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+                                <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+                                <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+                            </svg>
+                            <h2>选择模型</h2>
+                        </div>
+                    </div>
+                    <label class="video-model-search">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="7"></circle>
+                            <path d="m20 20-3.5-3.5"></path>
+                        </svg>
+                        <input id="videoModelSearchInput" type="search" placeholder="搜索视频模型..." autocomplete="off">
+                    </label>
+                    <div class="video-model-list" id="videoModelList"></div>
+                    <div class="video-model-empty" id="videoModelEmpty" hidden>
+                        <strong>没有可用的视频模型</strong>
+                        <span>请先在设置中添加 API，并填写视频模型名称。</span>
+                        <button type="button" id="videoModelOpenSettingsBtn">打开设置</button>
+                    </div>
+                </section>
+
+                <!-- 视频参数面板（选择模型后显示） -->
+                <section class="creation-workspace creation-video-workspace" id="videoWorkspace" hidden>
+                    <article class="video-selected-model-card" id="videoSelectedModelCard">
+                        <div class="video-selected-model-topline">
+                            <span class="video-selected-model-avatar" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <rect x="3" y="5" width="13" height="14" rx="3"></rect>
+                                    <path d="m16 10 5-3v10l-5-3z"></path>
+                                </svg>
+                            </span>
+                            <div class="video-selected-model-identity">
+                                <strong id="videoSelectedModelName">未选择模型</strong>
+                                <span id="videoSelectedModelId">--</span>
+                            </div>
+                            <div class="video-selected-model-actions">
+                                <button id="videoModelFavoriteBtn" type="button" title="收藏模型" aria-label="收藏模型" aria-pressed="false">
+                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"></path>
+                                    </svg>
+                                </button>
+                                <button id="videoModelCopyBtn" type="button" title="复制模型 ID" aria-label="复制模型 ID">
+                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                                        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                                    </svg>
+                                </button>
+                                <button id="videoChangeModelBtn" type="button" title="更换视频模型" aria-label="更换视频模型">
+                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
+                                        <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+                                        <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+                                        <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+                                        <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="video-selected-model-summary">
+                            <span class="video-selected-model-profile" id="videoSelectedModelProfile">视频模型</span>
+                            <span id="videoSelectedModelProviderType">OpenAI 兼容</span>
+                        </div>
+                        <dl class="video-selected-model-capabilities">
+                            <div><dt>分辨率</dt><dd id="videoSelectedModelResolutions">接口默认</dd></div>
+                            <div><dt>时长</dt><dd id="videoSelectedModelDurations">接口默认</dd></div>
+                            <div><dt>比例</dt><dd id="videoSelectedModelRatios">接口默认</dd></div>
+                        </dl>
+                    </article>
+
+                    <div class="creation-setting-section" id="videoRatioField">
+                        <span class="creation-panel-label">画面比例</span>
+                        <div class="creation-ratio-grid" role="group" aria-label="画面比例">
+                            <!-- 根据所选模型动态生成 -->
+                        </div>
+                        <input id="videoRatioSelect" type="hidden" value="">
+                    </div>
+
+                    <label class="creation-setting-section creation-select-field" id="videoResolutionField">
+                        <span class="creation-panel-label">输出分辨率</span>
+                        <select id="videoResolutionSelect" disabled>
+                            <option value="">请先选择视频模型</option>
+                        </select>
+                    </label>
+
+                    <div class="creation-setting-section creation-duration-field" id="videoDurationField">
+                        <span class="creation-panel-label">视频时长</span>
+                        <div id="videoDurationControl"></div>
+                        <input id="videoDurationSelect" type="hidden" value="">
+                    </div>
+
+                    <div class="creation-advanced-row">
+                        <label class="creation-switch-control">
+                            <span>固定镜头</span>
+                            <input type="checkbox" id="videoCameraFixed">
+                            <i aria-hidden="true"></i>
+                        </label>
+                        <label class="creation-switch-control">
+                            <span>生成音频</span>
+                            <input type="checkbox" id="videoGenerateAudio">
+                            <i aria-hidden="true"></i>
+                        </label>
+                        <label class="creation-switch-control" id="videoWebSearchField">
+                            <span>联网搜索</span>
+                            <input type="checkbox" id="videoWebSearch">
+                            <i aria-hidden="true"></i>
+                        </label>
+                        <label class="creation-switch-control">
+                            <span>添加水印</span>
+                            <input type="checkbox" id="videoWatermark">
+                            <i aria-hidden="true"></i>
+                        </label>
+                    </div>
+                    <div class="creation-workspace-message" id="videoGenerateMessage" aria-live="polite"></div>
+                </section>
+
+                <section class="creation-workspace creation-image-workspace" id="imageWorkspace" hidden>
+                    <div class="creation-workspace-heading">
+                        <div>
+                            <span class="creation-workspace-kicker image-kicker">IMAGE</span>
+                            <h2>图片创作</h2>
+                        </div>
+                        <span class="creation-workspace-status" id="imageWorkspaceStatus">待机</span>
+                    </div>
+                    <label class="creation-prompt-field">
+                        <span>提示词</span>
+                        <textarea id="imagePromptInput" rows="5" placeholder="描述你要生成的画面"></textarea>
+                    </label>
+                    <label class="creation-image-size-field">
+                        <span>尺寸</span>
+                        <select id="imageSizeSelect">
+                            <option value="">自动（由模型决定）</option>
+                            <option value="1024x1024">1024 × 1024（方图）</option>
+                            <option value="1536x1024">1536 × 1024（横图）</option>
+                            <option value="1024x1536">1024 × 1536（竖图）</option>
+                        </select>
+                    </label>
+                    <button class="creation-generate-btn image-generate-btn" id="imageGenerateBtn" type="button">
+                        <span class="creation-generate-icon" aria-hidden="true">✦</span>
+                        生成图片
+                    </button>
+                    <div class="creation-workspace-message" id="imageGenerateMessage" aria-live="polite"></div>
+                </section>
+
                 <div class="agent-settings" id="agentSettings">
                     <!-- 已保存的 API 列表 -->
                     <div class="agent-provider-list" id="agentProviderList">
@@ -274,6 +528,31 @@
                         添加 API
                     </button>
 
+                    <div class="agent-ravenhash-links" aria-label="前往 RavenHash 获取 API">
+                        <button class="agent-ravenhash-link ai" type="button" data-ravenhash-site="ai"
+                            title="在默认浏览器打开 ai.ravenhash.org">
+                            <span class="agent-ravenhash-mark" aria-hidden="true">R</span>
+                            AI 中转站
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M15 3h6v6"></path>
+                                <path d="M10 14 21 3"></path>
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            </svg>
+                        </button>
+                        <button class="agent-ravenhash-link art" type="button" data-ravenhash-site="art"
+                            title="在默认浏览器打开 art.ravenhash.org">
+                            <span class="agent-ravenhash-mark" aria-hidden="true">R</span>
+                            ART 中转站
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M15 3h6v6"></path>
+                                <path d="M10 14 21 3"></path>
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            </svg>
+                        </button>
+                    </div>
+
                     <!-- 添加/编辑 API 表单（默认隐藏） -->
                     <div class="agent-api-form" id="agentApiForm" style="display:none;">
                         <div class="agent-api-form-header">
@@ -288,6 +567,8 @@
                                 <button class="agent-template-chip" data-template="gemini">Google Gemini</button>
                                 <button class="agent-template-chip" data-template="claude">Claude</button>
                                 <button class="agent-template-chip" data-template="deepseek">DeepSeek</button>
+                                <button class="agent-template-chip" data-template="ravenhash">RavenHash Image</button>
+                                <button class="agent-template-chip" data-template="seedance">Seedance 2.0</button>
                                 <button class="agent-template-chip" data-template="custom">自定义</button>
                             </div>
                         </div>
@@ -322,6 +603,15 @@
                             <select class="agent-setting-input agent-fetched-model-select" id="agentFetchedModelSelect" hidden>
                                 <option value="">选择拉取到的模型</option>
                             </select>
+                            <datalist id="agentFetchedModelOptions"></datalist>
+                            <div class="agent-additional-models" id="agentAdditionalModels"></div>
+                            <button type="button" class="agent-add-model-slot" id="agentAddModelSlotBtn">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                添加模型位
+                            </button>
                             <div class="agent-model-fetch-status" id="agentModelFetchStatus" aria-live="polite"></div>
                         </div>
 
@@ -387,8 +677,26 @@
             </aside>
         </div>
 
-        <!-- 创造模式打开按钮（边栏关闭时显示） -->
-        <button class="agent-toggle-btn" id="agentToggleBtn" title="开启创造模式">
+        <!-- 图片 / 视频模式切换 -->
+        <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
+            <button class="creation-mode-option image" id="creationModeImageBtn" type="button">
+                <span class="creation-mode-option-icon" aria-hidden="true">▧</span>
+                图片模式
+            </button>
+            <button class="creation-mode-option video" id="creationModeVideoBtn" type="button">
+                <span class="creation-mode-option-icon" aria-hidden="true">▶</span>
+                视频模式
+            </button>
+        </div>
+        <button class="creation-mode-settings-shortcut" id="creationModeSettingsBtn" type="button"
+            title="设置模式" aria-label="打开设置模式">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+        </button>
+        <button class="agent-toggle-btn" id="agentToggleBtn" title="点击收起窗口，悬停切换模式" aria-label="收起为置顶浮动按钮">
             <div class="toggle-btn-glow"></div>
             <svg class="toggle-btn-icon" viewBox="0 0 24 24" width="12" height="18" fill="currentColor">
                 <rect x="6" y="3" width="12" height="18" rx="6" />

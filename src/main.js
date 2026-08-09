@@ -26,7 +26,9 @@ async function bootstrap() {
 
         // 1. 加载数据
         storeData = await window.flowCanvas.store.load();
-        storeData.items = Array.isArray(storeData.items) ? storeData.items : [];
+        storeData.items = (Array.isArray(storeData.items) ? storeData.items : [])
+            .filter(item => item?.kind !== 'generation');
+        delete storeData.generationNodes;
         storeData.folderGroups = Array.isArray(storeData.folderGroups) ? storeData.folderGroups : [];
         planService = new PlanService(storeData);
         console.log('[Main] 数据加载完成', storeData);
@@ -35,10 +37,21 @@ async function bootstrap() {
         sidebarManager = initRequiredModule('sidebar', () => new SidebarManager(storeData));
         contextMenu = initRequiredModule('context-menu', () => new ContextMenu());
         canvasManager = initRequiredModule('canvas', () => new CanvasManager('canvasContainer', storeData, contextMenu, planService, {
-            getImageProvider: () => agentSidebar?.getImageProviderConfig?.() || null
+            getImageProvider: () => agentSidebar?.getImageProviderConfig?.() || null,
+            getVideoProvider: () => agentSidebar?.getVideoProviderConfig?.() || null
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
             getPlanningContext: () => planService.getAgentContext(canvasManager?.getSelectedFilePaths?.() || []),
+            getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
+            getSelectedCanvasEntries: () => canvasManager?.getSelectedCanvasEntries?.() || [],
+            subscribeCanvasSelection: (handler) => canvasManager?.on?.('selectionChanged', handler),
+            subscribeMediaReferenceSelection: (handler) => canvasManager?.on?.('mediaReferenceSelectionChanged', handler),
+            subscribeMediaReferencePickState: (handler) => canvasManager?.on?.('mediaReferencePickStateChanged', handler),
+            beginMediaReferencePick: (type, entries, maxItems) => canvasManager?.beginMediaReferencePick?.(type, entries, maxItems),
+            endMediaReferencePick: () => canvasManager?.endMediaReferencePick?.(),
+            updateMediaReferencePick: (type, entries) => canvasManager?.updateMediaReferencePick?.(type, entries),
+            beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,
+            endVideoGeneration: (placeholderId) => canvasManager?.removeVideoGenerationPlaceholder?.(placeholderId),
             applyPlanSuggestion: (rows) => applyAgentPlanRows(rows)
         }));
 
@@ -196,7 +209,7 @@ async function bootstrap() {
         sidebarManager.on('scanFiles', (files) => {
             const newItems = [];
             files.forEach(filePath => {
-                if (!isWatchedBoardFile(filePath)) return;
+                if (!isWatchedBoardFile(filePath) || isRemovedFromBoard(filePath)) return;
                 const item = canvasManager.addFile(filePath);
                 if (item) {
                     storeData.items.push(item);
@@ -226,6 +239,10 @@ async function bootstrap() {
             }
 
             if (event === 'add') {
+                if (isRemovedFromBoard(filePath)) {
+                    console.log('[Main] 跳过已从白板移除的文件:', filePath);
+                    return;
+                }
                 const item = canvasManager.addFile(filePath);
                 if (item) {
                     storeData.items.push(item);
@@ -244,12 +261,24 @@ async function bootstrap() {
 
         // 监听"从白板移除"（支持单选或多选，优先按 itemId 精确删除）
         document.addEventListener('context-remove', (e) => {
-            if (e.detail.itemIds) {
-                const idsSet = new Set(e.detail.itemIds);
+            const detail = e.detail || {};
+            const itemIds = Array.isArray(detail.itemIds) ? detail.itemIds.filter(Boolean) : [];
+            const explicitPaths = (Array.isArray(detail.filePaths)
+                ? detail.filePaths
+                : [detail.filePath]).filter(Boolean);
+            const itemPaths = itemIds
+                .map(id => storeData.items.find(item => item.id === id)?.filePath)
+                .filter(Boolean);
+
+            if (detail.suppressAutoRestore !== false) {
+                markRemovedFromBoard([...itemPaths, ...explicitPaths]);
+            }
+
+            if (itemIds.length > 0) {
+                const idsSet = new Set(itemIds);
                 storeData.items = storeData.items.filter(i => !idsSet.has(i.id));
             } else {
-                const filePaths = e.detail.filePaths || [e.detail.filePath];
-                filePaths.forEach(filePath => {
+                explicitPaths.forEach(filePath => {
                     storeData.items = storeData.items.filter(i => i.filePath !== filePath);
                 });
             }
@@ -268,6 +297,12 @@ async function bootstrap() {
         canvasManager.on('plansChanged', () => {
             saveStoreThrottled();
             scheduleHistoryCommit('plans-change');
+        });
+
+        canvasManager.on('manualFileImport', (filePath) => {
+            if (!restoreRemovedFromBoard(filePath)) return;
+            saveStoreThrottled();
+            scheduleHistoryCommit('manual-file-import');
         });
 
         // 监听网页图片摘取
@@ -289,7 +324,7 @@ async function bootstrap() {
         // 监听主进程拦截到的拖拽图片（will-navigate 拦截方式）
         window.flowCanvas.onExternalImageDropped?.((filePath) => {
             console.log('[Main] 收到主进程拖拽图片:', filePath);
-            canvasManager._addCapturedFile(filePath);
+            canvasManager._addCapturedFile(filePath, null, { manualRestore: true });
         });
 
         if (window.flowCanvas.onMcpStoreUpdated) {
@@ -349,13 +384,25 @@ function handleExternalStoreUpdate(payload) {
 
     try {
         storeData = payload.data;
+        sidebarManager.storeData = storeData;
+        const incomingItems = (Array.isArray(storeData.items) ? storeData.items : [])
+            .filter(item => item?.kind !== 'generation');
+        const incomingItemCount = incomingItems.length;
+        storeData.items = incomingItems.filter(item => !isRemovedFromBoard(item?.filePath));
+        const filteredSuppressedItems = storeData.items.length < incomingItemCount;
+        delete storeData.generationNodes;
         planService = new PlanService(storeData);
 
-        sidebarManager.storeData = storeData;
         canvasManager.storeData = storeData;
         canvasManager.planService = planService;
 
-        canvasManager.clearAll();
+        if (filteredSuppressedItems) {
+            const activeGroup = sidebarManager.getActiveGroup();
+            if (activeGroup) activeGroup.savedItems = cloneData(storeData.items);
+            saveStoreThrottled();
+        }
+
+        canvasManager.clearAll({ preserveTransients: true });
         canvasManager.setViewport(storeData.viewport || { x: 0, y: 0, scale: 1 });
         canvasManager.renderInitialItems();
         sidebarManager.renderGroups();
@@ -442,6 +489,7 @@ function snapshotBoardState() {
     return {
         activeGroupId: storeData.activeGroupId || null,
         items: cloneData(storeData.items || []),
+        removedFromBoardPaths: cloneData(getRemovedFromBoardPaths()),
         plans: cloneData(planService?.listPlans?.() || []),
         viewport: cloneData(getCurrentViewport())
     };
@@ -506,6 +554,7 @@ function restoreHistorySnapshot(snapshot) {
 
     storeData.items = restoredItems;
     storeData.viewport = restoredViewport;
+    setRemovedFromBoardPaths(snapshot.removedFromBoardPaths || []);
     const activeGroup = sidebarManager?.getActiveGroup();
     if (activeGroup) {
         activeGroup.plans = restoredPlans;
@@ -575,9 +624,14 @@ function showHistoryStatus(text) {
 async function reconcileGroupFiles(folders, currentSwitchRun) {
     if (!window.flowCanvas?.folder?.scan || !canvasManager || !storeData) return;
 
+    const activeGroup = sidebarManager?.getActiveGroup?.() || null;
+    const isInitializingRemovedPaths = Boolean(
+        activeGroup && activeGroup.removedFromBoardPathsInitialized !== true
+    );
     const successfulFolders = [];
     const discoveredFiles = new Set();
     const addedItems = [];
+    const legacyMissingPaths = [];
     const existingFilePaths = new Set(
         (storeData.items || [])
             .map(item => item?.filePath)
@@ -610,6 +664,11 @@ async function reconcileGroupFiles(folders, currentSwitchRun) {
             const normalizedFilePath = normalizeFsPath(filePath);
             discoveredFiles.add(normalizedFilePath);
             if (existingFilePaths.has(normalizedFilePath)) return;
+            if (isInitializingRemovedPaths) {
+                legacyMissingPaths.push(filePath);
+                return;
+            }
+            if (isRemovedFromBoard(filePath)) return;
             const item = canvasManager.addFile(filePath);
             if (item) {
                 storeData.items.push(item);
@@ -620,6 +679,13 @@ async function reconcileGroupFiles(folders, currentSwitchRun) {
     }
 
     if (currentSwitchRun !== switchGroupRunId) return;
+
+    if (isInitializingRemovedPaths && successfulFolders.length > 0) {
+        markRemovedFromBoard(legacyMissingPaths);
+        if (successfulFolders.length === folders.length) {
+            activeGroup.removedFromBoardPathsInitialized = true;
+        }
+    }
 
     if (successfulFolders.length > 0) {
         const removedItems = storeData.items.filter(item => {
@@ -947,6 +1013,59 @@ function normalizeFsPath(filePath) {
         .toLowerCase();
 }
 
+function getRemovedFromBoardOwner() {
+    return sidebarManager?.getActiveGroup?.() || storeData;
+}
+
+function getRemovedFromBoardPaths() {
+    const owner = getRemovedFromBoardOwner();
+    if (!owner) return [];
+
+    const normalizedPaths = [...new Set(
+        (Array.isArray(owner.removedFromBoardPaths) ? owner.removedFromBoardPaths : [])
+            .map(normalizeFsPath)
+            .filter(Boolean)
+    )];
+    owner.removedFromBoardPaths = normalizedPaths;
+    return normalizedPaths;
+}
+
+function setRemovedFromBoardPaths(filePaths) {
+    const owner = getRemovedFromBoardOwner();
+    if (!owner) return;
+    owner.removedFromBoardPaths = [...new Set(
+        (Array.isArray(filePaths) ? filePaths : [])
+            .map(normalizeFsPath)
+            .filter(Boolean)
+    )];
+}
+
+function isRemovedFromBoard(filePath) {
+    const normalizedPath = normalizeFsPath(filePath);
+    return normalizedPath !== '' && getRemovedFromBoardPaths().includes(normalizedPath);
+}
+
+function markRemovedFromBoard(filePaths) {
+    const currentPaths = new Set(getRemovedFromBoardPaths());
+    const previousSize = currentPaths.size;
+    (filePaths || []).forEach(filePath => {
+        const normalizedPath = normalizeFsPath(filePath);
+        if (normalizedPath) currentPaths.add(normalizedPath);
+    });
+    setRemovedFromBoardPaths([...currentPaths]);
+    return currentPaths.size !== previousSize;
+}
+
+function restoreRemovedFromBoard(filePath) {
+    const normalizedPath = normalizeFsPath(filePath);
+    if (!normalizedPath) return false;
+    const currentPaths = getRemovedFromBoardPaths();
+    const nextPaths = currentPaths.filter(path => path !== normalizedPath);
+    if (nextPaths.length === currentPaths.length) return false;
+    setRemovedFromBoardPaths(nextPaths);
+    return true;
+}
+
 function isPathInsideFolder(filePath, folderPath) {
     const normalizedPath = normalizeFsPath(filePath);
     const normalizedFolder = normalizeFsPath(folderPath);
@@ -977,11 +1096,14 @@ function saveStoreNow(useSync = false) {
     }
 
     if (useSync && window.flowCanvas?.store?.saveSync) {
-        window.flowCanvas.store.saveSync(storeData);
+        const result = window.flowCanvas.store.saveSync(storeData);
+        updateBodyState();
+        return result;
     } else {
-        window.flowCanvas.store.save(storeData);
+        const result = window.flowCanvas.store.save(storeData);
+        updateBodyState();
+        return result;
     }
-    updateBodyState();
 }
 
 function updateBodyState() {

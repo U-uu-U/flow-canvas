@@ -7,8 +7,106 @@ const DEFAULT_TEMPLATES = {
     gemini: { name: 'Google Gemini', type: 'google', endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=', model: 'gemini-1.5-pro-latest' },
     claude: { name: 'Claude', type: 'anthropic', endpoint: 'https://api.anthropic.com/v1/messages', model: 'claude-3-5-sonnet-latest' },
     deepseek: { name: 'DeepSeek', type: 'openai', endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' },
+    ravenhash: { name: 'RavenHash Image', type: 'openai', endpoint: 'https://ai.ravenhash.org', model: 'gpt-image-2' },
+    seedance: { name: 'TokensByte Seedance 2.0', type: 'openai', endpoint: '', model: 'doubao-seedance-2-0' },
     custom: { name: '自定义 API', type: 'openai', endpoint: '', model: '' }
 };
+
+const VIDEO_MODEL_PROFILES = [
+    {
+        match: /seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i,
+        label: 'Seedance 2.0',
+        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
+        resolutions: ['480p', '720p', '1080p', '4K'],
+        durations: Array.from({ length: 15 }, (_, index) => index + 1),
+        durationControl: 'slider',
+        supportsWebSearch: true,
+        defaultRatio: '16:9',
+        defaultResolution: '1080p',
+        defaultDuration: 5
+    },
+    {
+        match: /seedance[^a-z0-9]*(?:1[._-]?5|1[._-]?0[-_]?pro)/i,
+        label: 'Seedance 1.5',
+        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
+        resolutions: ['480p', '720p', '1080p'],
+        durations: [-1, 5, 10, 12],
+        durationControl: 'select',
+        supportsWebSearch: false,
+        defaultRatio: '16:9',
+        defaultResolution: '720p',
+        defaultDuration: 5
+    },
+    {
+        match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
+        label: 'DashScope',
+        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+        resolutions: ['720P', '1080P'],
+        durations: [3, 5, 10, 15],
+        durationControl: 'segmented',
+        supportsWebSearch: false,
+        defaultRatio: '1:1',
+        defaultResolution: '720P',
+        defaultDuration: 5
+    },
+    {
+        match: /kling|可灵/i,
+        label: 'Kling',
+        ratios: ['16:9', '9:16', '1:1'],
+        resolutions: [],
+        durations: [3, 5, 10, 15],
+        durationControl: 'segmented',
+        supportsWebSearch: false,
+        defaultRatio: '16:9',
+        defaultResolution: null,
+        defaultDuration: 5
+    },
+    {
+        match: /tencent|vidu|腾讯/i,
+        label: 'Tencent / Vidu',
+        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'],
+        resolutions: [],
+        durations: [5, 10],
+        durationControl: 'segmented',
+        supportsWebSearch: false,
+        defaultRatio: '1:1',
+        defaultResolution: null,
+        defaultDuration: 5
+    }
+];
+
+const DEFAULT_VIDEO_MODEL_PROFILE = {
+    label: '未收录模型',
+    ratios: [],
+    resolutions: [],
+    durations: [],
+    durationControl: null,
+    supportsWebSearch: false,
+    defaultRatio: null,
+    defaultResolution: null,
+    defaultDuration: null
+};
+
+const DEFAULT_IMAGE_SIZES = [
+    { value: '', label: '自动（由模型决定）' },
+    { value: '1024x1024', label: '1024 × 1024（方图）' },
+    { value: '1536x1024', label: '1536 × 1024（横图）' },
+    { value: '1024x1536', label: '1024 × 1536（竖图）' }
+];
+
+const RAVENHASH_IMAGE_SIZES = [
+    ...DEFAULT_IMAGE_SIZES,
+    { value: '2048x2048', label: '2048 × 2048（2K 方图）' },
+    { value: '2880x2880', label: '2880 × 2880（原生方图）' },
+    { value: '3840x2160', label: '3840 × 2160（原生 4K 横图）' },
+    { value: '2160x3840', label: '2160 × 3840（原生 4K 竖图）' }
+];
+
+const VIDEO_REFERENCE_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
+const VIDEO_REFERENCE_LABELS = Object.freeze({ image: '图片', video: '视频', audio: '音频' });
+const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
+const GENERATION_TASK_LIMIT = 100;
+const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
 
 export class AgentSidebar {
     constructor(options = {}) {
@@ -18,6 +116,7 @@ export class AgentSidebar {
             systemPrompt: '你是一个有用的 AI 助手，正在帮助用户管理和分析他们白板上的内容。',
             chatProviderId: null,
             imageProviderId: null,
+            videoProviderId: null,
             activeProviderId: null
         };
         // 存储所有的 provider { id, name, type, endpoint, apiKey, model }
@@ -27,6 +126,8 @@ export class AgentSidebar {
         this.isStreaming = false;
         this.editingProviderId = null;
         this.availableSkills = [];
+        this.videoReferenceSelections = { image: [], video: [], audio: [] };
+        this.activeVideoReferenceType = null;
 
         // DOM 引用
         this.messagesEl = document.getElementById('agentMessages');
@@ -42,6 +143,7 @@ export class AgentSidebar {
         this.apiFormTitle = document.getElementById('agentApiFormTitle');
         this.modelSelectEl = document.getElementById('agentModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
+        this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
         this.systemPromptEl = document.getElementById('agentSystemPrompt');
         this.fetchSkillsBtn = document.getElementById('agentFetchSkillsBtn');
         this.skillSelect = document.getElementById('agentSkillSelect');
@@ -49,6 +151,71 @@ export class AgentSidebar {
         this.useSkillBtn = document.getElementById('agentUseSkillBtn');
         this.removeSkillBtn = document.getElementById('agentRemoveSkillBtn');
         this.promptSkillStatusEl = document.getElementById('agentPromptSkillStatus');
+        this.modePicker = document.getElementById('creationModePicker');
+        this.modeTitle = document.getElementById('creationModeTitle');
+        this.taskHistoryBtn = document.getElementById('agentTaskHistoryBtn');
+        this.taskHistoryBadge = document.getElementById('agentTaskHistoryBadge');
+        this.taskHistoryPanel = document.getElementById('agentTaskHistory');
+        this.taskHistoryList = document.getElementById('agentTaskHistoryList');
+        this.taskHistorySummary = document.getElementById('agentTaskHistorySummary');
+        this.videoModelPicker = document.getElementById('videoModelPicker');
+        this.videoModelSearchInput = document.getElementById('videoModelSearchInput');
+        this.videoModelList = document.getElementById('videoModelList');
+        this.videoModelEmpty = document.getElementById('videoModelEmpty');
+        this.videoSelectedModelName = document.getElementById('videoSelectedModelName');
+        this.videoSelectedModelId = document.getElementById('videoSelectedModelId');
+        this.videoSelectedModelProfile = document.getElementById('videoSelectedModelProfile');
+        this.videoSelectedModelProviderType = document.getElementById('videoSelectedModelProviderType');
+        this.videoSelectedModelResolutions = document.getElementById('videoSelectedModelResolutions');
+        this.videoSelectedModelDurations = document.getElementById('videoSelectedModelDurations');
+        this.videoSelectedModelRatios = document.getElementById('videoSelectedModelRatios');
+        this.videoModelFavoriteBtn = document.getElementById('videoModelFavoriteBtn');
+        this.videoModelCopyBtn = document.getElementById('videoModelCopyBtn');
+        this.videoWorkspace = document.getElementById('videoWorkspace');
+        this.videoPromptDock = document.getElementById('videoPromptDock');
+        this.videoPromptInput = document.getElementById('videoPromptInput');
+        this.videoRatioField = document.getElementById('videoRatioField');
+        this.videoRatioGrid = document.querySelector('.creation-ratio-grid');
+        this.videoResolutionField = document.getElementById('videoResolutionField');
+        this.videoResolutionSelect = document.getElementById('videoResolutionSelect');
+        this.videoRatioSelect = document.getElementById('videoRatioSelect');
+        this.videoDurationField = document.getElementById('videoDurationField');
+        this.videoDurationSelect = document.getElementById('videoDurationSelect');
+        this.videoDurationControl = document.getElementById('videoDurationControl');
+        this.videoCameraFixed = document.getElementById('videoCameraFixed');
+        this.videoGenerateAudio = document.getElementById('videoGenerateAudio');
+        this.videoWebSearchField = document.getElementById('videoWebSearchField');
+        this.videoWebSearch = document.getElementById('videoWebSearch');
+        this.videoWatermark = document.getElementById('videoWatermark');
+        this.videoSourceCount = document.getElementById('videoSourceCount');
+        this.videoImageSourceCount = document.getElementById('videoImageSourceCount');
+        this.videoVideoSourceCount = document.getElementById('videoVideoSourceCount');
+        this.videoAudioSourceCount = document.getElementById('videoAudioSourceCount');
+        this.videoImageSourceStrip = document.getElementById('videoImageSourceStrip');
+        this.videoVideoSourceStrip = document.getElementById('videoVideoSourceStrip');
+        this.videoAudioSourceStrip = document.getElementById('videoAudioSourceStrip');
+        this.videoAddImageBtn = document.getElementById('videoAddImageBtn');
+        this.videoAddVideoBtn = document.getElementById('videoAddVideoBtn');
+        this.videoAddAudioBtn = document.getElementById('videoAddAudioBtn');
+        this.videoClearSourcesBtn = document.getElementById('videoClearSourcesBtn');
+        this.videoWorkspaceStatus = document.getElementById('videoWorkspaceStatus');
+        this.videoGenerateBtn = document.getElementById('videoGenerateBtn');
+        this.videoGenerateMessage = document.getElementById('videoGenerateMessage');
+        this.videoPromptProviderChip = document.getElementById('videoPromptProviderChip');
+        this.videoPromptModelChip = document.getElementById('videoPromptModelChip');
+        this.imageWorkspace = document.getElementById('imageWorkspace');
+        this.imagePromptInput = document.getElementById('imagePromptInput');
+        this.imageSizeSelect = document.getElementById('imageSizeSelect');
+        this.imageWorkspaceStatus = document.getElementById('imageWorkspaceStatus');
+        this.imageGenerateBtn = document.getElementById('imageGenerateBtn');
+        this.imageGenerateMessage = document.getElementById('imageGenerateMessage');
+        this.currentMode = 'review';
+        this.taskHistoryOpen = false;
+        this.generationTasks = [];
+        this.processedBrowserSyncEventIds = new Set();
+        this.browserSyncPolling = false;
+        this.modePickerHideTimer = null;
+        this.lastCanvasSelection = this.options.getSelectedCanvasEntries?.() || [];
 
         // Form inputs
         this.formName = document.getElementById('agentFormName');
@@ -58,11 +225,17 @@ export class AgentSidebar {
         this.formModel = document.getElementById('agentFormModel');
         this.fetchModelsBtn = document.getElementById('agentFetchModelsBtn');
         this.fetchedModelSelect = document.getElementById('agentFetchedModelSelect');
+        this.fetchedModelOptions = document.getElementById('agentFetchedModelOptions');
+        this.additionalModelsEl = document.getElementById('agentAdditionalModels');
+        this.addModelSlotBtn = document.getElementById('agentAddModelSlotBtn');
         this.modelFetchStatus = document.getElementById('agentModelFetchStatus');
         this.formSaveBtn = document.getElementById('agentFormSaveBtn');
+        this.fetchedModels = [];
 
         // 加载保存的设置
         this._loadConfig();
+        this._loadGenerationTasks();
+        this._loadBrowserSyncEventIds();
 
         // 绑定事件
         this._bindEvents();
@@ -70,34 +243,85 @@ export class AgentSidebar {
         // 渲染 UI
         this._renderProviderList();
         this._renderModelSelect();
+        this._renderGenerationTasks();
+        window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
+        this._pollBrowserSyncEvents();
+        this.browserSyncTimer = setInterval(() => this._pollBrowserSyncEvents(), 4000);
+        this.options.subscribeCanvasSelection?.((entries) => {
+            this.lastCanvasSelection = Array.isArray(entries) ? entries : [];
+        });
+        this.options.subscribeMediaReferenceSelection?.((payload) => {
+            const type = payload?.type;
+            if (!VIDEO_REFERENCE_LIMITS[type]) return;
+            this.videoReferenceSelections[type] = (Array.isArray(payload.entries) ? payload.entries : [])
+                .slice(0, VIDEO_REFERENCE_LIMITS[type]);
+            this._renderVideoSourcePreview();
+        });
+        this.options.subscribeMediaReferencePickState?.((payload) => {
+            this.activeVideoReferenceType = payload?.active ? payload.type : null;
+            this._renderVideoReferencePickState();
+        });
     }
 
     _bindEvents() {
         const exitCreationMode = () => {
-            document.body.classList.remove('creation-mode');
-            this.close();
+            this.setMode('review');
         };
 
-        // 开关边栏 — 创造模式风格
+        // 悬停选择创作模式，点击则把主窗口收进置顶浮动按钮。
         const toggleBtn = document.getElementById('agentToggleBtn');
-        toggleBtn?.addEventListener('click', () => {
-            // 先播放流光溢彩激活动画
+        let collapsingToOrb = false;
+        toggleBtn?.addEventListener('click', async () => {
+            if (collapsingToOrb) return;
+            collapsingToOrb = true;
             toggleBtn.classList.add('activating');
-            document.body.classList.add('creation-mode');
-            // 延迟打开侧边栏，让动画先播完
-            setTimeout(() => {
-                this.open();
-            }, 400);
-            // 动画结束后移除 activating class
-            setTimeout(() => {
+            toggleBtn.setAttribute('aria-busy', 'true');
+            this.modePicker?.classList.remove('mode-picker-visible');
+
+            try {
+                await new Promise(resolve => setTimeout(resolve, 140));
+                await window.flowCanvas?.win?.collapseToOrb?.();
+            } catch (err) {
+                console.error('[AgentSidebar] Failed to collapse window:', err);
+            } finally {
                 toggleBtn.classList.remove('activating');
-            }, 700);
+                toggleBtn.removeAttribute('aria-busy');
+                collapsingToOrb = false;
+            }
         });
 
-        // 收起边栏按钮（只关侧边栏，不退出创造模式）
+        toggleBtn?.addEventListener('mouseenter', () => this._showModePicker());
+        toggleBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
+        this.modePicker?.addEventListener('mouseenter', () => this._showModePicker());
+        this.modePicker?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
+        const modeSettingsBtn = document.getElementById('creationModeSettingsBtn');
+        modeSettingsBtn?.addEventListener('mouseenter', () => this._showModePicker());
+        modeSettingsBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
+        modeSettingsBtn?.addEventListener('click', () => this.setMode('settings'));
+        document.getElementById('creationModeImageBtn')?.addEventListener('click', () => this.setMode('image'));
+        document.getElementById('creationModeVideoBtn')?.addEventListener('click', () => this.setMode('video'));
+        this.taskHistoryBtn?.addEventListener('click', () => this._setTaskHistoryOpen(!this.taskHistoryOpen));
+        document.getElementById('agentTaskHistoryClose')?.addEventListener('click', () => this._setTaskHistoryOpen(false));
+        this.taskHistoryList?.addEventListener('click', (event) => {
+            const retryButton = event.target.closest('[data-retry-task]');
+            if (retryButton) this._retryGenerationTask(retryButton.dataset.retryTask);
+        });
+        this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
+        this.videoAddImageBtn?.addEventListener('click', () => this._toggleVideoReferencePick('image'));
+        this.videoAddVideoBtn?.addEventListener('click', () => this._toggleVideoReferencePick('video'));
+        this.videoAddAudioBtn?.addEventListener('click', () => this._toggleVideoReferencePick('audio'));
+        this.videoClearSourcesBtn?.addEventListener('click', () => this._clearVideoReferences());
+        this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
+        document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
+        this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
+        this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
+        document.getElementById('videoPromptModelChip')?.addEventListener('click', () => this._showVideoModelPicker());
+        document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
+        this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
+
         document.getElementById('agentCollapseBtn')?.addEventListener('click', () => this.close());
 
-        // 创造模式关闭按钮（退出创造模式 + 关闭侧边栏）
+        // 退出当前模式并回到普通画板。
         document.getElementById('creationModeCloseBtn')?.addEventListener('click', exitCreationMode);
 
         // 清空按钮
@@ -105,13 +329,8 @@ export class AgentSidebar {
 
         document.getElementById('agentPlanBtn')?.addEventListener('click', () => this._assistPlanning());
 
-        // 设置面板
-        document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
-            this.settingsPanel.classList.toggle('show');
-            if (!this.settingsPanel.classList.contains('show')) {
-                this._hideForm();
-            }
-        });
+        // 设置模式只从右上角齿轮进入。
+        document.getElementById('agentSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
 
         // 模板点击
         document.querySelectorAll('.agent-template-chip').forEach(chip => {
@@ -126,9 +345,23 @@ export class AgentSidebar {
 
         // 各种表单动作
         this.addApiBtn?.addEventListener('click', () => this._showForm());
+        document.querySelectorAll('[data-ravenhash-site]').forEach(button => {
+            button.addEventListener('click', async () => {
+                const site = button.dataset.ravenhashSite;
+                button.disabled = true;
+                try {
+                    await window.flowCanvas?.shell?.openRavenHash?.(site);
+                } catch (err) {
+                    console.error('[AgentSidebar] Failed to open RavenHash:', err);
+                } finally {
+                    button.disabled = false;
+                }
+            });
+        });
         this.apiFormCloseBtn?.addEventListener('click', () => this._hideForm());
         this.formSaveBtn?.addEventListener('click', () => this._saveForm());
         this.fetchModelsBtn?.addEventListener('click', () => this._fetchModelsForForm());
+        this.addModelSlotBtn?.addEventListener('click', () => this._addModelSlot());
         this.fetchedModelSelect?.addEventListener('change', (e) => {
             if (e.target.value && this.formModel) {
                 this.formModel.value = e.target.value;
@@ -167,6 +400,13 @@ export class AgentSidebar {
             }
         });
 
+        this.videoModelSelectEl?.addEventListener('change', (e) => {
+            const id = e.target.value;
+            if (id) {
+                this._setVideoProvider(id);
+            }
+        });
+
         // 发送消息
         this.sendBtn?.addEventListener('click', () => this._send());
 
@@ -185,9 +425,1136 @@ export class AgentSidebar {
         });
     }
 
+    _showModePicker() {
+        if (this.modePickerHideTimer) {
+            clearTimeout(this.modePickerHideTimer);
+            this.modePickerHideTimer = null;
+        }
+        this.modePicker?.classList.add('mode-picker-visible');
+    }
+
+    _scheduleModePickerHide() {
+        if (this.modePickerHideTimer) clearTimeout(this.modePickerHideTimer);
+        this.modePickerHideTimer = setTimeout(() => {
+            this.modePicker?.classList.remove('mode-picker-visible');
+            this.modePickerHideTimer = null;
+        }, 160);
+    }
+
+    setMode(mode = 'review') {
+        const nextMode = ['settings', 'image', 'video', 'review'].includes(mode) ? mode : 'review';
+        const body = document.body;
+        if (this.currentMode === 'video' && nextMode !== 'video') {
+            this.options.endMediaReferencePick?.();
+        }
+        this.currentMode = nextMode;
+        this._setTaskHistoryOpen(false);
+        if (this.modeTitle) {
+            this.modeTitle.textContent = {
+                settings: '\u8bbe\u7f6e\u6a21\u5f0f',
+                image: '\u56fe\u7247\u6a21\u5f0f',
+                video: '\u89c6\u9891\u6a21\u5f0f'
+            }[nextMode] || '';
+        }
+
+        body.classList.remove('settings-mode', 'image-mode', 'video-mode');
+        document.querySelectorAll('.creation-mode-option').forEach(option => {
+            const optionId = 'creationMode' + nextMode[0].toUpperCase() + nextMode.slice(1) + 'Btn';
+            option.classList.toggle('active', option.id === optionId);
+        });
+
+        if (nextMode === 'review') {
+            body.classList.remove('creation-mode');
+            this.close();
+            this.settingsPanel?.classList.remove('show');
+            if (this.videoWorkspace) this.videoWorkspace.hidden = true;
+            if (this.videoModelPicker) this.videoModelPicker.hidden = true;
+            if (this.videoPromptDock) this.videoPromptDock.hidden = true;
+            if (this.imageWorkspace) this.imageWorkspace.hidden = true;
+            this.modePicker?.classList.remove('mode-picker-visible');
+            return;
+        }
+
+        body.classList.add('creation-mode', nextMode + '-mode');
+        body.classList.add('agent-open');
+        if (nextMode === 'image' || nextMode === 'video') {
+            body.classList.remove('sidebar-closed');
+        }
+        this.settingsPanel?.classList.toggle('show', nextMode === 'settings');
+        if (this.videoWorkspace) this.videoWorkspace.hidden = true;
+        if (this.videoModelPicker) this.videoModelPicker.hidden = true;
+        if (this.videoPromptDock) this.videoPromptDock.hidden = nextMode !== 'video';
+        if (this.imageWorkspace) this.imageWorkspace.hidden = nextMode !== 'image';
+
+        if (nextMode === 'video') {
+            this._renderVideoSourcePreview();
+            this._renderVideoStage();
+        }
+        this.modePicker?.classList.remove('mode-picker-visible');
+        this.open();
+    }
+
+    _selectedImagePaths() {
+        const selectedPaths = this.options.getSelectedFilePaths?.() || [];
+        return selectedPaths
+            .map(filePath => String(filePath || ''))
+            .filter(filePath => /\.(png|jpe?g|webp)$/i.test(filePath))
+            .slice(0, 2);
+    }
+
+    _hasSelectedVideoProvider() {
+        const provider = this._getVideoProvider();
+        return Boolean(provider && this._isVideoProvider(provider) && provider.model);
+    }
+
+    _renderVideoStage() {
+        const hasModel = this._hasSelectedVideoProvider();
+        if (this.videoModelPicker) this.videoModelPicker.hidden = hasModel;
+        if (this.videoWorkspace) this.videoWorkspace.hidden = !hasModel;
+        if (hasModel) {
+            this._renderVideoProviderContext();
+        } else {
+            this._renderVideoModelPicker();
+        }
+    }
+
+    _showVideoModelPicker() {
+        if (this.currentMode !== 'video') return;
+        if (this.videoWorkspace) this.videoWorkspace.hidden = true;
+        if (this.videoModelPicker) this.videoModelPicker.hidden = false;
+        if (this.videoModelSearchInput) this.videoModelSearchInput.value = '';
+        this._renderVideoModelPicker();
+        this.videoModelSearchInput?.focus();
+    }
+
+    _renderVideoModelPicker() {
+        if (!this.videoModelList || !this.videoModelEmpty) return;
+        const keyword = this.videoModelSearchInput?.value?.trim().toLowerCase() || '';
+        const providers = this._providerVariants().filter(provider => {
+            if (!this._isVideoProvider(provider)) return false;
+            const searchable = `${provider.name || ''} ${provider.model || ''} ${provider.endpoint || ''}`.toLowerCase();
+            return !keyword || searchable.includes(keyword);
+        });
+
+        this.videoModelList.innerHTML = '';
+        this.videoModelEmpty.hidden = providers.length > 0;
+        if (providers.length === 0) {
+            const title = this.videoModelEmpty.querySelector('strong');
+            const detail = this.videoModelEmpty.querySelector('span');
+            if (title) title.textContent = keyword ? '没有匹配的视频模型' : '没有可用的视频模型';
+            if (detail) detail.textContent = keyword
+                ? '换一个关键词，或到设置中检查模型名称。'
+                : '请先在设置中添加 API，并填写视频模型名称。';
+            return;
+        }
+
+        const selectedId = this.globalConfig.videoProviderId;
+        providers.forEach(provider => {
+            const profile = this._getVideoModelProfile(provider);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'video-model-option';
+            button.classList.toggle('selected', provider.id === selectedId);
+
+            const icon = document.createElement('span');
+            icon.className = 'video-model-option-icon';
+            icon.textContent = '▶';
+
+            const copy = document.createElement('span');
+            copy.className = 'video-model-option-copy';
+            const model = document.createElement('strong');
+            model.textContent = provider.model || provider.name || '未命名模型';
+            const meta = document.createElement('small');
+            meta.textContent = `${provider.name || '未命名 API'} · ${profile.label}`;
+            copy.append(model, meta);
+
+            const arrow = document.createElement('span');
+            arrow.className = 'video-model-option-arrow';
+            arrow.textContent = '›';
+            button.append(icon, copy, arrow);
+            button.addEventListener('click', () => this._setVideoProvider(provider.id));
+            this.videoModelList.appendChild(button);
+        });
+    }
+
+    _renderVideoSourcePreview() {
+        if (!this.videoSourceCount) return;
+        const images = this.videoReferenceSelections.image;
+        const videos = this.videoReferenceSelections.video;
+        const audio = this.videoReferenceSelections.audio;
+        this.videoSourceCount.textContent = `${images.length + videos.length + audio.length} 个`;
+        if (this.videoImageSourceCount) this.videoImageSourceCount.textContent = `${images.length} / ${VIDEO_REFERENCE_LIMITS.image}`;
+        if (this.videoVideoSourceCount) this.videoVideoSourceCount.textContent = `${videos.length} / ${VIDEO_REFERENCE_LIMITS.video}`;
+        if (this.videoAudioSourceCount) this.videoAudioSourceCount.textContent = `${audio.length} / ${VIDEO_REFERENCE_LIMITS.audio}`;
+        this._renderVideoReferenceStrip('image', this.videoImageSourceStrip, '点击“添加图片”，再按顺序点选画布图片');
+        this._renderVideoReferenceStrip('video', this.videoVideoSourceStrip, '点击“添加视频”，再按顺序点选画布视频');
+        this._renderVideoReferenceStrip('audio', this.videoAudioSourceStrip, '点击“添加音频”，再按顺序点选画布音频');
+        this._renderVideoReferencePickState();
+    }
+
+    _renderVideoReferenceStrip(type, strip, emptyText) {
+        if (!strip) return;
+        strip.innerHTML = '';
+        const entries = this.videoReferenceSelections[type] || [];
+        if (entries.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'creation-source-empty';
+            empty.textContent = emptyText;
+            strip.appendChild(empty);
+            return;
+        }
+        entries.forEach((entry, index) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = `creation-source-chip ${type}`;
+            const label = String(entry.filePath || '').split(/[\\/]/).pop() || `${type} ${index + 1}`;
+            chip.innerHTML = `<b>${index + 1}</b><span></span><i aria-hidden="true">×</i>`;
+            chip.querySelector('span').textContent = label;
+            chip.title = `第 ${index + 1} 个${VIDEO_REFERENCE_LABELS[type]}：${label}；点击移除`;
+            chip.addEventListener('click', () => this._removeVideoReference(type, entry.id || entry.itemId || entry.filePath));
+            strip.appendChild(chip);
+        });
+    }
+
+    _toggleVideoReferencePick(type) {
+        if (this.activeVideoReferenceType === type) {
+            this.options.endMediaReferencePick?.();
+            return;
+        }
+        this.options.beginMediaReferencePick?.(
+            type,
+            this.videoReferenceSelections[type],
+            VIDEO_REFERENCE_LIMITS[type]
+        );
+    }
+
+    _removeVideoReference(type, id) {
+        this.videoReferenceSelections[type] = (this.videoReferenceSelections[type] || [])
+            .filter(entry => (entry.id || entry.itemId || entry.filePath) !== id);
+        this.options.updateMediaReferencePick?.(type, this.videoReferenceSelections[type]);
+        this._renderVideoSourcePreview();
+    }
+
+    _clearVideoReferences() {
+        this.videoReferenceSelections = { image: [], video: [], audio: [] };
+        if (this.activeVideoReferenceType) {
+            this.options.updateMediaReferencePick?.(this.activeVideoReferenceType, []);
+        }
+        this._renderVideoSourcePreview();
+    }
+
+    _renderVideoReferencePickState() {
+        const activeType = this.activeVideoReferenceType;
+        this.videoAddImageBtn?.classList.toggle('active', activeType === 'image');
+        this.videoAddVideoBtn?.classList.toggle('active', activeType === 'video');
+        this.videoAddAudioBtn?.classList.toggle('active', activeType === 'audio');
+        if (this.videoAddImageBtn) {
+            this.videoAddImageBtn.querySelector('span').textContent = activeType === 'image' ? '完成选图' : '添加图片';
+            this.videoAddImageBtn.setAttribute('aria-pressed', String(activeType === 'image'));
+        }
+        if (this.videoAddVideoBtn) {
+            this.videoAddVideoBtn.querySelector('span').textContent = activeType === 'video' ? '完成选视频' : '添加视频';
+            this.videoAddVideoBtn.setAttribute('aria-pressed', String(activeType === 'video'));
+        }
+        if (this.videoAddAudioBtn) {
+            this.videoAddAudioBtn.querySelector('span').textContent = activeType === 'audio' ? '完成选音频' : '添加音频';
+            this.videoAddAudioBtn.setAttribute('aria-pressed', String(activeType === 'audio'));
+        }
+    }
+
+    _renderVideoProviderContext() {
+        const provider = this._getVideoProvider();
+        const providerName = provider?.name || '\u672a\u914d\u7f6e\u89c6\u9891 API';
+        const model = provider?.model || '\u672a\u9009\u62e9\u6a21\u578b';
+        this._renderSelectedVideoModelCard(provider);
+        this._renderVideoModelCapabilities(provider);
+        if (this.videoPromptProviderChip) this.videoPromptProviderChip.textContent = providerName;
+        if (this.videoPromptModelChip) this.videoPromptModelChip.textContent = model;
+    }
+
+    _renderImageModelCapabilities(provider = this._getImageProvider()) {
+        if (!this.imageSizeSelect) return;
+        const marker = `${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
+        const sizes = /ai\.ravenhash\.org|ravenhash/.test(marker)
+            ? RAVENHASH_IMAGE_SIZES
+            : DEFAULT_IMAGE_SIZES;
+        const previousValue = this.imageSizeSelect.value;
+        this.imageSizeSelect.innerHTML = '';
+        sizes.forEach(size => {
+            const option = document.createElement('option');
+            option.value = size.value;
+            option.textContent = size.label;
+            this.imageSizeSelect.appendChild(option);
+        });
+        this.imageSizeSelect.value = sizes.some(size => size.value === previousValue) ? previousValue : '';
+    }
+
+    _videoModelFavorites() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('flow-canvas-video-model-favorites') || '[]');
+            return new Set(Array.isArray(saved) ? saved.map(String) : []);
+        } catch (error) {
+            return new Set();
+        }
+    }
+
+    _toggleSelectedVideoModelFavorite() {
+        const provider = this._getVideoProvider();
+        if (!provider?.id) return;
+        const favorites = this._videoModelFavorites();
+        if (favorites.has(String(provider.id))) {
+            favorites.delete(String(provider.id));
+        } else {
+            favorites.add(String(provider.id));
+        }
+        localStorage.setItem('flow-canvas-video-model-favorites', JSON.stringify([...favorites]));
+        this._renderSelectedVideoModelCard(provider);
+        this._renderVideoModelPicker();
+    }
+
+    async _copySelectedVideoModelId() {
+        const model = this._getVideoProvider()?.model;
+        if (!model) return;
+        try {
+            await navigator.clipboard.writeText(model);
+        } catch (error) {
+            const textarea = document.createElement('textarea');
+            textarea.value = model;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            textarea.remove();
+        }
+        if (this.videoModelCopyBtn) {
+            this.videoModelCopyBtn.classList.add('copied');
+            this.videoModelCopyBtn.title = '\u5df2\u590d\u5236';
+            setTimeout(() => {
+                this.videoModelCopyBtn?.classList.remove('copied');
+                if (this.videoModelCopyBtn) this.videoModelCopyBtn.title = '\u590d\u5236\u6a21\u578b ID';
+            }, 1200);
+        }
+    }
+
+    _formatResolution(value) {
+        const key = String(value || '').toLowerCase();
+        const dimensions = {
+            '480p': '854 \u00d7 480',
+            '720p': '1280 \u00d7 720',
+            '1080p': '1920 \u00d7 1080',
+            '4k': '3840 \u00d7 2160'
+        }[key];
+        return dimensions ? `${value} (${dimensions})` : String(value);
+    }
+
+    _renderSelectedVideoModelCard(provider) {
+        if (!provider) return;
+        const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const resolutions = profile.resolutions || [];
+        const durations = profile.durations || [];
+        const ratios = profile.ratios || [];
+        const providerTypes = {
+            openai: 'OpenAI \u517c\u5bb9',
+            google: 'Google Gemini',
+            anthropic: 'Anthropic'
+        };
+        const durationSummary = profile.durationControl === 'slider' && durations.length > 1
+            ? `${Math.min(...durations)}\u2013${Math.max(...durations)} \u79d2`
+            : durations.map(value => Number(value) === -1 ? '\u667a\u80fd' : `${value} \u79d2`).join(' / ');
+        const ratioSummary = ratios.map(value => value === 'adaptive' ? '\u81ea\u9002\u5e94' : value).join(' / ');
+
+        if (this.videoSelectedModelName) this.videoSelectedModelName.textContent = provider.name || provider.model;
+        if (this.videoSelectedModelId) this.videoSelectedModelId.textContent = provider.model;
+        if (this.videoSelectedModelProfile) this.videoSelectedModelProfile.textContent = profile.label || '\u89c6\u9891\u6a21\u578b';
+        if (this.videoSelectedModelProviderType) this.videoSelectedModelProviderType.textContent = providerTypes[provider.type] || '\u81ea\u5b9a\u4e49 API';
+        if (this.videoSelectedModelResolutions) {
+            const text = resolutions.length ? resolutions.map(value => this._formatResolution(value)).join(' / ') : '\u63a5\u53e3\u9ed8\u8ba4';
+            this.videoSelectedModelResolutions.textContent = text;
+            this.videoSelectedModelResolutions.title = text;
+        }
+        if (this.videoSelectedModelDurations) {
+            const text = durationSummary || '\u63a5\u53e3\u9ed8\u8ba4';
+            this.videoSelectedModelDurations.textContent = text;
+            this.videoSelectedModelDurations.title = text;
+        }
+        if (this.videoSelectedModelRatios) {
+            const text = ratioSummary || '\u63a5\u53e3\u9ed8\u8ba4';
+            this.videoSelectedModelRatios.textContent = text;
+            this.videoSelectedModelRatios.title = text;
+        }
+        if (this.videoModelFavoriteBtn) {
+            const favorite = this._videoModelFavorites().has(String(provider.id));
+            this.videoModelFavoriteBtn.classList.toggle('active', favorite);
+            this.videoModelFavoriteBtn.setAttribute('aria-pressed', String(favorite));
+            this.videoModelFavoriteBtn.title = favorite ? '\u53d6\u6d88\u6536\u85cf' : '\u6536\u85cf\u6a21\u578b';
+        }
+    }
+
+    _getVideoModelProfile(provider) {
+        if (!provider?.model) return null;
+        const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
+        return VIDEO_MODEL_PROFILES.find(profile => profile.match.test(marker)) || DEFAULT_VIDEO_MODEL_PROFILE;
+    }
+
+    _replaceSelectOptions(select, values, preferredValue, formatter) {
+        if (!select) return;
+        const previousValue = select.value;
+        select.innerHTML = '';
+        values.forEach(value => {
+            const option = document.createElement('option');
+            option.value = String(value);
+            option.textContent = formatter(value);
+            select.appendChild(option);
+        });
+        const supportedValues = values.map(String);
+        select.value = supportedValues.includes(previousValue)
+            ? previousValue
+            : supportedValues.includes(String(preferredValue))
+                ? String(preferredValue)
+                : (supportedValues[0] || '');
+        select.disabled = values.length === 0;
+    }
+
+    _renderVideoRatios(profile) {
+        if (!this.videoRatioGrid || !this.videoRatioSelect) return;
+        const ratios = profile?.ratios || [];
+        const previousValue = this.videoRatioSelect.value;
+        const selectedValue = ratios.includes(previousValue)
+            ? previousValue
+            : ratios.includes(profile?.defaultRatio)
+                ? profile.defaultRatio
+                : (ratios[0] || '');
+        this.videoRatioSelect.value = selectedValue;
+        this.videoRatioGrid.innerHTML = '';
+
+        ratios.forEach(ratio => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.ratio = ratio;
+            button.classList.toggle('active', ratio === selectedValue);
+
+            const shape = document.createElement('span');
+            shape.className = `ratio-shape ratio-${ratio.replace(':', '-')}`;
+            if (ratio === 'adaptive') shape.textContent = 'A';
+            button.append(shape, document.createTextNode(ratio === 'adaptive' ? '自适应' : ratio));
+            button.addEventListener('click', () => {
+                this.videoRatioSelect.value = ratio;
+                this.videoRatioGrid.querySelectorAll('[data-ratio]').forEach(item => {
+                    item.classList.toggle('active', item === button);
+                });
+            });
+            this.videoRatioGrid.appendChild(button);
+        });
+    }
+
+    _setVideoDurationValue(value) {
+        if (this.videoDurationSelect) this.videoDurationSelect.value = String(value);
+    }
+
+    _renderVideoDuration(profile) {
+        if (!this.videoDurationControl || !this.videoDurationSelect) return;
+        const durations = profile?.durations || [];
+        const previousValue = this.videoDurationSelect.value;
+        const selectedValue = durations.map(String).includes(previousValue)
+            ? Number(previousValue)
+            : durations.includes(profile?.defaultDuration)
+                ? profile.defaultDuration
+                : durations[0];
+
+        this.videoDurationControl.innerHTML = '';
+        this._setVideoDurationValue(selectedValue ?? '');
+        if (durations.length === 0) return;
+
+        if (profile.durationControl === 'slider') {
+            const row = document.createElement('div');
+            row.className = 'creation-duration-slider';
+            const range = document.createElement('input');
+            range.type = 'range';
+            range.min = String(Math.min(...durations));
+            range.max = String(Math.max(...durations));
+            range.step = '1';
+            range.value = String(selectedValue);
+            range.setAttribute('aria-label', '视频时长');
+            const output = document.createElement('output');
+            output.textContent = `${selectedValue} 秒`;
+            range.addEventListener('input', () => {
+                this._setVideoDurationValue(range.value);
+                output.textContent = `${range.value} 秒`;
+            });
+            row.append(range, output);
+            this.videoDurationControl.appendChild(row);
+            return;
+        }
+
+        if (profile.durationControl === 'select') {
+            const select = document.createElement('select');
+            select.className = 'creation-duration-select';
+            durations.forEach(value => {
+                const option = document.createElement('option');
+                option.value = String(value);
+                option.textContent = Number(value) === -1 ? '智能选择 (-1)' : `${value} 秒`;
+                select.appendChild(option);
+            });
+            select.value = String(selectedValue);
+            select.addEventListener('change', () => this._setVideoDurationValue(select.value));
+            this.videoDurationControl.appendChild(select);
+            return;
+        }
+
+        const segmented = document.createElement('div');
+        segmented.className = 'creation-duration-segmented';
+        durations.forEach(value => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = `${value} 秒`;
+            button.classList.toggle('active', value === selectedValue);
+            button.addEventListener('click', () => {
+                this._setVideoDurationValue(value);
+                segmented.querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button));
+            });
+            segmented.appendChild(button);
+        });
+        this.videoDurationControl.appendChild(segmented);
+    }
+
+    _renderVideoModelCapabilities(provider) {
+        const profile = this._getVideoModelProfile(provider);
+        const webSearchModelKey = provider ? `${provider.id || ''}:${provider.model || ''}` : '';
+        if (!profile) {
+            this._replaceSelectOptions(this.videoResolutionSelect, [''], '', () => '\u8bf7\u5148\u9009\u62e9\u89c6\u9891\u6a21\u578b');
+            if (this.videoResolutionSelect) this.videoResolutionSelect.disabled = true;
+            if (this.videoRatioField) this.videoRatioField.hidden = true;
+            if (this.videoResolutionField) this.videoResolutionField.hidden = true;
+            if (this.videoDurationField) this.videoDurationField.hidden = true;
+            if (this.videoWebSearchField) this.videoWebSearchField.hidden = true;
+            if (this.videoWebSearch) {
+                this.videoWebSearch.checked = false;
+                this.videoWebSearch.dataset.modelKey = '';
+            }
+            this._renderVideoRatios(DEFAULT_VIDEO_MODEL_PROFILE);
+            this._renderVideoDuration(DEFAULT_VIDEO_MODEL_PROFILE);
+            return;
+        }
+
+        const resolutions = profile.resolutions || [];
+        const durations = profile.durations || [];
+        const ratios = profile.ratios || [];
+        this._renderVideoRatios(profile);
+        this._replaceSelectOptions(
+            this.videoResolutionSelect,
+            resolutions,
+            profile.defaultResolution,
+            value => this._formatResolution(value)
+        );
+        this._renderVideoDuration(profile);
+        if (this.videoRatioField) this.videoRatioField.hidden = ratios.length === 0;
+        if (this.videoResolutionField) this.videoResolutionField.hidden = resolutions.length === 0;
+        if (this.videoDurationField) this.videoDurationField.hidden = durations.length === 0;
+        if (this.videoWebSearchField) this.videoWebSearchField.hidden = !profile.supportsWebSearch;
+        if (this.videoWebSearch) {
+            if (!profile.supportsWebSearch) {
+                this.videoWebSearch.checked = false;
+            } else if (this.videoWebSearch.dataset.modelKey !== webSearchModelKey) {
+                this.videoWebSearch.checked = true;
+            }
+            this.videoWebSearch.dataset.modelKey = webSearchModelKey;
+        }
+    }
+
+    _setWorkspaceMessage(element, type, message) {
+        if (!element) return;
+        element.className = 'creation-workspace-message';
+        if (type) element.classList.add(type);
+        element.textContent = message || '';
+    }
+
+    _loadGenerationTasks() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(GENERATION_TASKS_STORAGE_KEY) || '[]');
+            if (!Array.isArray(saved)) return;
+            let changed = false;
+            this.generationTasks = saved
+                .filter(task => task && ['image', 'video'].includes(task.kind))
+                .slice(0, GENERATION_TASK_LIMIT)
+                .map(task => {
+                    const normalized = {
+                        ...task,
+                        params: task.params && typeof task.params === 'object' ? task.params : {},
+                        sourcePaths: Array.isArray(task.sourcePaths) ? task.sourcePaths.map(String) : [],
+                        attempts: Number.isFinite(task.attempts) ? task.attempts : 1
+                    };
+                    if (task.status !== 'running') return normalized;
+                    changed = true;
+                    return {
+                        ...normalized,
+                        status: 'disconnected',
+                        error: '应用已重新启动，与生成服务的连接已中断，可重新传输此任务。',
+                        updatedAt: new Date().toISOString()
+                    };
+                });
+            if (changed) this._saveGenerationTasks();
+        } catch (error) {
+            console.warn('[Agent] 任务记录读取失败', error);
+            this.generationTasks = [];
+        }
+    }
+
+    _saveGenerationTasks() {
+        try {
+            localStorage.setItem(
+                GENERATION_TASKS_STORAGE_KEY,
+                JSON.stringify(this.generationTasks.slice(0, GENERATION_TASK_LIMIT))
+            );
+        } catch (error) {
+            console.warn('[Agent] 任务记录保存失败', error);
+        }
+    }
+
+    _loadBrowserSyncEventIds() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(BROWSER_SYNC_EVENT_IDS_KEY) || '[]');
+            this.processedBrowserSyncEventIds = new Set(Array.isArray(saved) ? saved.map(String) : []);
+        } catch (_) {
+            this.processedBrowserSyncEventIds = new Set();
+        }
+    }
+
+    _saveBrowserSyncEventIds() {
+        const recent = [...this.processedBrowserSyncEventIds].slice(-1000);
+        this.processedBrowserSyncEventIds = new Set(recent);
+        localStorage.setItem(BROWSER_SYNC_EVENT_IDS_KEY, JSON.stringify(recent));
+    }
+
+    _handleTaskSubmitted(event = {}) {
+        const clientTaskId = String(event.clientTaskId || '').trim();
+        const remoteTaskId = String(event.remoteTaskId || event.taskId || '').trim();
+        if (!remoteTaskId) return;
+        const task = this.generationTasks.find(item => item.id === clientTaskId)
+            || this.generationTasks.find(item => item.taskId === remoteTaskId);
+        if (!task) return;
+        this._updateGenerationTask(task.id, {
+            taskId: remoteTaskId,
+            params: {
+                ...(task.params || {}),
+                targetDir: event.targetDir || task.params?.targetDir || null
+            }
+        });
+    }
+
+    async _pollBrowserSyncEvents() {
+        if (this.browserSyncPolling || !window.flowCanvas?.browserSync?.getEvents) return;
+        this.browserSyncPolling = true;
+        try {
+            const events = await window.flowCanvas.browserSync.getEvents();
+            for (const event of Array.isArray(events) ? events : []) {
+                const eventId = String(event?.eventId || '').trim();
+                if (!eventId || this.processedBrowserSyncEventIds.has(eventId)) continue;
+                this._mergeBrowserSyncEvent(event);
+                this.processedBrowserSyncEventIds.add(eventId);
+            }
+            this._saveBrowserSyncEventIds();
+        } catch (error) {
+            console.warn('[Agent] 浏览器任务同步失败', error);
+        } finally {
+            this.browserSyncPolling = false;
+        }
+    }
+
+    _mergeBrowserSyncEvent(event = {}) {
+        const remoteTaskId = String(event.remoteTaskId || event.taskId || '').trim();
+        if (!remoteTaskId) return;
+        const routeClientTaskId = String(event.clientTaskId || '').trim();
+        let task = this.generationTasks.find(item => item.taskId === remoteTaskId)
+            || this.generationTasks.find(item => item.id === routeClientTaskId);
+
+        if (!task) {
+            const eventTime = new Date(event.createdAt || event.timestamp || 0).getTime();
+            task = this.generationTasks.find(item => {
+                if (item.kind !== 'video' || item.status !== 'running') return false;
+                if (event.model && item.model && event.model !== item.model) return false;
+                const taskTime = new Date(item.createdAt || 0).getTime();
+                return eventTime > 0 && Math.abs(taskTime - eventTime) < 10 * 60 * 1000;
+            });
+        }
+
+        const stage = String(event.status || event.stage || '').toLowerCase();
+        const filePath = String(event.filePath || '').trim() || null;
+        const nextStatus = filePath || ['imported', 'downloaded'].includes(stage)
+            ? 'success'
+            : ['failed', 'error'].includes(stage)
+                ? 'failed'
+                : 'running';
+        const syncError = nextStatus === 'failed'
+            ? (event.error || '云端任务失败')
+            : null;
+
+        if (task) {
+            this._updateGenerationTask(task.id, {
+                taskId: remoteTaskId,
+                status: nextStatus,
+                filePath: filePath || task.filePath || null,
+                error: syncError,
+                providerName: task.providerName || event.sourceHost || '浏览器同步',
+                model: task.model || event.model || '',
+                params: {
+                    ...(task.params || {}),
+                    syncStage: stage,
+                    targetDir: event.targetDir || task.params?.targetDir || null
+                }
+            });
+            return;
+        }
+
+        const now = event.createdAt || event.timestamp || new Date().toISOString();
+        this.generationTasks.unshift({
+            id: routeClientTaskId || `browser-${remoteTaskId}`,
+            kind: 'video',
+            status: nextStatus,
+            providerId: null,
+            providerName: event.sourceHost || '浏览器同步',
+            model: event.model || '',
+            prompt: event.prompt || '从云端账号同步的视频任务',
+            params: {
+                syncStage: stage,
+                targetDir: event.targetDir || null,
+                videoSourcePaths: []
+            },
+            sourcePaths: [],
+            createdAt: now,
+            updatedAt: event.timestamp || new Date().toISOString(),
+            filePath,
+            taskId: remoteTaskId,
+            error: syncError,
+            attempts: 1
+        });
+        this.generationTasks = this.generationTasks.slice(0, GENERATION_TASK_LIMIT);
+        this._saveGenerationTasks();
+        this._renderGenerationTasks();
+    }
+
+    _createGenerationTask(kind, provider, prompt, params = {}, sourcePaths = []) {
+        const now = new Date().toISOString();
+        const id = globalThis.crypto?.randomUUID?.()
+            || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const task = {
+            id,
+            kind,
+            status: 'running',
+            providerId: provider?.id || null,
+            providerName: this._providerLabel(provider),
+            model: provider?.model || '',
+            prompt: String(prompt || ''),
+            params: JSON.parse(JSON.stringify(params || {})),
+            sourcePaths: sourcePaths.map(String).filter(Boolean),
+            createdAt: now,
+            updatedAt: now,
+            filePath: null,
+            taskId: null,
+            error: null,
+            attempts: 1
+        };
+        this.generationTasks.unshift(task);
+        this.generationTasks = this.generationTasks.slice(0, GENERATION_TASK_LIMIT);
+        this._saveGenerationTasks();
+        this._renderGenerationTasks();
+        return task;
+    }
+
+    _updateGenerationTask(id, patch = {}) {
+        const index = this.generationTasks.findIndex(task => task.id === id);
+        if (index < 0) return null;
+        this.generationTasks[index] = {
+            ...this.generationTasks[index],
+            ...patch,
+            updatedAt: new Date().toISOString()
+        };
+        this._saveGenerationTasks();
+        this._renderGenerationTasks();
+        return this.generationTasks[index];
+    }
+
+    _isGenerationDisconnect(error) {
+        const marker = `${error?.name || ''} ${error?.code || ''} ${error?.message || error || ''}`;
+        return /network|fetch failed|failed to fetch|econn|etimedout|socket|connection|timeout|timed out|aborterror|断开|断连|连接失败|网络|超时/i.test(marker);
+    }
+
+    _recordGenerationError(taskId, error) {
+        const message = error?.message || String(error || '请求失败');
+        return this._updateGenerationTask(taskId, {
+            status: this._isGenerationDisconnect(error) ? 'disconnected' : 'failed',
+            error: message
+        });
+    }
+
+    _setTaskHistoryOpen(open) {
+        const nextOpen = Boolean(open) && ['image', 'video'].includes(this.currentMode);
+        this.taskHistoryOpen = nextOpen;
+        document.body.classList.toggle('task-history-open', nextOpen);
+        if (this.taskHistoryPanel) this.taskHistoryPanel.hidden = !nextOpen;
+        if (this.taskHistoryBtn) {
+            this.taskHistoryBtn.classList.toggle('active', nextOpen);
+            this.taskHistoryBtn.setAttribute('aria-expanded', String(nextOpen));
+            this.taskHistoryBtn.title = nextOpen ? '返回当前模式' : '打开任务记录';
+            this.taskHistoryBtn.setAttribute('aria-label', this.taskHistoryBtn.title);
+        }
+        if (nextOpen) this._renderGenerationTasks();
+    }
+
+    _escapeTaskText(value) {
+        return String(value ?? '')
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#039;');
+    }
+
+    _formatTaskTime(value) {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return '';
+        return new Intl.DateTimeFormat('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+        }).format(date);
+    }
+
+    _taskParameterSummary(task) {
+        if (task.kind === 'image') return task.params?.size || '自动尺寸';
+        return [
+            task.params?.resolution,
+            task.params?.ratio,
+            task.params?.duration != null ? `${task.params.duration} 秒` : null
+        ].filter(Boolean).join(' · ') || '模型默认参数';
+    }
+
+    _renderGenerationTasks() {
+        const pendingCount = this.generationTasks.filter(task => task.status === 'running').length;
+        const readyCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'ready').length;
+        const downloadingCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'downloading').length;
+        const generatingCount = Math.max(0, pendingCount - readyCount - downloadingCount);
+        const disconnectedCount = this.generationTasks.filter(task => task.status === 'disconnected').length;
+        const badgeCount = pendingCount + disconnectedCount;
+        if (this.taskHistoryBadge) {
+            this.taskHistoryBadge.hidden = badgeCount === 0;
+            this.taskHistoryBadge.textContent = String(badgeCount);
+        }
+        if (this.taskHistorySummary) {
+            const pieces = [`共 ${this.generationTasks.length} 条`];
+            if (generatingCount) pieces.push(`${generatingCount} 条生成中`);
+            if (readyCount) pieces.push(`${readyCount} 条待下载`);
+            if (downloadingCount) pieces.push(`${downloadingCount} 条下载中`);
+            if (disconnectedCount) pieces.push(`${disconnectedCount} 条待重传`);
+            this.taskHistorySummary.textContent = this.generationTasks.length ? pieces.join(' · ') : '还没有生成任务';
+        }
+        if (!this.taskHistoryList) return;
+        if (this.generationTasks.length === 0) {
+            this.taskHistoryList.innerHTML = `
+                <div class="agent-task-history-empty">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                        <path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h6"></path>
+                    </svg>
+                    <strong>暂无任务记录</strong>
+                    <span>图片和视频生成任务会显示在这里</span>
+                </div>`;
+            return;
+        }
+
+        const statusLabels = {
+            running: '生成中',
+            success: '已完成',
+            failed: '失败',
+            disconnected: '待重传'
+        };
+        this.taskHistoryList.innerHTML = this.generationTasks.map(task => {
+            const status = statusLabels[task.status] ? task.status : 'failed';
+            const syncStageLabel = status === 'running' && task.params?.syncStage === 'ready'
+                ? '待下载'
+                : status === 'running' && task.params?.syncStage === 'downloading'
+                    ? '下载中'
+                    : statusLabels[status];
+            const sourceCount = (Array.isArray(task.sourcePaths) ? task.sourcePaths.length : 0)
+                + (task.params?.videoSourcePaths?.length || 0)
+                + (task.params?.audioSourcePaths?.length || 0);
+            const canRetry = status === 'failed' || status === 'disconnected';
+            const retryLabel = status === 'disconnected' ? '重新传输' : '重试';
+            const errorCopy = status === 'disconnected'
+                ? '与生成服务断开，任务参数已保留。'
+                : task.error;
+            return `
+                <article class="agent-task-item status-${status}">
+                    <div class="agent-task-item-topline">
+                        <span class="agent-task-kind">${task.kind === 'video' ? '视频' : '图片'}</span>
+                        <span class="agent-task-status"><i aria-hidden="true"></i>${syncStageLabel}</span>
+                        <time>${this._escapeTaskText(this._formatTaskTime(task.updatedAt || task.createdAt))}</time>
+                    </div>
+                    <p class="agent-task-prompt" title="${this._escapeTaskText(task.prompt)}">${this._escapeTaskText(task.prompt)}</p>
+                    <div class="agent-task-meta">
+                        <span title="${this._escapeTaskText(task.providerName)}">${this._escapeTaskText(task.providerName || 'API 已移除')}</span>
+                        <span title="${this._escapeTaskText(task.model)}">${this._escapeTaskText(task.model || '未知模型')}</span>
+                        <span>${this._escapeTaskText(this._taskParameterSummary(task))}</span>
+                        ${sourceCount ? `<span>${sourceCount} 个参考素材</span>` : ''}
+                    </div>
+                    ${task.filePath ? `<p class="agent-task-file" title="${this._escapeTaskText(task.filePath)}">${this._escapeTaskText(task.filePath)}</p>` : ''}
+                    ${errorCopy ? `<p class="agent-task-error">${this._escapeTaskText(errorCopy)}</p>` : ''}
+                    ${canRetry ? `
+                        <div class="agent-task-retry-row">
+                            <span>${status === 'disconnected' ? '可使用当前 API 配置重新提交' : `第 ${task.attempts || 1} 次请求未完成`}</span>
+                            <button type="button" data-retry-task="${this._escapeTaskText(task.id)}">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                    <path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"></path>
+                                </svg>
+                                ${retryLabel}
+                            </button>
+                        </div>` : ''}
+                </article>`;
+        }).join('');
+    }
+
+    async _retryGenerationTask(taskId) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (!task || !['failed', 'disconnected'].includes(task.status)) return;
+        const sourceProviderId = String(task.providerId || '').split('::model:')[0];
+        const currentProvider = this.providers.find(item => item.id === sourceProviderId);
+        const provider = currentProvider
+            ? {
+                ...currentProvider,
+                id: task.providerId,
+                sourceProviderId,
+                model: task.model || currentProvider.model
+            }
+            : null;
+        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
+            this._updateGenerationTask(task.id, {
+                status: 'failed',
+                error: '原任务使用的 API 配置已移除或不完整，请先在设置中恢复该 API。'
+            });
+            return;
+        }
+
+        this._updateGenerationTask(task.id, {
+            status: 'running',
+            error: null,
+            attempts: (task.attempts || 1) + 1
+        });
+        let placeholder = null;
+        try {
+            let result;
+            if (task.kind === 'image') {
+                if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
+                result = await window.flowCanvas.mcp.generateImage({
+                    provider: 'openai',
+                    providerConfig: provider,
+                    prompt: task.prompt,
+                    size: task.params?.size || undefined,
+                    quality: 'auto',
+                    responseFormat: 'url',
+                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
+                    addToCanvas: true
+                });
+            } else {
+                if (!window.flowCanvas?.mcp?.generateVideo) throw new Error('本地视频接口不可用');
+                placeholder = this.options.beginVideoGeneration?.({ ratio: task.params?.ratio || '16:9' }) || null;
+                result = await window.flowCanvas.mcp.generateVideo({
+                    provider: 'openai-video',
+                    providerConfig: provider,
+                    clientTaskId: task.id,
+                    prompt: task.prompt,
+                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
+                    videoReferences: (task.params?.videoSourcePaths || []).map(filePath => ({ filePath })),
+                    audioReferences: (task.params?.audioSourcePaths || []).map(filePath => ({ filePath })),
+                    resolution: task.params?.resolution || undefined,
+                    ratio: task.params?.ratio || undefined,
+                    duration: task.params?.duration ?? undefined,
+                    cameraFixed: task.params?.cameraFixed,
+                    generateAudio: task.params?.generateAudio,
+                    webSearch: task.params?.webSearch,
+                    watermark: task.params?.watermark,
+                    x: placeholder?.x,
+                    y: placeholder?.y,
+                    addToCanvas: true
+                });
+            }
+            if (result?.success === false) throw new Error(result.error || '生成请求失败');
+            this._updateGenerationTask(task.id, {
+                status: 'success',
+                error: null,
+                filePath: result?.filePath || null,
+                taskId: result?.taskId || null
+            });
+        } catch (error) {
+            this._recordGenerationError(task.id, error);
+        } finally {
+            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+        }
+    }
+
+    async _generateVideoFromWorkspace() {
+        const provider = this._getVideoProvider();
+        const prompt = this.videoPromptInput?.value?.trim() || '';
+        if (!prompt) {
+            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u8bf7\u5148\u8f93\u5165\u89c6\u9891\u63d0\u793a\u8bcd');
+            return;
+        }
+        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
+            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u8bf7\u5148\u5728\u8bbe\u7f6e\u6a21\u5f0f\u914d\u7f6e\u89c6\u9891 API');
+            return;
+        }
+        if (!window.flowCanvas?.mcp?.generateVideo) {
+            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u672c\u5730\u89c6\u9891\u63a5\u53e3\u4e0d\u53ef\u7528');
+            return;
+        }
+
+        const imageReferences = this.videoReferenceSelections.image.map(entry => ({
+            itemId: entry.itemId || entry.id,
+            filePath: entry.filePath
+        }));
+        const videoReferences = this.videoReferenceSelections.video.map(entry => ({
+            itemId: entry.itemId || entry.id,
+            filePath: entry.filePath
+        }));
+        const audioReferences = this.videoReferenceSelections.audio.map(entry => ({
+            itemId: entry.itemId || entry.id,
+            filePath: entry.filePath
+        }));
+        const durationValue = this.videoDurationSelect?.value;
+        const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const ratio = this.videoRatioSelect?.value || '16:9';
+        const videoParams = {
+            resolution: this.videoResolutionSelect?.value || null,
+            ratio,
+            duration: durationValue === '' || durationValue == null ? null : Number(durationValue),
+            cameraFixed: Boolean(this.videoCameraFixed?.checked),
+            generateAudio: Boolean(this.videoGenerateAudio?.checked),
+            webSearch: profile.supportsWebSearch ? Boolean(this.videoWebSearch?.checked) : null,
+            watermark: Boolean(this.videoWatermark?.checked),
+            videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
+            audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
+        };
+        const generationTask = this._createGenerationTask(
+            'video',
+            provider,
+            prompt,
+            videoParams,
+            imageReferences.map(reference => reference.filePath).filter(Boolean)
+        );
+        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
+        if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
+        this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
+        const placeholder = this.options.beginVideoGeneration?.({ ratio }) || null;
+
+        try {
+            const result = await window.flowCanvas.mcp.generateVideo({
+                provider: 'openai-video',
+                providerConfig: provider,
+                clientTaskId: generationTask.id,
+                prompt,
+                sourceReferences: imageReferences,
+                videoReferences,
+                audioReferences,
+                resolution: videoParams.resolution || undefined,
+                ratio: videoParams.ratio || undefined,
+                duration: videoParams.duration ?? undefined,
+                cameraFixed: videoParams.cameraFixed,
+                generateAudio: videoParams.generateAudio,
+                webSearch: videoParams.webSearch ?? undefined,
+                watermark: videoParams.watermark,
+                x: placeholder?.x,
+                y: placeholder?.y,
+                addToCanvas: true
+            });
+            if (result?.success === false) throw new Error(result.error || '\u89c6\u9891\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
+            this._updateGenerationTask(generationTask.id, {
+                status: 'success',
+                error: null,
+                filePath: result?.filePath || null,
+                taskId: result?.taskId || null
+            });
+            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u5df2\u5b8c\u6210';
+            this._setWorkspaceMessage(
+                this.videoGenerateMessage,
+                'success',
+                result?.filePath ? '\u5df2\u6dfb\u52a0\u5230\u753b\u677f\uff1a' + result.filePath : '\u89c6\u9891\u5df2\u751f\u6210'
+            );
+        } catch (error) {
+            this._recordGenerationError(generationTask.id, error);
+            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u5931\u8d25';
+            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
+        } finally {
+            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+            if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
+        }
+    }
+
+    async _generateImageFromWorkspace() {
+        const provider = this._getImageProvider();
+        const prompt = this.imagePromptInput?.value?.trim() || '';
+        if (!prompt) {
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u8f93\u5165\u56fe\u7247\u63d0\u793a\u8bcd');
+            return;
+        }
+        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u5728\u8bbe\u7f6e\u6a21\u5f0f\u914d\u7f6e\u751f\u56fe API');
+            return;
+        }
+        if (!window.flowCanvas?.mcp?.generateImage) {
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u672c\u5730\u751f\u56fe\u63a5\u53e3\u4e0d\u53ef\u7528');
+            return;
+        }
+
+        const size = this.imageSizeSelect?.value || undefined;
+        const sourcePaths = this._selectedImagePaths();
+        const generationTask = this._createGenerationTask('image', provider, prompt, { size: size || null }, sourcePaths);
+        if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = true;
+        if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
+        this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
+
+        try {
+            const result = await window.flowCanvas.mcp.generateImage({
+                provider: 'openai',
+                providerConfig: provider,
+                prompt,
+                size,
+                quality: 'auto',
+                responseFormat: 'url',
+                sourceReferences: sourcePaths.map(filePath => ({ filePath })),
+                addToCanvas: true
+            });
+            if (result?.success === false) throw new Error(result.error || '\u56fe\u7247\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
+            this._updateGenerationTask(generationTask.id, {
+                status: 'success',
+                error: null,
+                filePath: result?.filePath || null,
+                taskId: result?.taskId || null
+            });
+            if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u5df2\u5b8c\u6210';
+            const sizeMessage = result?.actualSize
+                ? `\uff0c\u5b9e\u9645\u5c3a\u5bf8 ${result.actualSize}${result.sizeMatchesRequest === false ? `\uff08\u8bf7\u6c42 ${result.requestedSize}\uff09` : ''}`
+                : '';
+            this._setWorkspaceMessage(
+                this.imageGenerateMessage,
+                'success',
+                result?.filePath ? '\u5df2\u6dfb\u52a0\u5230\u753b\u677f\uff1a' + result.filePath + sizeMessage : '\u56fe\u7247\u5df2\u751f\u6210' + sizeMessage
+            );
+        } catch (error) {
+            this._recordGenerationError(generationTask.id, error);
+            if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u5931\u8d25';
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
+        } finally {
+            if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = false;
+        }
+    }
+
     open() {
         document.body.classList.add('agent-open');
-        setTimeout(() => this.inputEl?.focus(), 350);
+        const focusTarget = this.currentMode === 'video'
+            ? (this._hasSelectedVideoProvider() ? this.videoPromptInput : this.videoModelSearchInput)
+            : this.currentMode === 'image'
+                ? this.imagePromptInput
+                : null;
+        if (focusTarget) setTimeout(() => focusTarget.focus(), 120);
     }
 
     close() {
@@ -238,22 +1605,50 @@ export class AgentSidebar {
         return /(image|gpt-image|dall-e|imagen|flux|stable|sdxl|midjourney)/.test(marker);
     }
 
+    _isVideoProvider(provider) {
+        const marker = `${provider?.model || ''} ${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
+        return /(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker);
+    }
+
     _findProvider(id) {
-        return this.providers.find(provider => provider.id === id) || null;
+        return this._providerVariants().find(provider => provider.id === id) || null;
+    }
+
+    _providerModels(provider) {
+        const source = Array.isArray(provider?.models) ? provider.models : [provider?.model];
+        return [...new Set(source.map(model => String(model || '').trim()).filter(Boolean))];
+    }
+
+    _providerVariants() {
+        return this.providers.flatMap(provider => {
+            const models = this._providerModels(provider);
+            return models.map((model, index) => ({
+                ...provider,
+                id: index === 0 ? provider.id : `${provider.id}::model:${encodeURIComponent(model)}`,
+                sourceProviderId: provider.id,
+                model
+            }));
+        });
+    }
+
+    _selectionUsesProvider(selectionId, providerId) {
+        const selected = this._findProvider(selectionId);
+        return (selected?.sourceProviderId || selected?.id) === providerId;
     }
 
     _getDefaultChatProviderId() {
-        return (this.providers.find(provider => !this._isImageProvider(provider)) || this.providers[0])?.id || null;
+        return this._providerVariants().find(provider => !this._isImageProvider(provider) && !this._isVideoProvider(provider))?.id || null;
     }
 
     _getDefaultImageProviderId() {
-        return this.providers.find(provider => this._isImageProvider(provider))?.id || null;
+        return this._providerVariants().find(provider => this._isImageProvider(provider) && !this._isVideoProvider(provider))?.id || null;
     }
 
     _ensureProviderRoles() {
         if (this.providers.length === 0) {
             this.globalConfig.chatProviderId = null;
             this.globalConfig.imageProviderId = null;
+            this.globalConfig.videoProviderId = null;
             this.globalConfig.activeProviderId = null;
             return;
         }
@@ -262,18 +1657,19 @@ export class AgentSidebar {
         const legacyProvider = this._findProvider(legacyId);
         const currentChatProvider = this._findProvider(this.globalConfig.chatProviderId);
         const currentImageProvider = this._findProvider(this.globalConfig.imageProviderId);
-        const hasTextProvider = this.providers.some(provider => !this._isImageProvider(provider));
-        const hasImageProvider = this.providers.some(provider => this._isImageProvider(provider));
-
-        if (!currentChatProvider || (hasTextProvider && this._isImageProvider(currentChatProvider))) {
-            this.globalConfig.chatProviderId = legacyProvider && !this._isImageProvider(legacyProvider)
+        const currentVideoProvider = this._findProvider(this.globalConfig.videoProviderId);
+        if (!currentChatProvider || this._isImageProvider(currentChatProvider) || this._isVideoProvider(currentChatProvider)) {
+            this.globalConfig.chatProviderId = legacyProvider && !this._isImageProvider(legacyProvider) && !this._isVideoProvider(legacyProvider)
                 ? legacyProvider.id
                 : this._getDefaultChatProviderId();
         }
-        if (!currentImageProvider || (hasImageProvider && !this._isImageProvider(currentImageProvider))) {
-            this.globalConfig.imageProviderId = legacyProvider && this._isImageProvider(legacyProvider)
+        if (!currentImageProvider || !this._isImageProvider(currentImageProvider) || this._isVideoProvider(currentImageProvider)) {
+            this.globalConfig.imageProviderId = legacyProvider && this._isImageProvider(legacyProvider) && !this._isVideoProvider(legacyProvider)
                 ? legacyProvider.id
                 : this._getDefaultImageProviderId();
+        }
+        if (!currentVideoProvider || !this._isVideoProvider(currentVideoProvider)) {
+            this.globalConfig.videoProviderId = null;
         }
         this.globalConfig.activeProviderId = this.globalConfig.chatProviderId;
     }
@@ -295,6 +1691,16 @@ export class AgentSidebar {
         this._renderModelSelect();
     }
 
+    _setVideoProvider(id) {
+        const provider = this._findProvider(id);
+        if (!provider || !this._isVideoProvider(provider)) return;
+        this.globalConfig.videoProviderId = id;
+        this._saveConfig();
+        this._renderProviderList();
+        this._renderModelSelect();
+        if (this.currentMode === 'video') this._renderVideoStage();
+    }
+
     _getChatProvider() {
         return this._findProvider(this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
     }
@@ -303,18 +1709,26 @@ export class AgentSidebar {
         return this._findProvider(this.globalConfig.imageProviderId);
     }
 
+    _getVideoProvider() {
+        return this._findProvider(this.globalConfig.videoProviderId);
+    }
+
     _getProviderFallbackChain(kind) {
         const selectedId = kind === 'image'
             ? this.globalConfig.imageProviderId
-            : (this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
-        const isMatchingKind = provider => kind === 'image'
-            ? this._isImageProvider(provider)
-            : !this._isImageProvider(provider);
+            : kind === 'video'
+                ? this.globalConfig.videoProviderId
+                : (this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
+        const isMatchingKind = provider => {
+            if (kind === 'image') return this._isImageProvider(provider) && !this._isVideoProvider(provider);
+            if (kind === 'video') return this._isVideoProvider(provider);
+            return !this._isImageProvider(provider) && !this._isVideoProvider(provider);
+        };
 
         const selected = this._findProvider(selectedId);
         const candidates = [
             selected && isMatchingKind(selected) ? selected : null,
-            ...this.providers.filter(provider => provider?.id !== selectedId && isMatchingKind(provider))
+            ...this._providerVariants().filter(provider => provider?.id !== selectedId && isMatchingKind(provider))
         ].filter(provider => provider?.apiKey && provider?.endpoint && provider?.model);
 
         return candidates.slice(0, 2);
@@ -327,6 +1741,11 @@ export class AgentSidebar {
 
     getImageProviderConfig() {
         const provider = this._getImageProvider();
+        return provider ? { ...provider } : null;
+    }
+
+    getVideoProviderConfig() {
+        const provider = this._getVideoProvider();
         return provider ? { ...provider } : null;
     }
 
@@ -563,12 +1982,15 @@ export class AgentSidebar {
             this.formType.value = this._isAnthropicProvider(provider) ? 'anthropic' : provider.type;
             this.formEndpoint.value = provider.endpoint;
             this.formKey.value = provider.apiKey;
-            this.formModel.value = provider.model;
+            const models = this._providerModels(provider);
+            this.formModel.value = models[0] || '';
+            this._resetModelSlots(models.slice(1));
         } else {
             this.editingProviderId = null;
             this.apiFormTitle.textContent = '添加 API';
             this._applyTemplate('openai'); // 默认模板
             this.formKey.value = '';
+            this._resetModelSlots();
             document.querySelector('.agent-template-chip[data-template="openai"]')?.classList.add('active');
         }
     }
@@ -586,6 +2008,7 @@ export class AgentSidebar {
         if (this.formType) this.formType.value = tpl.type;
         if (this.formEndpoint) this.formEndpoint.value = tpl.endpoint;
         if (this.formModel) this.formModel.value = tpl.model;
+        this._resetModelSlots();
         this._resetFetchedModels();
     }
 
@@ -597,6 +2020,8 @@ export class AgentSidebar {
     }
 
     _resetFetchedModels(clearStatus = true) {
+        this.fetchedModels = [];
+        if (this.fetchedModelOptions) this.fetchedModelOptions.innerHTML = '';
         if (this.fetchedModelSelect) {
             this.fetchedModelSelect.innerHTML = '';
             const placeholder = document.createElement('option');
@@ -613,11 +2038,17 @@ export class AgentSidebar {
     _renderFetchedModelOptions(models) {
         if (!this.fetchedModelSelect) return;
         this._resetFetchedModels(false);
+        this.fetchedModels = [...models];
         models.forEach(model => {
             const opt = document.createElement('option');
             opt.value = model;
             opt.textContent = model;
             this.fetchedModelSelect.appendChild(opt);
+            if (this.fetchedModelOptions) {
+                const datalistOption = document.createElement('option');
+                datalistOption.value = model;
+                this.fetchedModelOptions.appendChild(datalistOption);
+            }
         });
         this.fetchedModelSelect.hidden = models.length === 0;
 
@@ -625,6 +2056,42 @@ export class AgentSidebar {
         if (currentModel && models.includes(currentModel)) {
             this.fetchedModelSelect.value = currentModel;
         }
+    }
+
+    _resetModelSlots(models = []) {
+        if (!this.additionalModelsEl) return;
+        this.additionalModelsEl.innerHTML = '';
+        models.forEach(model => this._addModelSlot(model));
+    }
+
+    _addModelSlot(value = '') {
+        if (!this.additionalModelsEl) return;
+        const usedModels = new Set([
+            this.formModel?.value?.trim(),
+            ...Array.from(this.additionalModelsEl.querySelectorAll('.agent-additional-model-input'))
+                .map(input => input.value.trim())
+        ].filter(Boolean));
+        const suggestedModel = value || this.fetchedModels.find(model => !usedModels.has(model)) || '';
+
+        const row = document.createElement('div');
+        row.className = 'agent-additional-model-row';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'agent-setting-input agent-additional-model-input';
+        input.placeholder = '输入或选择模型';
+        input.setAttribute('list', 'agentFetchedModelOptions');
+        input.value = suggestedModel;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'agent-remove-model-slot';
+        removeBtn.title = '移除模型位';
+        removeBtn.setAttribute('aria-label', '移除模型位');
+        removeBtn.textContent = '\u00d7';
+        removeBtn.addEventListener('click', () => row.remove());
+        row.append(input, removeBtn);
+        this.additionalModelsEl.appendChild(row);
+        input.focus();
     }
 
     async _fetchModelsForForm() {
@@ -684,7 +2151,12 @@ export class AgentSidebar {
         const type = this.formType.value.trim();
         const endpoint = this.formEndpoint.value.trim();
         const apiKey = this.formKey.value.trim();
-        const model = this.formModel.value.trim();
+        const models = [...new Set([
+            this.formModel.value.trim(),
+            ...Array.from(this.additionalModelsEl?.querySelectorAll('.agent-additional-model-input') || [])
+                .map(input => input.value.trim())
+        ].filter(Boolean))];
+        const model = models[0] || '';
 
         if (!name || !endpoint || !apiKey || !model) {
             alert('请填写完整的 API 配置！');
@@ -694,17 +2166,17 @@ export class AgentSidebar {
         if (this.editingProviderId) {
             const idx = this.providers.findIndex(p => p.id === this.editingProviderId);
             if (idx !== -1) {
-                this.providers[idx] = { id: this.editingProviderId, name, type, endpoint, apiKey, model };
+                this.providers[idx] = { ...this.providers[idx], id: this.editingProviderId, name, type, endpoint, apiKey, model, models };
             }
         } else {
             const newProvider = {
                 id: 'api_' + Date.now() + Math.random().toString(36).substr(2, 5),
-                name, type, endpoint, apiKey, model
+                name, type, endpoint, apiKey, model, models
             };
             this.providers.push(newProvider);
-            if (this._isImageProvider(newProvider)) {
+            if (this._isImageProvider(newProvider) && !this._isVideoProvider(newProvider)) {
                 this.globalConfig.imageProviderId = newProvider.id;
-            } else if (!this._findProvider(this.globalConfig.chatProviderId)) {
+            } else if (!this._isVideoProvider(newProvider) && !this._findProvider(this.globalConfig.chatProviderId)) {
                 this.globalConfig.chatProviderId = newProvider.id;
             }
         }
@@ -726,7 +2198,15 @@ export class AgentSidebar {
     }
 
     _setActiveProvider(id) {
-        this._setChatProvider(id);
+        const provider = this._findProvider(id);
+        if (!provider) return;
+        if (this._isVideoProvider(provider)) {
+            this._setVideoProvider(id);
+        } else if (this._isImageProvider(provider)) {
+            this._setImageProvider(id);
+        } else {
+            this._setChatProvider(id);
+        }
     }
 
     _renderProviderList() {
@@ -735,9 +2215,10 @@ export class AgentSidebar {
 
         this.providers.forEach(p => {
             const card = document.createElement('div');
-            const isChat = p.id === this.globalConfig.chatProviderId;
-            const isImage = p.id === this.globalConfig.imageProviderId;
-            card.className = `agent-provider-card ${isChat || isImage ? 'active' : ''}`;
+            const isChat = this._selectionUsesProvider(this.globalConfig.chatProviderId, p.id);
+            const isImage = this._selectionUsesProvider(this.globalConfig.imageProviderId, p.id);
+            const isVideo = this._selectionUsesProvider(this.globalConfig.videoProviderId, p.id);
+            card.className = `agent-provider-card ${isChat || isImage || isVideo ? 'active' : ''}`;
 
             const info = document.createElement('div');
             info.className = 'agent-provider-info';
@@ -747,7 +2228,11 @@ export class AgentSidebar {
             nameEl.textContent = p.name || '未命名 API';
             const metaEl = document.createElement('div');
             metaEl.className = 'agent-provider-meta';
-            metaEl.textContent = p.model || '未设置模型';
+            const providerModels = this._providerModels(p);
+            metaEl.textContent = providerModels.length > 1
+                ? `${providerModels.length} 个模型 · ${providerModels.join('、')}`
+                : (providerModels[0] || '未设置模型');
+            metaEl.title = providerModels.join('\n');
             const roleEl = document.createElement('div');
             roleEl.className = 'agent-provider-roles';
             if (isChat) {
@@ -760,6 +2245,12 @@ export class AgentSidebar {
                 const badge = document.createElement('span');
                 badge.className = 'agent-provider-role image';
                 badge.textContent = '生图';
+                roleEl.appendChild(badge);
+            }
+            if (isVideo) {
+                const badge = document.createElement('span');
+                badge.className = 'agent-provider-role video';
+                badge.textContent = '视频';
                 roleEl.appendChild(badge);
             }
             info.appendChild(nameEl);
@@ -811,7 +2302,8 @@ export class AgentSidebar {
     _renderModelSelect() {
         const selects = [
             { el: this.modelSelectEl, role: 'chat', selectedId: this.globalConfig.chatProviderId },
-            { el: this.imageModelSelectEl, role: 'image', selectedId: this.globalConfig.imageProviderId }
+            { el: this.imageModelSelectEl, role: 'image', selectedId: this.globalConfig.imageProviderId },
+            { el: this.videoModelSelectEl, role: 'video', selectedId: this.globalConfig.videoProviderId }
         ].filter(item => item.el);
 
         selects.forEach(({ el }) => {
@@ -825,6 +2317,8 @@ export class AgentSidebar {
                 opt.textContent = "-- 请先添加 API --";
                 el.appendChild(opt);
             });
+            this._renderVideoProviderContext();
+            if (this.currentMode === 'video') this._renderVideoStage();
             return;
         }
 
@@ -833,8 +2327,15 @@ export class AgentSidebar {
             opt.value = "";
             opt.textContent = role === 'image' ? "-- 选择生图 API --" : "-- 选择对话 API --";
             el.appendChild(opt);
+            if (role === 'video') opt.textContent = '-- \u9009\u62e9\u89c6\u9891 API --';
 
-            this.providers.forEach(p => {
+            this._providerVariants().forEach(p => {
+                const matchesRole = role === 'video'
+                    ? this._isVideoProvider(p)
+                    : role === 'image'
+                        ? this._isImageProvider(p) && !this._isVideoProvider(p)
+                        : !this._isImageProvider(p) && !this._isVideoProvider(p);
+                if (!matchesRole) return;
                 const option = document.createElement('option');
                 option.value = p.id;
                 option.textContent = `${p.name} (${p.model})`;
@@ -844,6 +2345,9 @@ export class AgentSidebar {
                 el.appendChild(option);
             });
         });
+        this._renderVideoProviderContext();
+        this._renderImageModelCapabilities();
+        if (this.currentMode === 'video') this._renderVideoStage();
     }
 
     // ── 消息渲染 ──
@@ -1269,6 +2773,36 @@ export class AgentSidebar {
         return /(生图|出图|生成.{0,12}(图片|图像|图|海报|主视觉|插画|封面|头像)|画一?张|用\s*(image\s*2|image2|gpt-image)[^\n]*(生图|生成|出图)|generate.{0,20}image)/i.test(value);
     }
 
+    _isVideoGenerationRequest(text) {
+        const value = String(text || '').trim();
+        if (!value) return false;
+        const isTroubleshootingQuestion = /(\u600e\u4e48|\u4e3a\u4ec0\u4e48|\u4e3a\u4f55|\u62a5\u9519|\u9519\u8bef|\u68c0\u67e5|\u6392\u67e5|\u4e0d\u80fd\u7528|\u5931\u6548|debug)/i.test(value);
+        const hasDirectAction = /(\u76f4\u63a5|\u73b0\u5728|\u9a6c\u4e0a|\u7acb\u523b|\u7528|\u5e2e\u6211|\u7ed9\u6211|\u5f00\u59cb).{0,18}(\u751f\u6210|\u505a|\u5236\u4f5c|\u89c6\u9891|\u77ed\u7247|seedance)/i.test(value);
+        if (isTroubleshootingQuestion && !hasDirectAction) return false;
+        return /(\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa).{0,10}(\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)|(\u89c6\u9891|\u77ed\u7247).{0,8}(\u751f\u6210|\u51fa\u56fe)|seedance\s*2(?:\.0)?|generate.{0,20}video/i.test(value);
+    }
+
+    _stripVideoCommandText(text) {
+        return String(text || '')
+            .replace(/^\s*(\u8bf7|\u9ebb\u70e6|\u5e2e\u6211|\u7ed9\u6211|\u4f60)?\s*(\u76f4\u63a5|\u73b0\u5728|\u9a6c\u4e0a|\u7acb\u523b)?\s*/i, '')
+            .replace(/^(?:\u7528\s*)?(?:seedance\s*2(?:\.0)?\s*)?/i, '')
+            .replace(/^(?:\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa)\s*(?:\u4e00\u6bb5|\u4e00\u4e2a)?\s*(?:\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)?\s*[:\uff1a\uff0c,.\s]*/i, '')
+            .trim();
+    }
+
+    _resolveVideoGenerationPrompt(text) {
+        const explicitMatch = String(text || '').match(/(?:\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa)\s*(?:\u4e00\u6bb5|\u4e00\u4e2a)?\s*(?:\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)\s*[:\uff1a]\s*([\s\S]+)/i);
+        const explicitPrompt = explicitMatch?.[1]?.trim();
+        if (explicitPrompt && explicitPrompt.length >= 8) return explicitPrompt;
+
+        const stripped = this._stripVideoCommandText(text);
+        if (stripped.length >= 12 || /[\uff0c\u3002,.、\n]/.test(stripped)) return stripped;
+
+        const lastAssistant = [...this.messages].reverse().find(message => message.role === 'assistant')?.content || '';
+        const fencedPrompt = this._extractPromptFromFencedBlocks(lastAssistant);
+        return fencedPrompt || stripped || String(text || '').trim();
+    }
+
     _extractPromptFromFencedBlocks(content) {
         const blocks = [...String(content || '').matchAll(/```(?:text|prompt|markdown|md)?\s*([\s\S]*?)```/gi)]
             .map(match => match[1].trim())
@@ -1318,18 +2852,60 @@ export class AgentSidebar {
             providerConfig: imageProvider,
             prompt,
             title: 'Agent chat image',
-            width: 1024,
-            height: 1024,
+            size: this.imageSizeSelect?.value || undefined,
+            quality: 'auto',
+            responseFormat: 'url',
+            sourceReferences: this._selectedImagePaths().map(filePath => ({ filePath })),
             addToCanvas: true
         });
 
         if (!result?.success && result?.error) throw new Error(result.error);
         const lines = [
             `已用 ${this._providerLabel(imageProvider)} 生成图片，并添加到白板。`,
+            result?.actualSize ? `实际尺寸：${result.actualSize}${result.sizeMatchesRequest === false ? `（请求 ${result.requestedSize}）` : ''}` : '',
             result?.filePath ? `文件：${result.filePath}` : '',
             result?.targetDirFallback ? `保存目录回退：${result.targetDirFallback}` : ''
         ].filter(Boolean);
         return lines.join('\n');
+    }
+
+    async _generateVideoFromChat(text, videoProvider = this._getVideoProvider()) {
+        if (!videoProvider?.apiKey || !videoProvider?.model || !videoProvider?.endpoint) {
+            throw new Error('\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u9009\u62e9\u53ef\u7528\u7684\u89c6\u9891 API');
+        }
+        if (!window.flowCanvas?.mcp?.generateVideo) {
+            throw new Error('\u672c\u5730\u89c6\u9891\u63a5\u53e3\u4e0d\u53ef\u7528\uff0c\u8bf7\u91cd\u542f\u5e94\u7528\u540e\u518d\u8bd5');
+        }
+
+        const prompt = this._resolveVideoGenerationPrompt(text);
+        if (!prompt) throw new Error('\u6ca1\u6709\u627e\u5230\u53ef\u7528\u4e8e\u89c6\u9891\u751f\u6210\u7684\u63d0\u793a\u8bcd');
+        const selectedPaths = this.options.getSelectedFilePaths?.() || [];
+        const profile = this._getVideoModelProfile(videoProvider) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const placeholder = this.options.beginVideoGeneration?.({ ratio: '16:9' }) || null;
+        try {
+            const result = await window.flowCanvas.mcp.generateVideo({
+                provider: 'openai-video',
+                providerConfig: videoProvider,
+                prompt,
+                sourceReferences: selectedPaths.map(filePath => ({ filePath })),
+                resolution: profile.defaultResolution || undefined,
+                ratio: '16:9',
+                duration: profile.defaultDuration ?? undefined,
+                x: placeholder?.x,
+                y: placeholder?.y,
+                addToCanvas: true
+            });
+
+            if (!result?.success && result?.error) throw new Error(result.error);
+            return [
+                '\u5df2\u7528 ' + this._providerLabel(videoProvider) + ' \u751f\u6210\u89c6\u9891\uff0c\u5e76\u6dfb\u52a0\u5230\u767d\u677f\u3002',
+                result?.filePath ? '\u6587\u4ef6\uff1a' + result.filePath : '',
+                result?.taskId ? '\u4efb\u52a1\uff1a' + result.taskId : '',
+                result?.targetDirFallback ? '\u4fdd\u5b58\u76ee\u5f55\u56de\u9000\uff1a' + result.targetDirFallback : ''
+            ].filter(Boolean).join('\n');
+        } finally {
+            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+        }
     }
 
     async _tryProviderChain(providers, action) {
@@ -1360,11 +2936,18 @@ export class AgentSidebar {
         const text = this.inputEl.value.trim();
         if (!text || this.isStreaming) return;
 
-        const wantsImageGeneration = this._isImageGenerationRequest(text);
-        const providerChain = this._getProviderFallbackChain(wantsImageGeneration ? 'image' : 'chat');
+        const wantsVideoGeneration = this._isVideoGenerationRequest(text);
+        const wantsImageGeneration = !wantsVideoGeneration && this._isImageGenerationRequest(text);
+        const generationKind = wantsVideoGeneration ? 'video' : wantsImageGeneration ? 'image' : 'chat';
+        const providerChain = this._getProviderFallbackChain(generationKind);
 
         // 检查 API 配置
         if (providerChain.length === 0) {
+            if (wantsVideoGeneration) {
+                this._addErrorMessage('\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u6dfb\u52a0\u5e76\u9009\u62e9\u6709\u6548\u7684\u89c6\u9891 API');
+                this.settingsPanel.classList.add('show');
+                return;
+            }
             this._addErrorMessage(wantsImageGeneration ? '请先在设置中添加并选择有效的生图 API' : '请先在设置中添加并选择有效的对话 API');
             this.settingsPanel.classList.add('show');
             return;
@@ -1388,7 +2971,15 @@ export class AgentSidebar {
             let fullContent = '';
             let msgEl = null;
 
-            if (wantsImageGeneration) {
+            if (wantsVideoGeneration) {
+                const result = await this._tryProviderChain(providerChain, provider => this._generateVideoFromChat(text, provider));
+                fullContent = [
+                    result.switched ? '\u7b2c\u4e00\u6761 API \u8bf7\u6c42\u5931\u8d25\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230\u5907\u7528 API\uff1a' + this._providerLabel(result.provider) : '',
+                    result.content
+                ].filter(Boolean).join('\n');
+                typingEl?.remove();
+                msgEl = this._addMessage('assistant', fullContent);
+            } else if (wantsImageGeneration) {
                 const result = await this._tryProviderChain(providerChain, provider => this._generateImageFromChat(text, provider));
                 fullContent = [
                     result.switched ? `第一条 API 请求失败，已自动切换到备用 API：${this._providerLabel(result.provider)}` : '',

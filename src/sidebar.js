@@ -19,7 +19,9 @@ export class SidebarManager {
             const defaultGroup = {
                 id: Date.now().toString(),
                 name: '默认组',
-                folders: [...this.storeData.watchFolders]
+                folders: [...this.storeData.watchFolders],
+                removedFromBoardPaths: [],
+                removedFromBoardPathsInitialized: false
             };
             this.storeData.folderGroups.push(defaultGroup);
             this.storeData.activeGroupId = defaultGroup.id;
@@ -424,7 +426,9 @@ export class SidebarManager {
             id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
             name: `文件夹组 ${count + 1}`,
             folders: [],
-            defaultSaveFolder: null
+            defaultSaveFolder: null,
+            removedFromBoardPaths: [],
+            removedFromBoardPathsInitialized: true
         };
         group.plans = [];
         this.storeData.folderGroups.push(group);
@@ -482,7 +486,9 @@ export class SidebarManager {
             const removedItems = this.storeData.items.filter(i => this._isPathInsideFolder(i.filePath, path));
             this.storeData.items = this.storeData.items.filter(i => !this._isPathInsideFolder(i.filePath, path));
             removedItems.forEach(i => {
-                const ev = new CustomEvent('context-remove', { detail: { filePath: i.filePath } });
+                const ev = new CustomEvent('context-remove', {
+                    detail: { filePath: i.filePath, suppressAutoRestore: false }
+                });
                 document.dispatchEvent(ev);
             });
 

@@ -199,7 +199,54 @@ const tools = [
                 width: { type: 'number' },
                 height: { type: 'number' },
                 model: { type: 'string' },
-                size: { type: 'string' }
+                size: {
+                    type: 'string',
+                    description: 'OpenAI-compatible size string, for example 1024x1024, 2880x2880, 3840x2160, or 2160x3840.'
+                },
+                quality: { type: 'string', default: 'auto' },
+                responseFormat: { type: 'string', enum: ['url', 'b64_json'], default: 'url' },
+                historyDisabled: { type: 'boolean', default: true }
+            },
+            required: ['prompt']
+        }
+    },
+    {
+        name: 'flow_canvas.video.generate',
+        description: 'Generate a Seedance-compatible video, save the local file, and add it to the Flow Canvas board. The configured provider must support POST /v1/video/generations and task polling.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                prompt: { type: 'string' },
+                title: { type: 'string' },
+                planId: { type: 'string' },
+                rowId: { type: 'string' },
+                sourceReferences: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            itemId: { type: 'string' },
+                            filePath: { type: 'string' },
+                            name: { type: 'string' }
+                        }
+                    }
+                },
+                includePlanAssets: { type: 'boolean' },
+                replaceReferences: { type: 'boolean' },
+                addToCanvas: { type: 'boolean' },
+                targetDir: { type: 'string' },
+                x: { type: 'number' },
+                y: { type: 'number' },
+                model: { type: 'string', description: 'Defaults to doubao-seedance-2-0 when no provider model is configured.' },
+                endpoint: { type: 'string' },
+                apiKey: { type: 'string' },
+                resolution: { type: 'string', enum: ['480p', '720p', '1080p', '720P', '1080P', '4K', '4k'] },
+                ratio: { type: 'string', enum: ['21:9', '16:9', '9:16', '4:3', '3:4', '1:1', 'adaptive'] },
+                duration: { type: 'integer', minimum: -1, maximum: 60 },
+                cameraFixed: { type: 'boolean' },
+                generateAudio: { type: 'boolean' },
+                webSearch: { type: 'boolean' },
+                watermark: { type: 'boolean' }
             },
             required: ['prompt']
         }
@@ -282,6 +329,12 @@ const toolHandlers = {
     'flow_canvas.plan.delete': ({ planId }) => api('DELETE', `/plans/${encodeURIComponent(required(planId, 'planId'))}`),
     'flow_canvas.plan.export': ({ planId }) => api('POST', `/plans/${encodeURIComponent(required(planId, 'planId'))}/export`, {}),
     'flow_canvas.image.generate': (body = {}) => generateImageWithSources(body),
+    'flow_canvas.video.generate': (body = {}) => api('POST', '/videos/generate', {
+        ...body,
+        providerConfig: body.endpoint || body.apiKey || body.model
+            ? { endpoint: body.endpoint, apiKey: body.apiKey, model: body.model }
+            : undefined
+    }),
     'flow_canvas.item.list': () => api('GET', '/items'),
     'flow_canvas.item.get': ({ itemId }) => api('GET', `/items/${encodeURIComponent(required(itemId, 'itemId'))}`),
     'flow_canvas.item.add': (body = {}) => api('POST', '/items/add', body),

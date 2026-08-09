@@ -6,6 +6,8 @@ import Konva from 'konva';
 
 const IMAGE_DEFAULT_WIDTH = 300;
 const DOC_DEFAULT_SIZE = 150;
+const VIDEO_PLACEHOLDER_LONG_EDGE = 320;
+const VIDEO_PLACEHOLDER_DEFAULT_RATIO = 16 / 9;
 const PLAN_NODE_WIDTH = 1440;
 const PLAN_NODE_HEIGHT = 620;
 const PLAN_ROW_HEIGHT = 58;
@@ -90,6 +92,10 @@ export class CanvasManager {
         this.layer = new Konva.Layer();
         this.stage.add(this.layer);
 
+        this.transientLayer = new Konva.Layer({ listening: false });
+        this.stage.add(this.transientLayer);
+        this.videoGenerationPlaceholders = new Map();
+
         this.selectionRect = new Konva.Rect({
             fill: 'rgba(58, 123, 213, 0.2)',
             stroke: '#3a7bd5',
@@ -134,6 +140,9 @@ export class CanvasManager {
         this._selectedPlanConnection = null;
         this._activePlanReferencePick = null;
         this._planReferencePickTargetId = null;
+        this._activeMediaReferencePick = null;
+        this._mediaReferenceHighlightIds = new Set();
+        this._lastMediaReferencePointerPick = null;
         this._referenceHighlightIds = new Set();
         this._isDraggingPlanReference = false;
         this._isGeneratingPlanRow = false;
@@ -280,8 +289,187 @@ export class CanvasManager {
         if (this.listeners[event]) this.listeners[event].forEach(cb => cb(data));
     }
 
+    beginMediaReferencePick(type, entries = [], maxItems = 1) {
+        const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : 'image';
+        if (this._activePlanReferencePick) this._cancelPlanReferencePick('', { refresh: false });
+        this.endMediaReferencePick({ silent: true });
+        const normalizedEntries = (Array.isArray(entries) ? entries : [])
+            .map(entry => this._normalizeMediaReferenceEntry(entry))
+            .filter(entry => entry && entry.mediaType === normalizedType)
+            .slice(0, Math.max(1, Number(maxItems) || 1));
+        this._activeMediaReferencePick = {
+            type: normalizedType,
+            entries: normalizedEntries,
+            maxItems: Math.max(1, Number(maxItems) || 1)
+        };
+        this._renderMediaReferencePickHighlights();
+        const typeLabel = { image: '图片', video: '视频', audio: '音频' }[normalizedType];
+        this._showCanvasStatus(`按顺序点击画布${typeLabel}，重复点击可移除；按 Esc 完成`, 4200);
+        this.emit('mediaReferencePickStateChanged', { active: true, type: normalizedType });
+        return true;
+    }
+
+    endMediaReferencePick(options = {}) {
+        if (!this._activeMediaReferencePick) return false;
+        Array.from(this._mediaReferenceHighlightIds).forEach(id => this._setItemReferenceHighlight(id, false));
+        this._mediaReferenceHighlightIds.clear();
+        const type = this._activeMediaReferencePick.type;
+        this._activeMediaReferencePick = null;
+        document.body.style.cursor = 'default';
+        this.emit('mediaReferencePickStateChanged', { active: false, type });
+        if (!options.silent) this._showCanvasStatus('参考素材选择已完成');
+        return true;
+    }
+
+    updateMediaReferencePick(type, entries = []) {
+        if (!this._activeMediaReferencePick || this._activeMediaReferencePick.type !== type) return false;
+        this._activeMediaReferencePick.entries = (Array.isArray(entries) ? entries : [])
+            .map(entry => this._normalizeMediaReferenceEntry(entry))
+            .filter(entry => entry && entry.mediaType === type)
+            .slice(0, this._activeMediaReferencePick.maxItems);
+        this._renderMediaReferencePickHighlights();
+        return true;
+    }
+
+    _normalizeMediaReferenceEntry(entry) {
+        const id = String(entry?.id || entry?.itemId || '').trim();
+        const item = id ? this.items.get(id) : null;
+        const filePath = String(entry?.filePath || item?.data?.filePath || '').trim();
+        if (!id || !item || !filePath) return null;
+        return {
+            id,
+            itemId: id,
+            filePath,
+            mediaType: this._getFileType(filePath)
+        };
+    }
+
+    _toggleMediaReferencePick(item) {
+        const pick = this._activeMediaReferencePick;
+        if (!pick || !item?.data) return;
+        const entry = this._normalizeMediaReferenceEntry({ id: item.data.id, filePath: item.data.filePath });
+        const typeLabel = { image: '图片', video: '视频', audio: '音频' }[pick.type];
+        if (!entry || entry.mediaType !== pick.type) {
+            this._showCanvasStatus(`这里只能选择${typeLabel}素材`);
+            return;
+        }
+        const existingIndex = pick.entries.findIndex(candidate => candidate.id === entry.id);
+        if (existingIndex >= 0) {
+            pick.entries.splice(existingIndex, 1);
+        } else if (pick.entries.length >= pick.maxItems) {
+            this._showCanvasStatus(`${typeLabel}最多选择 ${pick.maxItems} 个`);
+            return;
+        } else {
+            pick.entries.push(entry);
+        }
+        this._renderMediaReferencePickHighlights();
+        this.emit('mediaReferenceSelectionChanged', {
+            type: pick.type,
+            entries: pick.entries.map(candidate => ({ ...candidate }))
+        });
+    }
+
+    _renderMediaReferencePickHighlights() {
+        Array.from(this._mediaReferenceHighlightIds).forEach(id => this._setItemReferenceHighlight(id, false));
+        this._mediaReferenceHighlightIds.clear();
+        const pick = this._activeMediaReferencePick;
+        if (!pick) return;
+        pick.entries.forEach((entry, index) => {
+            this._mediaReferenceHighlightIds.add(entry.id);
+            this._setItemReferenceHighlight(entry.id, true, {
+                mode: 'media',
+                labelText: `${{ image: '图片', video: '视频', audio: '音频' }[pick.type]} ${index + 1}`
+            });
+        });
+    }
+
     getViewport() {
         return { x: this.stage.x(), y: this.stage.y(), scale: this.stage.scaleX() };
+    }
+
+    addVideoGenerationPlaceholder(options = {}) {
+        const ratioMatch = String(options.ratio || '').match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+        const ratio = ratioMatch
+            ? Number(ratioMatch[1]) / Number(ratioMatch[2])
+            : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
+        const aspect = Number.isFinite(ratio) && ratio > 0 ? ratio : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
+        const width = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE : VIDEO_PLACEHOLDER_LONG_EDGE * aspect);
+        const height = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE / aspect : VIDEO_PLACEHOLDER_LONG_EDGE);
+        const stagePos = this.stage.position();
+        const scale = this.stage.scaleX();
+        const container = this.stage.container();
+        const centerX = (container.offsetWidth / 2 - stagePos.x) / scale;
+        const centerY = (container.offsetHeight / 2 - stagePos.y) / scale;
+        const x = centerX - width / 2;
+        const y = centerY - height / 2;
+        const id = `video-placeholder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const group = new Konva.Group({ x, y, listening: false, name: 'videoGenerationPlaceholder' });
+
+        group.add(new Konva.Rect({
+            width,
+            height,
+            fill: '#25272c',
+            stroke: 'rgba(255, 255, 255, 0.12)',
+            strokeWidth: 1,
+            cornerRadius: 7,
+            shadowColor: 'rgba(0, 0, 0, 0.35)',
+            shadowBlur: 14,
+            shadowOffsetY: 5,
+            shadowOpacity: 0.5
+        }));
+
+        const sweepWidth = Math.max(72, Math.round(width * 0.34));
+        const sweep = new Konva.Rect({
+            x: -sweepWidth,
+            y: 1,
+            width: sweepWidth,
+            height: Math.max(1, height - 2),
+            cornerRadius: 6,
+            fillLinearGradientStartPoint: { x: 0, y: 0 },
+            fillLinearGradientEndPoint: { x: sweepWidth, y: 0 },
+            fillLinearGradientColorStops: [
+                0, 'rgba(255, 255, 255, 0)',
+                0.5, 'rgba(255, 255, 255, 0.14)',
+                1, 'rgba(255, 255, 255, 0)'
+            ]
+        });
+        const sweepClip = new Konva.Group({
+            clipX: 1,
+            clipY: 1,
+            clipWidth: Math.max(1, width - 2),
+            clipHeight: Math.max(1, height - 2)
+        });
+        sweepClip.add(sweep);
+        group.add(sweepClip);
+        this.transientLayer.add(group);
+
+        const animation = new Konva.Animation((frame) => {
+            const progress = ((frame?.time || 0) % 1500) / 1500;
+            sweep.x(-sweepWidth + ((width + sweepWidth) * progress));
+        }, this.transientLayer);
+        this.videoGenerationPlaceholders.set(id, { group, animation });
+        animation.start();
+        this.transientLayer.batchDraw();
+        return { id, x, y, width, height };
+    }
+
+    removeVideoGenerationPlaceholder(id) {
+        const placeholder = this.videoGenerationPlaceholders.get(id);
+        if (!placeholder) return false;
+        placeholder.animation?.stop();
+        placeholder.group?.destroy();
+        this.videoGenerationPlaceholders.delete(id);
+        this.transientLayer.batchDraw();
+        return true;
+    }
+
+    clearVideoGenerationPlaceholders() {
+        this.videoGenerationPlaceholders.forEach(({ group, animation }) => {
+            animation?.stop();
+            group?.destroy();
+        });
+        this.videoGenerationPlaceholders.clear();
+        this.transientLayer.batchDraw();
     }
 
     _getRelativePointerPos() {
@@ -463,6 +651,24 @@ export class CanvasManager {
                 e.cancelBubble = true;
                 this._cancelPlanReferencePick('已取消连接参考图');
                 return;
+            }
+            if (this._activeMediaReferencePick && e.evt.button === 0) {
+                const group = e.target?.name?.() === 'nodeGroup'
+                    ? e.target
+                    : e.target?.findAncestor?.('Group');
+                if (group && this.items.has(group.attrs.id)) {
+                    e.evt.preventDefault();
+                    e.cancelBubble = true;
+                    group?.stopDrag?.();
+                    this._lastMediaReferencePointerPick = { id: group.attrs.id, at: Date.now() };
+                    this._toggleMediaReferencePick(this.items.get(group.attrs.id));
+                    return;
+                }
+                if (e.target === this.stage || e.target === this.selectionRect) {
+                    e.evt.preventDefault();
+                    e.cancelBubble = true;
+                    return;
+                }
             }
             if (e.target !== this.stage && e.target !== this.selectionRect) {
                 const group = e.target.findAncestor('Group');
@@ -711,6 +917,11 @@ export class CanvasManager {
             if (this._activePlanReferencePick && e.key === 'Escape') {
                 e.preventDefault();
                 this._cancelPlanReferencePick('已取消连接参考图');
+                return;
+            }
+            if (this._activeMediaReferencePick && e.key === 'Escape') {
+                e.preventDefault();
+                this.endMediaReferencePick();
                 return;
             }
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
@@ -963,13 +1174,15 @@ export class CanvasManager {
                 }
 
                 // If video, update control group size
-                const controlsGroup = movedGroup.children.find(c => c.getClassName() === 'Group' && c !== movedGroup.findOne('.fallbackIcon'));
+                const controlsGroup = movedGroup.findOne('.videoControls');
+                const coverControls = movedGroup.findOne('.videoCoverControls');
                 if (controlsGroup && movedGroup.attrs.filePath.match(/\.(mp4|mov|avi|mkv|wmv|flv|webm)$/i)) {
                     controlsGroup.y(snappedH - 30);
-                    controlsGroup.children[0].width(snappedW); // ctrlBg
-                    controlsGroup.children[1].width(Math.max(0, snappedW - 45)); // progressBg
-                    controlsGroup.children[5].width(Math.max(0, snappedW - 45)); // progressHotspot
+                    controlsGroup.findOne('.videoControlBg')?.width(snappedW);
+                    controlsGroup.findOne('.videoProgressBg')?.width(Math.max(0, snappedW - 45));
+                    controlsGroup.findOne('.videoProgressHotspot')?.width(Math.max(0, snappedW - 45));
                 }
+                if (coverControls) coverControls.y(snappedH - 30);
             }
         }
     }
@@ -1098,7 +1311,10 @@ export class CanvasManager {
         return await window.flowCanvas.image.downloadFromUrl(`file:///${filePath.replace(/\\/g, '/')}`, targetDir);
     }
 
-    _addCapturedFile(filePath, dropEvent) {
+    _addCapturedFile(filePath, dropEvent, options = {}) {
+        if (dropEvent || options.manualRestore) {
+            this.emit('manualFileImport', filePath);
+        }
         if (this._hasFilePath(filePath)) return;
 
         // 计算放置坐标
@@ -1154,6 +1370,7 @@ export class CanvasManager {
         if (!add) this.clearSelection({ skipVisualRefresh: true });
         this.selectedItems.add(id);
         this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
+        this.emit('selectionChanged', this.getSelectedCanvasEntries());
     }
 
     clearSelection(options = {}) {
@@ -1164,6 +1381,7 @@ export class CanvasManager {
         if (hadSelectedConnection) this._clearPlanConnectionFocusState();
         if (options.skipVisualRefresh) return;
         this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
+        this.emit('selectionChanged', this.getSelectedCanvasEntries());
     }
 
     selectAll() {
@@ -1182,6 +1400,7 @@ export class CanvasManager {
             }
         });
         this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
+        this.emit('selectionChanged', this.getSelectedCanvasEntries());
     }
 
     async copySelectionToClipboard() {
@@ -1259,7 +1478,8 @@ export class CanvasManager {
     }
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
-    clearAll() {
+    clearAll(options = {}) {
+        if (!options.preserveTransients) this.clearVideoGenerationPlaceholders();
         console.log('[Canvas] clearAll: 清除', this.items.size, '个卡片');
         this._flushDragConnectionRefresh();
         this._cancelPlanReferencePick('', { refresh: false });
@@ -1326,6 +1546,25 @@ export class CanvasManager {
 
         renderBatch();
         this.renderPlans();
+    }
+
+    getSelectedCanvasEntries() {
+        const selected = [];
+        this.selectedItems.forEach(id => {
+            const entry = this._getNodeEntry(id);
+            if (!entry?.data || !entry.group?.isVisible()) return;
+            selected.push({
+                id,
+                kind: entry.kind || entry.data.kind || (entry.data.filePath ? 'asset' : 'node'),
+                filePath: entry.data.filePath || null,
+                mediaType: entry.data.mediaType || (entry.data.filePath ? this._getFileType(entry.data.filePath) : null),
+                x: entry.group.x(),
+                y: entry.group.y(),
+                model: entry.data.model || null,
+                status: entry.data.status || null
+            });
+        });
+        return selected.sort((a, b) => (a.y - b.y) || (a.x - b.x));
     }
 
     renderPlans() {
@@ -1525,6 +1764,10 @@ export class CanvasManager {
                 if (item) this._updatePlanReferencePickPreview(item);
                 return;
             }
+            if (this._activeMediaReferencePick) {
+                document.body.style.cursor = 'crosshair';
+                return;
+            }
             document.body.style.cursor = 'pointer';
             if (item?.loadError) {
                 this._showCanvasStatus(`素材加载失败：${this._fileNameFromPath(data.filePath)}，文件可能已移动或删除`, 3600);
@@ -1545,13 +1788,22 @@ export class CanvasManager {
                 this._updatePlanReferencePickPreview(null);
                 return;
             }
+            if (this._activeMediaReferencePick) return;
             if (this._isHoveredReferenceItem(data.id, data.filePath)) {
                 this._setHoveredReferenceItem(null, null);
             }
         });
 
-        group.on('click', (e) => {
+        group.on('click tap', (e) => {
             if (e.evt.button === 2) return;
+            if (this._activeMediaReferencePick) {
+                e.cancelBubble = true;
+                e.evt.preventDefault();
+                const recentPick = this._lastMediaReferencePointerPick;
+                if (recentPick?.id === data.id && Date.now() - recentPick.at < 500) return;
+                this._toggleMediaReferencePick(this.items.get(data.id));
+                return;
+            }
             if (this._activePlanReferencePick) {
                 e.cancelBubble = true;
                 e.evt.preventDefault();
@@ -1626,7 +1878,8 @@ export class CanvasManager {
             hoverFull: false,
             gifDomElement: null,
             videoElement: null,
-            videoAnimation: null
+            videoAnimation: null,
+            autoPlayVideo: false
         });
 
         return group;
@@ -4290,14 +4543,15 @@ export class CanvasManager {
             const rect = node.getClientRect({ relativeTo: item.group });
             const mode = options.mode || 'drop';
             const isConnection = mode === 'connection';
-            const stroke = isConnection ? PLAN_OUTPUT_CONNECTION_COLOR : PLAN_CONNECTION_PREVIEW_COLOR;
-            const fill = isConnection ? 'rgba(154, 216, 255, 0.07)' : 'rgba(52, 211, 153, 0.08)';
+            const isMedia = mode === 'media';
+            const stroke = isConnection ? PLAN_OUTPUT_CONNECTION_COLOR : isMedia ? '#fbbf24' : PLAN_CONNECTION_PREVIEW_COLOR;
+            const fill = isConnection ? 'rgba(154, 216, 255, 0.07)' : isMedia ? 'rgba(251, 191, 36, 0.08)' : 'rgba(52, 211, 153, 0.08)';
             const referenceCount = isConnection
                 ? this._countPlanReferencesToItem(item.data.id, item.data.filePath)
                 : 0;
-            const labelText = isConnection
+            const labelText = options.labelText || (isConnection
                 ? `连接目标 · ${referenceCount || 1} 条关联`
-                : '可连接';
+                : '可连接');
             const labelWidth = Math.max(54, this._estimateTextWidth(labelText) + 18);
             if (!halo) {
                 halo = new Konva.Rect({
@@ -4492,16 +4746,23 @@ export class CanvasManager {
         const row = plan?.rows?.find(entry => entry.id === rowId);
         if (!plan || !row) return;
         const prompt = this._getPlanRowPrompt(plan, row);
+        const wantsVideo = /(\u89c6\u9891|\u77ed\u7247|\u5f71\u7247|video)/i.test(String(row.cells?.output || ''));
         if (!prompt) {
             this._showCanvasStatus('请先填写这一行的标题或内容');
             return;
         }
-        if (!window.flowCanvas?.mcp?.generateImage) {
+        if (!window.flowCanvas?.mcp?.[wantsVideo ? 'generateVideo' : 'generateImage']) {
             this._showCanvasStatus('本地生图接口不可用，请重启应用后再试');
             return;
         }
         const imageProvider = this.options.getImageProvider?.();
-        if (!imageProvider?.apiKey || !imageProvider?.model || !imageProvider?.endpoint) {
+        const videoProvider = this.options.getVideoProvider?.();
+        const provider = wantsVideo ? videoProvider : imageProvider;
+        if (wantsVideo && (!videoProvider?.apiKey || !videoProvider?.model || !videoProvider?.endpoint)) {
+            this._showCanvasStatus('\u8bf7\u5148\u5728 Agent \u8bbe\u7f6e\u4e2d\u9009\u62e9\u53ef\u7528\u7684\u89c6\u9891 API');
+            return;
+        }
+        if (!wantsVideo && (!imageProvider?.apiKey || !imageProvider?.model || !imageProvider?.endpoint)) {
             this._showCanvasStatus('请先在 Agent 设置中选择可用的生图 API');
             return;
         }
@@ -4516,17 +4777,23 @@ export class CanvasManager {
             const rowTop = metrics.rowTops[rowIndex] ?? (PLAN_HEADER_ROW_HEIGHT + rowIndex * PLAN_ROW_HEIGHT);
             const rowHeight = metrics.rowHeights[rowIndex] || PLAN_ROW_HEIGHT;
             const outputY = plan.y + rowTop + rowHeight / 2 - IMAGE_DEFAULT_WIDTH / 2;
-            const result = await window.flowCanvas.mcp.generateImage({
-                provider: 'openai',
-                providerConfig: imageProvider,
+            if (wantsVideo) {
+                this._showCanvasStatus('\u6b63\u5728\u4f7f\u7528 ' + provider.model + ' \u751f\u6210\u89c6\u9891...');
+            }
+            const result = await window.flowCanvas.mcp[wantsVideo ? 'generateVideo' : 'generateImage']({
+                provider: wantsVideo ? 'openai-video' : 'openai',
+                providerConfig: provider,
                 planId,
                 rowId,
                 prompt,
-                title: row.cells?.title || plan.title || 'Flow Canvas image',
+                title: row.cells?.title || plan.title || (wantsVideo ? 'Flow Canvas video' : 'Flow Canvas image'),
                 x: outputX,
                 y: outputY,
-                width: 1024,
-                height: 1024,
+                width: wantsVideo ? 1280 : 1024,
+                height: wantsVideo ? 720 : 1024,
+                resolution: wantsVideo ? '720p' : undefined,
+                ratio: wantsVideo ? '16:9' : undefined,
+                duration: wantsVideo ? 5 : undefined,
                 addToCanvas: true,
                 includePlanAssets: false
             });
@@ -4782,6 +5049,7 @@ export class CanvasManager {
             clearTimeout(item.hoverTimer);
             item.hoverTimer = null;
             item.hoverFull = false;
+            item.autoPlayVideo = false;
             item.loadQueued = false;
             if (item.loaded || item.loading) {
                 this._unloadContent(item);
@@ -4810,8 +5078,10 @@ export class CanvasManager {
         clearTimeout(item.hoverTimer);
         item.hoverTimer = null;
         if (!this.resourceSaverMode || !item.hoverFull || !item.group.getLayer()) return;
+        if (item.autoPlayVideo || (item.videoElement && !item.videoElement.paused)) return;
 
         item.hoverFull = false;
+        item.autoPlayVideo = false;
         if (item.loaded || item.loading || item.loadQueued) {
             this._unloadContent(item);
         }
@@ -4919,9 +5189,8 @@ export class CanvasManager {
             if (!useThumbnail) {
                 this._loadVideo(item, token);
             } else {
-                this._finishLoad(item, token);
+                this._loadVideoCover(item, token);
             }
-            // LOD 模式下视频只显示占位框，不创建 <video> 元素
         } else {
             this._finishLoad(item, token);
         }
@@ -5031,6 +5300,129 @@ export class CanvasManager {
         const targetW = savedW || defaultWidth;
         const targetH = savedH > 0 ? savedH : (targetW / aspect);
         return { width: targetW, height: targetH };
+    }
+
+    _createVideoCoverControls(item, width, height) {
+        const controls = new Konva.Group({
+            name: 'videoCoverControls',
+            x: 0,
+            y: height - 30
+        });
+        const buttonBg = new Konva.Rect({
+            width: 30,
+            height: 30,
+            fill: 'rgba(0,0,0,0.62)'
+        });
+        const playIcon = new Konva.Text({
+            text: '▶',
+            fontSize: 16,
+            fill: 'white',
+            x: 10,
+            y: 7,
+            listening: false
+        });
+        const hotspot = new Konva.Rect({
+            width: 30,
+            height: 30,
+            fill: 'transparent'
+        });
+        hotspot.on('mousedown', event => {
+            event.cancelBubble = true;
+            event.evt.stopPropagation();
+            this._promoteVideoForPlayback(item);
+        });
+        controls.add(buttonBg, playIcon, hotspot);
+        return controls;
+    }
+
+    _promoteVideoForPlayback(item) {
+        if (!item?.group?.getLayer()) return;
+        clearTimeout(item.hoverTimer);
+        item.hoverTimer = null;
+        item.hoverFull = true;
+        item.autoPlayVideo = true;
+        if (item.loaded || item.loading || item.loadQueued) {
+            this._unloadContent(item);
+        }
+        this._queueContentLoad(item, false, true);
+        this._drainContentLoadQueue();
+    }
+
+    _loadVideoCover(item, token) {
+        const group = item.group;
+        const data = item.data;
+        const video = document.createElement('video');
+        video.src = 'local-res://' + encodeURIComponent(data.filePath);
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.style.display = 'none';
+        item.videoElement = video;
+        document.body.appendChild(video);
+
+        let captured = false;
+        const captureFrame = () => {
+            if (captured || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return;
+            captured = true;
+            if (!this._isLoadCurrent(item, token)) {
+                this._disposeVideoElement(video);
+                if (item.videoElement === video) item.videoElement = null;
+                this._completeContentLoad(item);
+                return;
+            }
+
+            const { width: displayWidth, height: displayHeight } = this._resolveMediaDisplaySize(
+                data,
+                video.videoWidth,
+                video.videoHeight
+            );
+            const coverWidth = Math.max(1, Math.min(320, video.videoWidth));
+            const coverHeight = Math.max(1, Math.round(coverWidth * video.videoHeight / video.videoWidth));
+            const canvas = document.createElement('canvas');
+            canvas.width = coverWidth;
+            canvas.height = coverHeight;
+            canvas.getContext('2d')?.drawImage(video, 0, 0, coverWidth, coverHeight);
+
+            data.width = displayWidth;
+            data.height = displayHeight;
+            group.findOne('.fallbackIcon')?.destroy();
+            const cover = new Konva.Image({
+                name: 'displayNode videoCover',
+                image: canvas,
+                width: displayWidth,
+                height: displayHeight
+            });
+            group.add(cover);
+            cover.moveToBottom();
+            group.add(this._createVideoCoverControls(item, displayWidth, displayHeight));
+
+            this._disposeVideoElement(video);
+            if (item.videoElement === video) item.videoElement = null;
+            this._finishLoad(item, token);
+            if (this.selectedItems.has(data.id)) this._updateSelectionVisuals();
+            group.getLayer()?.batchDraw();
+        };
+
+        video.addEventListener('loadedmetadata', () => {
+            if (!this._isLoadCurrent(item, token)) return;
+            video.preload = 'auto';
+            const seekTime = Number.isFinite(video.duration) && video.duration > 0
+                ? Math.min(0.08, video.duration / 2)
+                : 0;
+            try {
+                video.currentTime = seekTime;
+            } catch (_) {
+                // loadeddata below still captures the first available frame.
+            }
+        });
+        video.addEventListener('loadeddata', captureFrame);
+        video.addEventListener('seeked', captureFrame);
+        video.addEventListener('error', () => {
+            this._disposeVideoElement(video);
+            if (item.videoElement === video) item.videoElement = null;
+            this._failLoad(item, token);
+            console.error('[Canvas] 视频封面加载失败:', data.filePath);
+        });
     }
 
     /**
@@ -5193,7 +5585,7 @@ export class CanvasManager {
         video.muted = true;
         video.loop = true;
         video.playsInline = true;
-        video.preload = 'metadata';
+        video.preload = 'auto';
         video.style.display = 'none';
         item.videoElement = video;
         document.body.appendChild(video);
@@ -5234,11 +5626,17 @@ export class CanvasManager {
 
             // -- 进度条和控制按钮 --
             const controlsGroup = new Konva.Group({
-                x: 0, y: h - 30, opacity: 0
+                name: 'videoControls',
+                x: 0, y: h - 30, opacity: 1
             });
 
             const ctrlBg = new Konva.Rect({
-                width: w, height: 30, fill: 'rgba(0,0,0,0.6)'
+                name: 'videoControlBg',
+                width: w, height: 30, fill: 'rgba(0,0,0,0.6)', visible: false
+            });
+
+            const playButtonBg = new Konva.Rect({
+                width: 30, height: 30, fill: 'rgba(0,0,0,0.62)'
             });
 
             const playPauseBtnText = new Konva.Text({
@@ -5253,35 +5651,47 @@ export class CanvasManager {
 
             // 进度条背景
             const progressBg = new Konva.Rect({
-                x: 35, y: 13, width: w - 45, height: 4, fill: '#555', cornerRadius: 2
+                name: 'videoProgressBg',
+                x: 35, y: 13, width: w - 45, height: 4, fill: '#555', cornerRadius: 2, visible: false
             });
 
             // 进度条前景
             const progressFg = new Konva.Rect({
-                x: 35, y: 13, width: 0, height: 4, fill: '#3a7bd5', cornerRadius: 2
+                x: 35, y: 13, width: 0, height: 4, fill: '#3a7bd5', cornerRadius: 2, visible: false
             });
 
             // 进度条热区，方便点击
             const progressHotspot = new Konva.Rect({
+                name: 'videoProgressHotspot',
                 x: 35, y: 0, width: w - 45, height: 30,
-                fill: 'transparent'
+                fill: 'transparent', visible: false
             });
 
-            controlsGroup.add(ctrlBg, progressBg, progressFg, playPauseBtnText, playPauseHotspot, progressHotspot);
+            controlsGroup.add(ctrlBg, playButtonBg, progressBg, progressFg, playPauseBtnText, playPauseHotspot, progressHotspot);
             group.add(controlsGroup);
 
             videoImage.moveToBottom();
 
             // 控制逻辑 —— 用 mousedown 替代 click，避免 Konva 动画层干扰点击检测
+            const revealTimeline = () => {
+                ctrlBg.visible(true);
+                progressBg.visible(true);
+                progressFg.visible(true);
+                progressHotspot.visible(true);
+            };
+            const playVideo = () => {
+                revealTimeline();
+                return video.play().then(() => {
+                    anim.start();
+                    playPauseBtnText.text('⏸');
+                    group.getLayer()?.batchDraw();
+                }).catch(() => { });
+            };
             playPauseHotspot.on('mousedown', (e) => {
                 e.cancelBubble = true;
                 e.evt.stopPropagation();
                 if (video.paused) {
-                    video.play().then(() => {
-                        anim.start();
-                        playPauseBtnText.text('⏸');
-                        group.getLayer()?.batchDraw();
-                    }).catch(() => { });
+                    playVideo();
                 } else {
                     video.pause();
                     anim.stop();
@@ -5295,7 +5705,7 @@ export class CanvasManager {
                 e.cancelBubble = true;
                 e.evt.stopPropagation();
                 const ptrX = group.getRelativePointerPosition().x;
-                let percent = (ptrX - 35) / (w - 45);
+                let percent = (ptrX - 35) / Math.max(1, progressHotspot.width());
                 percent = Math.max(0, Math.min(1, percent));
                 video.currentTime = video.duration * percent;
             });
@@ -5303,7 +5713,7 @@ export class CanvasManager {
             // 播放视频动画帧刷新
             const anim = new Konva.Animation(() => {
                 if (!video.paused && video.duration) {
-                    progressFg.width((video.currentTime / video.duration) * (w - 45));
+                    progressFg.width((video.currentTime / video.duration) * progressBg.width());
                 }
             }, group.getLayer());
             // 不立即启动，视频播放时才 start
@@ -5312,17 +5722,12 @@ export class CanvasManager {
             item.videoElement = video;
             item.videoAnimation = anim;
 
-            // 显示隐藏控制器
-            group.on('mouseenter.video', () => {
-                controlsGroup.opacity(1);
-                group.getLayer()?.batchDraw();
-            });
-            group.on('mouseleave.video', () => {
-                controlsGroup.opacity(0);
-                group.getLayer()?.batchDraw();
-            });
-
             this._finishLoad(item, token);
+            video.addEventListener('loadeddata', () => group.getLayer()?.batchDraw());
+            if (item.autoPlayVideo) {
+                item.autoPlayVideo = false;
+                playVideo();
+            }
             group.getLayer().batchDraw();
         });
 

@@ -1,4 +1,38 @@
 node_modules/
 dist/
+release/
+release-*/
+release-packages/
+.playwright-cli/
+output/
+coverage/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Flow Canvas user data and task synchronization state
+data/
+user-data/
+flow-canvas-data/
+board.json
+browser-task-routes.json
+browser-task-events.jsonl
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Local generated media and packaged artifacts
+generated/
+downloads/
+local-assets/
+*.exe
+*.blockmap
+latest.yml
+
 .DS_Store
+Thumbs.db
 *.log

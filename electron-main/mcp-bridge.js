@@ -7,6 +7,8 @@ const { app, net } = require('electron');
 const { PlanService, DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg']);
 const ROUTE_TO_TOOL = {
     'GET /health': 'flow_canvas.health',
     'GET /config': 'flow_canvas.config.get',
@@ -26,7 +28,8 @@ const ROUTE_TO_TOOL = {
     'GET /items/:itemId': 'flow_canvas.item.get',
     'PATCH /items/:itemId': 'flow_canvas.item.update',
     'DELETE /items/:itemId': 'flow_canvas.item.delete',
-    'POST /images/generate': 'flow_canvas.image.generate'
+    'POST /images/generate': 'flow_canvas.image.generate',
+    'POST /videos/generate': 'flow_canvas.video.generate'
 };
 const MANAGEMENT_TOOL_NAMES = [
     'flow_canvas.health',
@@ -53,12 +56,14 @@ const KNOWN_TOOL_NAMES = new Set([
 ]);
 
 class FlowCanvasBridge {
-    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer }) {
+    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted }) {
         this.store = store;
         this.getMainWindow = getMainWindow;
         this.getDefaultSaveFolder = getDefaultSaveFolder;
         this.getFallbackSaveDir = getFallbackSaveDir;
         this.notifyRenderer = notifyRenderer;
+        this.notifyTaskSubmitted = notifyTaskSubmitted;
+        this.notifyTaskCompleted = notifyTaskCompleted;
         this.server = null;
         this.host = DEFAULT_MCP_CONFIG.host;
         this.port = DEFAULT_MCP_CONFIG.port;
@@ -146,7 +151,8 @@ class FlowCanvasBridge {
             ['GET', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['GET /items/:itemId'], ({ itemId }) => this._getItem(itemId)],
             ['PATCH', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['PATCH /items/:itemId'], ({ itemId }, body) => this._updateItem(itemId, body)],
             ['DELETE', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['DELETE /items/:itemId'], ({ itemId }) => this._deleteItem(itemId)],
-            ['POST', /^\/images\/generate$/, ROUTE_TO_TOOL['POST /images/generate'], (_, body) => this._generateImage(body)]
+            ['POST', /^\/images\/generate$/, ROUTE_TO_TOOL['POST /images/generate'], (_, body) => this._generateImage(body)],
+            ['POST', /^\/videos\/generate$/, ROUTE_TO_TOOL['POST /videos/generate'], (_, body) => this._generateVideo(body)]
         ];
 
         for (const [routeMethod, pattern, toolName, handler] of routes) {
@@ -367,6 +373,7 @@ class FlowCanvasBridge {
                 throw new Error(`File does not exist: ${filePath}`);
             }
             item.filePath = filePath;
+            restoreRemovedBoardPath(data, filePath);
         }
         ['x', 'y', 'width', 'height'].forEach(key => {
             if (patch[key] !== undefined) {
@@ -385,6 +392,7 @@ class FlowCanvasBridge {
         const { data, planService } = this._loadWithPlanService();
         const item = findBoardItem(data, itemId);
         if (!item) throw new Error(`Item not found: ${itemId}`);
+        markRemovedBoardPath(data, item.filePath);
         data.items = (data.items || []).filter(entry => entry.id !== itemId);
         const removedReferences = removePlanReferencesToItem(planService, item);
         syncActiveGroupItems(data);
@@ -398,6 +406,10 @@ class FlowCanvasBridge {
 
     async _generateImage(body) {
         return this.generateImageFromRenderer(body);
+    }
+
+    async _generateVideo(body) {
+        return this.generateVideoFromRenderer(body);
     }
 
     async generateImageFromRenderer(body) {
@@ -475,6 +487,80 @@ class FlowCanvasBridge {
         };
     }
 
+    async generateVideoFromRenderer(body) {
+        const prompt = String(body?.prompt || '').trim();
+        if (!prompt) throw new Error('\u89c6\u9891\u63d0\u793a\u8bcd\u4e0d\u80fd\u4e3a\u7a7a');
+        const { data, planService } = this._loadWithPlanService();
+        const requestedTargetDir = body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.();
+        if (!requestedTargetDir) throw new Error('\u6ca1\u6709\u53ef\u7528\u7684\u89c6\u9891\u4fdd\u5b58\u76ee\u5f55');
+        const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
+        const targetDir = targetInfo.targetDir;
+        const sourceContext = collectImageSourceReferences(data, planService, body);
+        const videoSourceContext = collectVideoSourceReferences(data, body.videoReferences);
+        const audioSourceContext = collectAudioSourceReferences(data, body.audioReferences);
+        const result = await tryGenerateWithOpenAIVideo(prompt, targetDir, {
+            ...body,
+            sourceReferences: sourceContext.references,
+            videoReferences: videoSourceContext.references,
+            audioReferences: audioSourceContext.references,
+            onTaskSubmitted: ({ taskId, model }) => this.notifyTaskSubmitted?.({
+                clientTaskId: body.clientTaskId || null,
+                remoteTaskId: taskId,
+                targetDir,
+                model,
+                prompt,
+                createdAt: new Date().toISOString()
+            })
+        });
+        if (!result?.success) throw new Error(result?.error || '\u89c6\u9891\u751f\u6210 API \u8bf7\u6c42\u5931\u8d25');
+        this.notifyTaskCompleted?.({
+            remoteTaskId: result.taskId,
+            filePath: result.filePath
+        });
+
+        const item = body.addToCanvas === false
+            ? null
+            : addBoardItem(data, result.filePath, {
+                x: body.x,
+                y: body.y,
+                width: result.width,
+                height: result.height
+            });
+
+        if (body.planId && body.rowId && item) {
+            const generatedReference = {
+                itemId: item.id,
+                filePath: item.filePath,
+                name: path.basename(item.filePath),
+                kind: 'output'
+            };
+            const references = body.replaceReferences === true
+                ? [generatedReference]
+                : dedupeRowReferences([
+                    ...((planService.getPlan(body.planId)?.rows || []).find(entry => entry.id === body.rowId)?.references || []),
+                    generatedReference
+                ]);
+            planService.updateRow(body.planId, body.rowId, { references });
+        }
+
+        this._saveAndNotify(data, 'mcp:video-generated');
+        return {
+            item,
+            filePath: result.filePath,
+            provider: result.provider,
+            taskId: result.taskId,
+            video: { url: result.url },
+            sourceReferences: sourceContext.references,
+            videoReferences: videoSourceContext.references,
+            audioReferences: audioSourceContext.references,
+            missingSourceReferences: [...sourceContext.missing, ...videoSourceContext.missing, ...audioSourceContext.missing],
+            plan: body.planId ? planService.getPlan(body.planId) : null,
+            targetDir,
+            requestedTargetDir,
+            targetDirFallback: targetInfo.fallbackReason
+        };
+    }
+
     _sendJson(res, statusCode, payload) {
         res.statusCode = statusCode;
         res.setHeader('Access-Control-Allow-Origin', 'http://127.0.0.1');
@@ -491,6 +577,7 @@ class FlowCanvasBridge {
 
 function addBoardItem(data, filePath, options = {}) {
     if (!Array.isArray(data.items)) data.items = [];
+    restoreRemovedBoardPath(data, filePath);
     const existing = data.items.find(item => item.filePath === filePath);
     if (existing) return existing;
 
@@ -558,6 +645,33 @@ function syncActiveGroupItems(data) {
     if (!activeGroup) return;
     activeGroup.savedItems = clone(data.items || []);
     activeGroup.savedViewport = clone(data.viewport || { x: 0, y: 0, scale: 1 });
+}
+
+function getRemovedBoardPathOwner(data) {
+    return (data.folderGroups || []).find(group => group.id === data.activeGroupId) || data;
+}
+
+function markRemovedBoardPath(data, filePath) {
+    const owner = getRemovedBoardPathOwner(data);
+    const normalizedPath = normalizeFsPath(filePath);
+    if (!owner || !normalizedPath) return;
+    owner.removedFromBoardPaths = [...new Set([
+        ...(Array.isArray(owner.removedFromBoardPaths) ? owner.removedFromBoardPaths : [])
+            .map(normalizeFsPath)
+            .filter(Boolean),
+        normalizedPath
+    ])];
+}
+
+function restoreRemovedBoardPath(data, filePath) {
+    const owner = getRemovedBoardPathOwner(data);
+    const normalizedPath = normalizeFsPath(filePath);
+    if (!owner || !normalizedPath) return;
+    owner.removedFromBoardPaths = (Array.isArray(owner.removedFromBoardPaths)
+        ? owner.removedFromBoardPaths
+        : [])
+        .map(normalizeFsPath)
+        .filter(pathKey => pathKey && pathKey !== normalizedPath);
 }
 
 function removePlanReferencesToItem(planService, item) {
@@ -641,6 +755,38 @@ function collectImageSourceReferences(data, planService, body = {}) {
     return { references, missing };
 }
 
+function collectVideoSourceReferences(data, requested = []) {
+    const references = [];
+    const missing = [];
+    (Array.isArray(requested) ? requested : []).forEach(reference => {
+        const normalized = normalizeSourceReference(reference, data);
+        if (!normalized) return;
+        if (references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
+        if (VIDEO_EXTENSIONS.has(path.extname(normalized.filePath).toLowerCase()) && fs.existsSync(normalized.filePath)) {
+            references.push(normalized);
+        } else {
+            missing.push(normalized);
+        }
+    });
+    return { references: references.slice(0, 3), missing };
+}
+
+function collectAudioSourceReferences(data, requested = []) {
+    const references = [];
+    const missing = [];
+    (Array.isArray(requested) ? requested : []).forEach(reference => {
+        const normalized = normalizeSourceReference(reference, data);
+        if (!normalized) return;
+        if (references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
+        if (AUDIO_EXTENSIONS.has(path.extname(normalized.filePath).toLowerCase()) && fs.existsSync(normalized.filePath)) {
+            references.push(normalized);
+        } else {
+            missing.push(normalized);
+        }
+    });
+    return { references: references.slice(0, 3), missing };
+}
+
 function normalizeSourceReference(reference, data) {
     if (!reference) return null;
     if (typeof reference === 'string') {
@@ -690,19 +836,20 @@ function normalizeFsPath(filePath) {
     return String(filePath || '').replace(/\//g, '\\').toLowerCase();
 }
 
-function buildOpenAiImageEndpoint(endpoint) {
+function buildOpenAiImageEndpoint(endpoint, mode = 'generations') {
     const raw = String(endpoint || '').trim() || 'https://api.openai.com/v1/images/generations';
+    const route = mode === 'edits' ? 'edits' : 'generations';
     try {
         const url = new URL(raw);
         let pathName = url.pathname.replace(/\/+$/, '');
         if (!pathName || pathName === '/') {
-            pathName = '/v1/images/generations';
+            pathName = `/v1/images/${route}`;
         } else if (/\/v1$/i.test(pathName)) {
-            pathName += '/images/generations';
-        } else if (/\/(?:chat\/completions|responses|completions|models)$/i.test(pathName)) {
-            pathName = pathName.replace(/\/(?:chat\/completions|responses|completions|models)$/i, '/images/generations');
-        } else if (!/\/images\/generations$/i.test(pathName)) {
-            pathName += '/images/generations';
+            pathName += `/images/${route}`;
+        } else if (/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i.test(pathName)) {
+            pathName = pathName.replace(/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i, `/images/${route}`);
+        } else if (!new RegExp(`/images/${route}$`, 'i').test(pathName)) {
+            pathName += `/images/${route}`;
         }
         url.pathname = pathName;
         url.search = '';
@@ -713,6 +860,27 @@ function buildOpenAiImageEndpoint(endpoint) {
     }
 }
 
+function collectImageEditInputs(sourceReferences = []) {
+    return sourceReferences.map(reference => {
+        const filePath = String(reference?.filePath || '').trim();
+        const stats = fs.statSync(filePath);
+        if (stats.size > 50 * 1024 * 1024) {
+            throw new Error(`Image reference is larger than 50 MB: ${path.basename(filePath)}`);
+        }
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeType = extension === '.png'
+            ? 'image/png'
+            : extension === '.webp'
+                ? 'image/webp'
+                : 'image/jpeg';
+        return {
+            base64: fs.readFileSync(filePath).toString('base64'),
+            filename: path.basename(filePath),
+            mime_type: mimeType
+        };
+    });
+}
+
 async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
     try {
         const providerConfig = options.providerConfig || {};
@@ -721,25 +889,47 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             return { success: false, error: 'OpenAI image API key is missing' };
         }
 
-        const endpoint = buildOpenAiImageEndpoint(providerConfig.endpoint);
-        const model = process.env.FLOW_CANVAS_IMAGE_MODEL || providerConfig.model || options.model || 'gpt-image-1';
-        const size = options.size || '1024x1024';
-        const res = await net.fetch(endpoint, {
+        const sourceImages = collectImageEditInputs(options.sourceReferences || []);
+        const isEdit = sourceImages.length > 0;
+        const endpoint = buildOpenAiImageEndpoint(providerConfig.endpoint, isEdit ? 'edits' : 'generations');
+        const model = process.env.FLOW_CANVAS_IMAGE_MODEL || providerConfig.model || options.model || 'gpt-image-2';
+        const size = String(options.size || '').trim().replace(/\u00d7/g, 'x');
+        const requestBody = {
+            model,
+            prompt,
+            n: Math.min(8, Math.max(1, Number(options.n) || 1)),
+            quality: String(options.quality || 'auto'),
+            response_format: options.responseFormat === 'b64_json' ? 'b64_json' : 'url',
+            stream: false
+        };
+        if (size) requestBody.size = size;
+        if (isEdit) {
+            requestBody.images = sourceImages;
+        } else {
+            requestBody.history_disabled = options.historyDisabled !== false;
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000);
+        let res;
+        try {
+            res = await net.fetch(endpoint, {
             method: 'POST',
             headers: {
                 Authorization: `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
             },
-            body: JSON.stringify({
-                model,
-                prompt,
-                size,
-                n: 1
-            })
-        });
+                body: JSON.stringify(requestBody),
+                signal: controller.signal,
+                redirect: 'follow'
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
         if (!res.ok) {
             const text = await res.text();
-            return { success: false, error: `OpenAI image generation failed: ${res.status} ${text}` };
+            return { success: false, error: `Image API failed: ${res.status} ${text.slice(0, 2000)}` };
         }
         const json = await res.json();
         const image = json?.data?.[0];
@@ -747,23 +937,395 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         if (image?.b64_json) {
             buffer = Buffer.from(image.b64_json, 'base64');
         } else if (image?.url) {
-            const imageRes = await net.fetch(image.url);
+            const imageUrl = new URL(image.url, endpoint).toString();
+            const imageRes = await net.fetch(imageUrl);
             if (!imageRes.ok) throw new Error(`Image download failed: ${imageRes.status}`);
             buffer = Buffer.from(await imageRes.arrayBuffer());
         }
         if (!buffer) return { success: false, error: 'OpenAI response did not include image data' };
-        const filePath = path.join(targetDir, uniqueImageName('ai', prompt, '.png'));
-        fs.writeFileSync(filePath, buffer);
         const metadata = await sharp(buffer).metadata().catch(() => ({}));
+        const extension = metadata.format === 'jpeg'
+            ? '.jpg'
+            : metadata.format === 'webp'
+                ? '.webp'
+                : metadata.format === 'avif'
+                    ? '.avif'
+                    : '.png';
+        const filePath = path.join(targetDir, uniqueImageName('ai', prompt, extension));
+        fs.writeFileSync(filePath, buffer);
+        const actualSize = metadata.width && metadata.height ? `${metadata.width}x${metadata.height}` : null;
         return {
             success: true,
             provider: 'openai',
             filePath,
             width: metadata.width || 1024,
-            height: metadata.height || 1024
+            height: metadata.height || 1024,
+            requestedSize: size || null,
+            actualSize,
+            sizeMatchesRequest: !size || !actualSize || actualSize.toLowerCase() === size.toLowerCase(),
+            endpointMode: isEdit ? 'edits' : 'generations'
         };
     } catch (error) {
         return { success: false, error: error.message };
+    }
+}
+
+function buildOpenAiVideoEndpoint(endpoint) {
+    const raw = String(endpoint || process.env.FLOW_CANVAS_VIDEO_ENDPOINT || '').trim();
+    if (!raw) return '';
+    try {
+        const url = new URL(raw);
+        let pathName = url.pathname.replace(/\/+$/, '');
+        if (!pathName || pathName === '/') {
+            pathName = '/v1/video/generations';
+        } else if (/\/v1$/i.test(pathName)) {
+            pathName += '/video/generations';
+        } else if (/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i.test(pathName)) {
+            pathName = pathName.replace(/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i, '/video/generations');
+        } else if (!/\/video\/generations$/i.test(pathName)) {
+            pathName += '/video/generations';
+        }
+        url.pathname = pathName;
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    } catch (_) {
+        return raw;
+    }
+}
+
+function buildOpenAiVideoTaskEndpoint(generationEndpoint, taskId) {
+    const url = new URL(generationEndpoint);
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/${encodeURIComponent(taskId)}`;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+}
+
+function buildOpenAiTaskEndpoint(generationEndpoint, taskId) {
+    const url = new URL(generationEndpoint);
+    const basePath = url.pathname.replace(/\/video\/generations\/?$/i, '/tasks').replace(/\/+$/, '');
+    url.pathname = `${basePath}/${encodeURIComponent(taskId)}`;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+}
+
+function describeRemoteEndpoint(value) {
+    try {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname}`;
+    } catch (_) {
+        return '\u5df2\u914d\u7f6e\u7684\u89c6\u9891\u63a5\u53e3';
+    }
+}
+
+function describeRemoteFailure(error) {
+    const detail = error?.message || String(error);
+    const knownErrors = [
+        [/ERR_CONNECTION_CLOSED/i, '\u670d\u52a1\u5668\u63d0\u524d\u5173\u95ed\u4e86\u8fde\u63a5'],
+        [/ERR_CONNECTION_RESET/i, '\u8fde\u63a5\u88ab\u670d\u52a1\u5668\u91cd\u7f6e'],
+        [/ERR_TIMED_OUT|timeout/i, '\u8fde\u63a5\u8d85\u65f6'],
+        [/ERR_NAME_NOT_RESOLVED|ENOTFOUND/i, '\u65e0\u6cd5\u89e3\u6790\u670d\u52a1\u5668\u57df\u540d'],
+        [/ERR_INTERNET_DISCONNECTED/i, '\u5f53\u524d\u7f51\u7edc\u5df2\u65ad\u5f00'],
+        [/ERR_CERT_/i, '\u670d\u52a1\u5668\u8bc1\u4e66\u6821\u9a8c\u5931\u8d25'],
+        [/fetch failed/i, '\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25']
+    ];
+    const match = knownErrors.find(([pattern]) => pattern.test(detail));
+    return match ? `${match[1]}\uff08${detail}\uff09` : detail;
+}
+
+function remoteConnectionError(stage, endpoint, error, attempts = 1) {
+    const detail = describeRemoteFailure(error);
+    const retryText = attempts > 1 ? `\uff0c\u5df2\u91cd\u8bd5 ${attempts - 1} \u6b21` : '';
+    return new Error(`${stage}\u8fde\u63a5\u5931\u8d25\uff08${describeRemoteEndpoint(endpoint)}${retryText}\uff09\uff1a${detail}`);
+}
+
+async function fetchTextWithRetry(url, options, stage, attempts = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        try {
+            const response = await net.fetch(url, options);
+            const text = await response.text();
+            return { response, text };
+        } catch (error) {
+            lastError = error;
+            if (attempt < attempts - 1) await sleep(750 * (attempt + 1));
+        }
+    }
+    throw remoteConnectionError(stage, url, lastError, attempts);
+}
+
+function collectVideoReferenceImages(sourceReferences = []) {
+    const references = sourceReferences.slice(0, 9);
+    return references.map((reference, index) => {
+        const filePath = String(reference?.filePath || '');
+        const size = fs.statSync(filePath).size;
+        if (size > 12 * 1024 * 1024) {
+            throw new Error(`\u89c6\u9891\u53c2\u8003\u56fe\u8d85\u8fc7 12 MB \u9650\u5236\uff1a${path.basename(filePath)}`);
+        }
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeType = extension === '.png'
+            ? 'image/png'
+            : extension === '.webp'
+                ? 'image/webp'
+                : 'image/jpeg';
+        const role = references.length === 1
+            ? 'first_frame'
+            : references.length === 2
+                ? (index === 0 ? 'first_frame' : 'last_frame')
+                : 'reference_image';
+        return {
+            url: `data:${mimeType};base64,${fs.readFileSync(filePath).toString('base64')}`,
+            role
+        };
+    });
+}
+
+function collectVideoReferenceVideos(videoReferences = []) {
+    return videoReferences.slice(0, 3).map(reference => {
+        const filePath = String(reference?.filePath || '');
+        const size = fs.statSync(filePath).size;
+        if (size > 128 * 1024 * 1024) {
+            throw new Error(`视频参考素材超过 128 MB 限制：${path.basename(filePath)}`);
+        }
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeType = extension === '.webm'
+            ? 'video/webm'
+            : extension === '.mov'
+                ? 'video/quicktime'
+                : 'video/mp4';
+        return `data:${mimeType};base64,${fs.readFileSync(filePath).toString('base64')}`;
+    });
+}
+
+function collectVideoReferenceAudio(audioReferences = []) {
+    return audioReferences.slice(0, 3).map(reference => {
+        const filePath = String(reference?.filePath || '');
+        const size = fs.statSync(filePath).size;
+        if (size > 32 * 1024 * 1024) {
+            throw new Error(`音频参考素材超过 32 MB 限制：${path.basename(filePath)}`);
+        }
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeTypes = {
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.aac': 'audio/aac',
+            '.flac': 'audio/flac',
+            '.ogg': 'audio/ogg'
+        };
+        const mimeType = mimeTypes[extension] || 'application/octet-stream';
+        return `data:${mimeType};base64,${fs.readFileSync(filePath).toString('base64')}`;
+    });
+}
+
+function getVideoResultUrl(payload) {
+    const first = Array.isArray(payload?.data) ? payload.data[0] : null;
+    const candidates = [
+        typeof first === 'string' ? first : first?.url,
+        payload?.content?.video_url,
+        payload?.video_url,
+        payload?.url
+    ];
+    return candidates.find(value => typeof value === 'string' && value.trim()) || '';
+}
+
+function getVideoTaskId(payload) {
+    const value = payload?.task_id || payload?.id || payload?.data?.task_id || payload?.data?.id;
+    return value == null ? '' : String(value).trim();
+}
+
+function isCompletedVideoStatus(status) {
+    return ['succeeded', 'completed', 'success'].includes(String(status || '').toLowerCase());
+}
+
+function isFailedVideoStatus(status) {
+    return ['failed', 'error', 'cancelled', 'canceled', 'rejected'].includes(String(status || '').toLowerCase());
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialResponse) {
+    const directUrl = getVideoResultUrl(initialResponse);
+    if (directUrl) return { payload: initialResponse, url: directUrl };
+    if (!taskId) throw new Error('\u89c6\u9891\u63a5\u53e3\u8fd4\u56de\u4e2d\u6ca1\u6709\u4efb\u52a1 ID \u6216\u89c6\u9891\u5730\u5740');
+
+    const taskUrls = [
+        buildOpenAiTaskEndpoint(generationEndpoint, taskId),
+        buildOpenAiVideoTaskEndpoint(generationEndpoint, taskId)
+    ].filter((value, index, values) => values.indexOf(value) === index);
+    let taskUrlIndex = 0;
+    for (let attempt = 0; attempt < 720; attempt += 1) {
+        if (attempt > 0) await sleep(5000);
+        let taskUrl = taskUrls[taskUrlIndex];
+        let { response, text } = await fetchTextWithRetry(taskUrl, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+            redirect: 'follow'
+        }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001');
+        if ([404, 405].includes(response.status) && taskUrlIndex < taskUrls.length - 1) {
+            taskUrlIndex += 1;
+            taskUrl = taskUrls[taskUrlIndex];
+            ({ response, text } = await fetchTextWithRetry(taskUrl, {
+                method: 'GET',
+                headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+                redirect: 'follow'
+            }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001'));
+        }
+        if (!response.ok) {
+            throw new Error(`\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u5931\u8d25\uff08${describeRemoteEndpoint(taskUrl)}\uff09\uff1a${response.status} ${text.slice(0, 1000)}`);
+        }
+        let payload;
+        try {
+            payload = JSON.parse(text);
+        } catch (_) {
+            throw new Error('\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u65f6\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON');
+        }
+        const url = getVideoResultUrl(payload);
+        if (url && (isCompletedVideoStatus(payload?.status) || !payload?.status)) return { payload, url };
+        if (isFailedVideoStatus(payload?.status)) {
+            const reason = payload?.error?.message || payload?.message || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
+            throw new Error(`\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff1a${reason}`);
+        }
+    }
+    throw new Error('\u89c6\u9891\u751f\u6210\u8d85\u65f6\uff1a\u7b49\u5f85 60 \u5206\u949f\u540e\u4ecd\u672a\u5b8c\u6210');
+}
+
+function videoExtensionFromUrl(url, contentType = '') {
+    const fromType = String(contentType).toLowerCase();
+    if (fromType.includes('webm')) return '.webm';
+    if (fromType.includes('quicktime')) return '.mov';
+    try {
+        const extension = path.extname(new URL(url).pathname).toLowerCase();
+        if (VIDEO_EXTENSIONS.has(extension)) return extension;
+    } catch (_) {
+        // Use the standard mp4 fallback when an upstream URL cannot be parsed.
+    }
+    return '.mp4';
+}
+
+function uniqueVideoName(prefix, prompt, ext = '.mp4') {
+    const hash = crypto.createHash('sha1').update(`${Date.now()}:${prompt}:${Math.random()}`).digest('hex').slice(0, 12);
+    return `${prefix}_${hash}${VIDEO_EXTENSIONS.has(ext) ? ext : '.mp4'}`;
+}
+
+async function downloadVideo(url, targetDir, prompt) {
+    let response;
+    let buffer;
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            response = await net.fetch(url, { method: 'GET', redirect: 'follow' });
+        } catch (error) {
+            lastError = error;
+            if (attempt < 2) await sleep(750 * (attempt + 1));
+            continue;
+        }
+        if (!response.ok) {
+            throw new Error(`\u4e0b\u8f7d\u751f\u6210\u89c6\u9891\u5931\u8d25\uff08${describeRemoteEndpoint(url)}\uff09\uff1aHTTP ${response.status}`);
+        }
+        const declaredLength = Number(response.headers.get('content-length'));
+        if (Number.isFinite(declaredLength) && declaredLength > 512 * 1024 * 1024) {
+            throw new Error('\u751f\u6210\u7684\u89c6\u9891\u8d85\u8fc7 512 MB \u4e0b\u8f7d\u9650\u5236');
+        }
+        try {
+            buffer = Buffer.from(await response.arrayBuffer());
+            break;
+        } catch (error) {
+            lastError = error;
+            if (attempt < 2) await sleep(750 * (attempt + 1));
+        }
+    }
+    if (!buffer) throw remoteConnectionError('\u4e0b\u8f7d\u751f\u6210\u89c6\u9891', url, lastError, 3);
+    if (buffer.length === 0) throw new Error('\u670d\u52a1\u5668\u8fd4\u56de\u4e86\u7a7a\u89c6\u9891\u6587\u4ef6');
+    const filePath = path.join(targetDir, uniqueVideoName('seedance', prompt, videoExtensionFromUrl(url, response.headers.get('content-type'))));
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+}
+
+async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
+    try {
+        const providerConfig = options.providerConfig || {};
+        const apiKey = String(providerConfig.apiKey || process.env.FLOW_CANVAS_VIDEO_API_KEY || '').trim();
+        const endpoint = buildOpenAiVideoEndpoint(providerConfig.endpoint || process.env.FLOW_CANVAS_VIDEO_ENDPOINT);
+        const model = String(providerConfig.model || options.model || process.env.FLOW_CANVAS_VIDEO_MODEL || 'doubao-seedance-2-0').trim();
+        if (!apiKey) return { success: false, error: '\u672a\u914d\u7f6e\u89c6\u9891 API Key' };
+        if (!endpoint) return { success: false, error: '\u672a\u914d\u7f6e\u89c6\u9891 API \u5730\u5740' };
+
+        const body = { model, prompt };
+        const resolution = String(options.resolution || '').trim();
+        const ratio = String(options.ratio || '').trim();
+        const duration = Number(options.duration);
+        if (resolution) body.resolution = resolution;
+        if (ratio) body.ratio = ratio;
+        if (Number.isInteger(duration)) body.duration = duration;
+        if (typeof options.cameraFixed === 'boolean') body.camera_fixed = options.cameraFixed;
+        if (typeof options.generateAudio === 'boolean') body.generate_audio = options.generateAudio;
+        const webSearch = options.webSearch ?? options.web_search;
+        if (typeof webSearch === 'boolean') body.web_search = webSearch;
+        if (typeof options.watermark === 'boolean') body.watermark = options.watermark;
+
+        const images = collectVideoReferenceImages(options.sourceReferences || []);
+        if (images.length > 0) body.images = images;
+        const videos = collectVideoReferenceVideos(options.videoReferences || []);
+        if (videos.length > 0) body.videos = videos;
+        const audioUrls = collectVideoReferenceAudio(options.audioReferences || []);
+        if (audioUrls.length > 0) body.audio_urls = audioUrls;
+
+        let response;
+        let text;
+        try {
+            response = await net.fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'X-Playground': '1'
+                },
+                body: JSON.stringify(body),
+                redirect: 'follow'
+            });
+            text = await response.text();
+        } catch (error) {
+            throw remoteConnectionError('\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1', endpoint, error);
+        }
+        if (!response.ok) {
+            return {
+                success: false,
+                error: `\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff08${describeRemoteEndpoint(endpoint)}\uff09\uff1aHTTP ${response.status} ${text.slice(0, 1000)}`
+            };
+        }
+
+        let initialResponse;
+        try {
+            initialResponse = JSON.parse(text);
+        } catch (_) {
+            return { success: false, error: '\u63d0\u4ea4\u89c6\u9891\u4efb\u52a1\u540e\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON' };
+        }
+        const taskId = getVideoTaskId(initialResponse);
+        if (taskId) {
+            try {
+                options.onTaskSubmitted?.({ taskId, model, initialResponse });
+            } catch (error) {
+                console.warn('[FlowCanvasBridge] Failed to persist submitted video task:', error.message);
+            }
+        }
+        const completed = await pollOpenAiVideoTask(endpoint, apiKey, taskId, initialResponse);
+        const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        return {
+            success: true,
+            provider: 'openai-video',
+            taskId,
+            url: completed.url,
+            filePath,
+            width: Number(options.width) || undefined,
+            height: Number(options.height) || undefined
+        };
+    } catch (error) {
+        return { success: false, error: error.message || String(error) };
     }
 }
 
