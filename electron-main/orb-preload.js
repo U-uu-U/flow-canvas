@@ -7,6 +7,20 @@ window.addEventListener('DOMContentLoaded', () => {
     let restoring = false;
     let dragging = false;
     let dragPointerId = null;
+    let dragDepth = 0;
+    let dropStateTimer = null;
+
+    const setDropState = (state = '') => {
+        clearTimeout(dropStateTimer);
+        button.classList.remove('drop-target', 'drop-success', 'drop-error');
+        if (state) button.classList.add(state);
+    };
+
+    const getDroppedFilePaths = (dataTransfer) => {
+        return Array.from(dataTransfer?.files || [])
+            .map(file => file?.path)
+            .filter(filePath => typeof filePath === 'string' && filePath.length > 0);
+    };
 
     const stopDragging = () => {
         if (!dragging) return;
@@ -50,6 +64,45 @@ window.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('blur', stopDragging);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'hidden') resetInteraction();
+    });
+
+    window.addEventListener('dragenter', event => {
+        event.preventDefault();
+        dragDepth += 1;
+        setDropState('drop-target');
+    });
+
+    window.addEventListener('dragover', event => {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    });
+
+    window.addEventListener('dragleave', event => {
+        event.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) setDropState();
+    });
+
+    window.addEventListener('drop', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        dragDepth = 0;
+
+        const filePaths = getDroppedFilePaths(event.dataTransfer);
+        if (filePaths.length === 0) {
+            setDropState('drop-error');
+            dropStateTimer = setTimeout(() => setDropState(), 900);
+            return;
+        }
+
+        try {
+            const result = await ipcRenderer.invoke('window:queueOrbFiles', filePaths);
+            setDropState(result?.accepted > 0 ? 'drop-success' : 'drop-error');
+        } catch (err) {
+            console.error('[Orb] Failed to queue dropped files:', err);
+            setDropState('drop-error');
+        }
+        dropStateTimer = setTimeout(() => setDropState(), 900);
     });
 
     button.addEventListener('click', async event => {

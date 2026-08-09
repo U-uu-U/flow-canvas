@@ -47,11 +47,14 @@ async function bootstrap() {
             subscribeCanvasSelection: (handler) => canvasManager?.on?.('selectionChanged', handler),
             subscribeMediaReferenceSelection: (handler) => canvasManager?.on?.('mediaReferenceSelectionChanged', handler),
             subscribeMediaReferencePickState: (handler) => canvasManager?.on?.('mediaReferencePickStateChanged', handler),
-            beginMediaReferencePick: (type, entries, maxItems) => canvasManager?.beginMediaReferencePick?.(type, entries, maxItems),
-            endMediaReferencePick: () => canvasManager?.endMediaReferencePick?.(),
+            beginMediaReferencePick: (type, entries, maxItems, allSelections) => canvasManager?.beginMediaReferencePick?.(type, entries, maxItems, allSelections),
+            endMediaReferencePick: (options) => canvasManager?.endMediaReferencePick?.(options),
             updateMediaReferencePick: (type, entries) => canvasManager?.updateMediaReferencePick?.(type, entries),
+            clearMediaReferenceSelections: () => canvasManager?.clearMediaReferenceSelections?.(),
+            beginImageGeneration: (settings) => canvasManager?.addImageGenerationPlaceholder?.(settings) || null,
+            endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
             beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,
-            endVideoGeneration: (placeholderId) => canvasManager?.removeVideoGenerationPlaceholder?.(placeholderId),
+            endVideoGeneration: (placeholderId, itemId) => canvasManager?.removeVideoGenerationPlaceholder?.(placeholderId, itemId),
             applyPlanSuggestion: (rows) => applyAgentPlanRows(rows)
         }));
 
@@ -325,6 +328,23 @@ async function bootstrap() {
         window.flowCanvas.onExternalImageDropped?.((filePath) => {
             console.log('[Main] 收到主进程拖拽图片:', filePath);
             canvasManager._addCapturedFile(filePath, null, { manualRestore: true });
+        });
+
+        window.flowCanvas.onOrbFilesDropped?.((filePaths) => {
+            const addedItems = [];
+            (Array.isArray(filePaths) ? filePaths : []).forEach(filePath => {
+                restoreRemovedFromBoard(filePath);
+                const item = canvasManager.addFile(filePath);
+                if (!item) return;
+                storeData.items.push(item);
+                addedItems.push(item);
+            });
+
+            if (addedItems.length === 0) return;
+            canvasManager.selectItems(addedItems.map(item => item.id));
+            saveStoreThrottled();
+            syncStats();
+            commitHistory('orb-file-drop');
         });
 
         if (window.flowCanvas.onMcpStoreUpdated) {

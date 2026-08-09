@@ -92,9 +92,10 @@ export class CanvasManager {
         this.layer = new Konva.Layer();
         this.stage.add(this.layer);
 
-        this.transientLayer = new Konva.Layer({ listening: false });
+        this.transientLayer = new Konva.Layer();
         this.stage.add(this.transientLayer);
-        this.videoGenerationPlaceholders = new Map();
+        this.generationPlaceholders = new Map();
+        this.pendingGenerationPlacements = new Map();
 
         this.selectionRect = new Konva.Rect({
             fill: 'rgba(58, 123, 213, 0.2)',
@@ -141,6 +142,7 @@ export class CanvasManager {
         this._activePlanReferencePick = null;
         this._planReferencePickTargetId = null;
         this._activeMediaReferencePick = null;
+        this._mediaReferenceSelections = { image: [], video: [], audio: [] };
         this._mediaReferenceHighlightIds = new Set();
         this._lastMediaReferencePointerPick = null;
         this._referenceHighlightIds = new Set();
@@ -289,14 +291,20 @@ export class CanvasManager {
         if (this.listeners[event]) this.listeners[event].forEach(cb => cb(data));
     }
 
-    beginMediaReferencePick(type, entries = [], maxItems = 1) {
+    beginMediaReferencePick(type, entries = [], maxItems = 1, allSelections = {}) {
         const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : 'image';
         if (this._activePlanReferencePick) this._cancelPlanReferencePick('', { refresh: false });
         this.endMediaReferencePick({ silent: true });
+        ['image', 'video', 'audio'].forEach(mediaType => {
+            this._mediaReferenceSelections[mediaType] = (Array.isArray(allSelections?.[mediaType]) ? allSelections[mediaType] : [])
+                .map(entry => this._normalizeMediaReferenceEntry(entry))
+                .filter(entry => entry && entry.mediaType === mediaType);
+        });
         const normalizedEntries = (Array.isArray(entries) ? entries : [])
             .map(entry => this._normalizeMediaReferenceEntry(entry))
             .filter(entry => entry && entry.mediaType === normalizedType)
             .slice(0, Math.max(1, Number(maxItems) || 1));
+        this._mediaReferenceSelections[normalizedType] = normalizedEntries;
         this._activeMediaReferencePick = {
             type: normalizedType,
             entries: normalizedEntries,
@@ -310,25 +318,42 @@ export class CanvasManager {
     }
 
     endMediaReferencePick(options = {}) {
-        if (!this._activeMediaReferencePick) return false;
-        Array.from(this._mediaReferenceHighlightIds).forEach(id => this._setItemReferenceHighlight(id, false));
-        this._mediaReferenceHighlightIds.clear();
-        const type = this._activeMediaReferencePick.type;
+        const pick = this._activeMediaReferencePick;
+        if (!pick && !options.clearHighlights) return false;
+        const type = pick?.type || null;
+        if (pick) this._mediaReferenceSelections[pick.type] = pick.entries.map(entry => ({ ...entry }));
         this._activeMediaReferencePick = null;
+        if (options.clearHighlights) {
+            this._mediaReferenceSelections = { image: [], video: [], audio: [] };
+        }
+        this._renderMediaReferencePickHighlights();
         document.body.style.cursor = 'default';
-        this.emit('mediaReferencePickStateChanged', { active: false, type });
-        if (!options.silent) this._showCanvasStatus('参考素材选择已完成');
+        if (pick) this.emit('mediaReferencePickStateChanged', { active: false, type });
+        if (pick && !options.silent) this._showCanvasStatus('参考素材选择已完成');
         return true;
     }
 
     updateMediaReferencePick(type, entries = []) {
-        if (!this._activeMediaReferencePick || this._activeMediaReferencePick.type !== type) return false;
-        this._activeMediaReferencePick.entries = (Array.isArray(entries) ? entries : [])
+        if (!['image', 'video', 'audio'].includes(type)) return false;
+        const maxItems = this._activeMediaReferencePick?.type === type
+            ? this._activeMediaReferencePick.maxItems
+            : Number.MAX_SAFE_INTEGER;
+        const normalizedEntries = (Array.isArray(entries) ? entries : [])
             .map(entry => this._normalizeMediaReferenceEntry(entry))
             .filter(entry => entry && entry.mediaType === type)
-            .slice(0, this._activeMediaReferencePick.maxItems);
+            .slice(0, maxItems);
+        this._mediaReferenceSelections[type] = normalizedEntries;
+        if (this._activeMediaReferencePick?.type === type) {
+            this._activeMediaReferencePick.entries = normalizedEntries;
+        }
         this._renderMediaReferencePickHighlights();
         return true;
+    }
+
+    clearMediaReferenceSelections() {
+        this._mediaReferenceSelections = { image: [], video: [], audio: [] };
+        if (this._activeMediaReferencePick) this._activeMediaReferencePick.entries = [];
+        this._renderMediaReferencePickHighlights();
     }
 
     _normalizeMediaReferenceEntry(entry) {
@@ -362,6 +387,7 @@ export class CanvasManager {
         } else {
             pick.entries.push(entry);
         }
+        this._mediaReferenceSelections[pick.type] = pick.entries.map(candidate => ({ ...candidate }));
         this._renderMediaReferencePickHighlights();
         this.emit('mediaReferenceSelectionChanged', {
             type: pick.type,
@@ -372,13 +398,13 @@ export class CanvasManager {
     _renderMediaReferencePickHighlights() {
         Array.from(this._mediaReferenceHighlightIds).forEach(id => this._setItemReferenceHighlight(id, false));
         this._mediaReferenceHighlightIds.clear();
-        const pick = this._activeMediaReferencePick;
-        if (!pick) return;
-        pick.entries.forEach((entry, index) => {
-            this._mediaReferenceHighlightIds.add(entry.id);
-            this._setItemReferenceHighlight(entry.id, true, {
-                mode: 'media',
-                labelText: `${{ image: '图片', video: '视频', audio: '音频' }[pick.type]} ${index + 1}`
+        Object.entries(this._mediaReferenceSelections).forEach(([type, entries]) => {
+            entries.forEach((entry, index) => {
+                this._mediaReferenceHighlightIds.add(entry.id);
+                this._setItemReferenceHighlight(entry.id, true, {
+                    mode: 'media',
+                    labelText: `${{ image: '图片', video: '视频', audio: '音频' }[type]} ${index + 1}`
+                });
             });
         });
     }
@@ -387,12 +413,16 @@ export class CanvasManager {
         return { x: this.stage.x(), y: this.stage.y(), scale: this.stage.scaleX() };
     }
 
-    addVideoGenerationPlaceholder(options = {}) {
+    addGenerationPlaceholder(options = {}) {
         const ratioMatch = String(options.ratio || '').match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+        const sizeMatch = String(options.size || '').match(/^(\d+(?:\.\d+)?)\s*[x\u00d7]\s*(\d+(?:\.\d+)?)$/i);
+        const fallbackRatio = options.kind === 'image' ? 1 : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
         const ratio = ratioMatch
             ? Number(ratioMatch[1]) / Number(ratioMatch[2])
-            : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
-        const aspect = Number.isFinite(ratio) && ratio > 0 ? ratio : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
+            : sizeMatch
+                ? Number(sizeMatch[1]) / Number(sizeMatch[2])
+                : fallbackRatio;
+        const aspect = Number.isFinite(ratio) && ratio > 0 ? ratio : fallbackRatio;
         const width = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE : VIDEO_PLACEHOLDER_LONG_EDGE * aspect);
         const height = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE / aspect : VIDEO_PLACEHOLDER_LONG_EDGE);
         const stagePos = this.stage.position();
@@ -402,8 +432,44 @@ export class CanvasManager {
         const centerY = (container.offsetHeight / 2 - stagePos.y) / scale;
         const x = centerX - width / 2;
         const y = centerY - height / 2;
-        const id = `video-placeholder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        const group = new Konva.Group({ x, y, listening: false, name: 'videoGenerationPlaceholder' });
+        const kind = options.kind === 'image' ? 'image' : 'video';
+        const id = `${kind}-placeholder-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const group = new Konva.Group({
+            x,
+            y,
+            listening: true,
+            draggable: true,
+            name: `${kind}GenerationPlaceholder`
+        });
+        const placement = { id, x, y, width, height };
+
+        group.on('mouseenter', () => {
+            document.body.style.cursor = 'grab';
+        });
+        group.on('mouseleave', () => {
+            if (!group.isDragging()) document.body.style.cursor = 'default';
+        });
+        group.on('dragstart', (event) => {
+            event.cancelBubble = true;
+            if (event.evt && event.evt.button !== 0) {
+                group.stopDrag();
+                return;
+            }
+            this.stage.draggable(false);
+            document.body.style.cursor = 'grabbing';
+        });
+        group.on('dragmove', (event) => {
+            event.cancelBubble = true;
+            placement.x = group.x();
+            placement.y = group.y();
+        });
+        group.on('dragend', (event) => {
+            event.cancelBubble = true;
+            placement.x = group.x();
+            placement.y = group.y();
+            this.stage.draggable(true);
+            document.body.style.cursor = 'grab';
+        });
 
         group.add(new Konva.Rect({
             width,
@@ -447,29 +513,78 @@ export class CanvasManager {
             const progress = ((frame?.time || 0) % 1500) / 1500;
             sweep.x(-sweepWidth + ((width + sweepWidth) * progress));
         }, this.transientLayer);
-        this.videoGenerationPlaceholders.set(id, { group, animation });
+        this.generationPlaceholders.set(id, { group, animation, placement });
         animation.start();
         this.transientLayer.batchDraw();
-        return { id, x, y, width, height };
+        return placement;
     }
 
-    removeVideoGenerationPlaceholder(id) {
-        const placeholder = this.videoGenerationPlaceholders.get(id);
+    addVideoGenerationPlaceholder(options = {}) {
+        return this.addGenerationPlaceholder({ ...options, kind: 'video' });
+    }
+
+    addImageGenerationPlaceholder(options = {}) {
+        return this.addGenerationPlaceholder({ ...options, kind: 'image' });
+    }
+
+    _applyGenerationPlacement(itemId, position) {
+        if (!itemId || !position) return false;
+        const item = this.items.get(itemId);
+        if (!item) {
+            this.pendingGenerationPlacements.set(itemId, { x: position.x, y: position.y });
+            return false;
+        }
+
+        item.group.position({ x: position.x, y: position.y });
+        item.data.x = position.x;
+        item.data.y = position.y;
+        this.pendingGenerationPlacements.delete(itemId);
+        this.layer.batchDraw();
+        setTimeout(() => this.emit('change'), 0);
+        return true;
+    }
+
+    removeGenerationPlaceholder(id, itemId = null) {
+        const placeholder = this.generationPlaceholders.get(id);
         if (!placeholder) return false;
+        const position = {
+            x: placeholder.group?.x() ?? placeholder.placement?.x,
+            y: placeholder.group?.y() ?? placeholder.placement?.y
+        };
+        if (itemId && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+            this._applyGenerationPlacement(itemId, position);
+        }
         placeholder.animation?.stop();
         placeholder.group?.destroy();
-        this.videoGenerationPlaceholders.delete(id);
+        this.generationPlaceholders.delete(id);
+        document.body.style.cursor = 'default';
+        this.stage.draggable(true);
         this.transientLayer.batchDraw();
         return true;
     }
 
-    clearVideoGenerationPlaceholders() {
-        this.videoGenerationPlaceholders.forEach(({ group, animation }) => {
+    removeVideoGenerationPlaceholder(id, itemId = null) {
+        return this.removeGenerationPlaceholder(id, itemId);
+    }
+
+    removeImageGenerationPlaceholder(id, itemId = null) {
+        return this.removeGenerationPlaceholder(id, itemId);
+    }
+
+    clearGenerationPlaceholders() {
+        this.generationPlaceholders.forEach(({ group, animation }) => {
             animation?.stop();
             group?.destroy();
         });
-        this.videoGenerationPlaceholders.clear();
+        this.generationPlaceholders.clear();
+        this.pendingGenerationPlacements.clear();
+        this.stage.draggable(true);
+        document.body.style.cursor = 'default';
         this.transientLayer.batchDraw();
+    }
+
+    clearVideoGenerationPlaceholders() {
+        this.clearGenerationPlaceholders();
     }
 
     _getRelativePointerPos() {
@@ -1373,6 +1488,21 @@ export class CanvasManager {
         this.emit('selectionChanged', this.getSelectedCanvasEntries());
     }
 
+    selectItems(ids = []) {
+        const previousSelection = new Set(this.selectedItems);
+        const hadSelectedConnection = Boolean(this._selectedPlanConnection);
+        this.selectedItems.clear();
+        this._selectedPlanConnection = null;
+        if (hadSelectedConnection) this._clearPlanConnectionFocusState();
+
+        ids.forEach(id => {
+            if (this.items.has(id) || this.plans.has(id)) this.selectedItems.add(id);
+        });
+
+        this._refreshSelectionVisualState(previousSelection, hadSelectedConnection);
+        this.emit('selectionChanged', this.getSelectedCanvasEntries());
+    }
+
     clearSelection(options = {}) {
         const previousSelection = new Set(this.selectedItems);
         const hadSelectedConnection = Boolean(this._selectedPlanConnection);
@@ -1594,7 +1724,7 @@ export class CanvasManager {
         return 'other';
     }
 
-    _createFallbackGroup(fileType, width = DOC_DEFAULT_SIZE, height = DOC_DEFAULT_SIZE) {
+    _createFallbackGroup(fileType, width = DOC_DEFAULT_SIZE, height = DOC_DEFAULT_SIZE, filePath = '') {
         const group = new Konva.Group({
             name: 'fallbackIcon',
             width,
@@ -1612,17 +1742,37 @@ export class CanvasManager {
             perfectDrawEnabled: false
         }));
 
-        group.add(this._createFallbackGlyph(fileType, width, height));
+        const documentTitle = fileType === 'document' ? this._fileNameFromPath(filePath) : '';
+        group.add(this._createFallbackGlyph(fileType, width, height, documentTitle ? 46 : 0));
+        if (documentTitle) {
+            group.add(new Konva.Text({
+                name: 'fallbackTitle',
+                x: 10,
+                y: Math.max(8, height - 44),
+                width: Math.max(1, width - 20),
+                height: 34,
+                text: documentTitle,
+                fill: '#d8dbe3',
+                fontSize: 11,
+                lineHeight: 1.25,
+                align: 'center',
+                verticalAlign: 'middle',
+                wrap: 'char',
+                ellipsis: true,
+                listening: false
+            }));
+        }
         return group;
     }
 
     _markFallbackLoadError(item, message = '加载失败') {
         if (!item?.group) return;
+        item.loadErrorMessage = String(message || '加载失败');
         if (!item.group.findOne('.fallbackIcon')) {
             const fileType = this._getFileType(item.data.filePath);
             const w = item.data.width || DOC_DEFAULT_SIZE;
             const h = item.data.height || DOC_DEFAULT_SIZE;
-            item.group.add(this._createFallbackGroup(fileType, w, h));
+            item.group.add(this._createFallbackGroup(fileType, w, h, item.data.filePath));
         }
 
         const fallback = item.group.findOne('.fallbackIcon');
@@ -1637,7 +1787,7 @@ export class CanvasManager {
         const badgeGroup = new Konva.Group({
             name: 'fallbackErrorBadge',
             x: Math.max(8, width - badgeWidth - 8),
-            y: Math.max(8, height - 27),
+            y: fallback.findOne('.fallbackTitle') ? 8 : Math.max(8, height - 27),
             listening: true
         });
 
@@ -1684,11 +1834,11 @@ export class CanvasManager {
         fallback.add(badgeGroup);
     }
 
-    _createFallbackGlyph(fileType, width, height) {
+    _createFallbackGlyph(fileType, width, height, reservedBottom = 0) {
         const size = Math.max(34, Math.min(58, Math.min(width, height) * 0.42));
         const scale = size / 24;
         const x = (width - size) / 2;
-        const y = (height - size) / 2;
+        const y = Math.max(8, (height - reservedBottom - size) / 2);
         const stroke = '#7d8492';
         const accent = '#a0a8b8';
 
@@ -1752,7 +1902,7 @@ export class CanvasManager {
         });
 
         // 默认占位块（在图片未加载完成前或非图片文件时显示）
-        group.add(this._createFallbackGroup(fileType));
+        group.add(this._createFallbackGroup(fileType, DOC_DEFAULT_SIZE, DOC_DEFAULT_SIZE, data.filePath));
 
         group.on('mouseenter', () => {
             const item = this.items.get(data.id);
@@ -1770,7 +1920,13 @@ export class CanvasManager {
             }
             document.body.style.cursor = 'pointer';
             if (item?.loadError) {
-                this._showCanvasStatus(`素材加载失败：${this._fileNameFromPath(data.filePath)}，文件可能已移动或删除`, 3600);
+                const errorLabel = item.loadErrorMessage || '加载失败';
+                const guidance = errorLabel === '文件失联'
+                    ? '文件已移动或删除，点击错误标记可手动重接'
+                    : errorLabel === '无法解码'
+                        ? '文件仍在磁盘，但当前视频编码或容器无法读取，可重接为兼容文件'
+                        : '点击错误标记可手动重接';
+                this._showCanvasStatus(`${errorLabel}：${this._fileNameFromPath(data.filePath)}，${guidance}`, 4600);
             }
             if (this._countPlanReferencesToItem(data.id, data.filePath) > 0) {
                 this._setHoveredReferenceItem(data.id, data.filePath);
@@ -1881,6 +2037,9 @@ export class CanvasManager {
             videoAnimation: null,
             autoPlayVideo: false
         });
+
+        const pendingPlacement = this.pendingGenerationPlacements.get(data.id);
+        if (pendingPlacement) this._applyGenerationPlacement(data.id, pendingPlacement);
 
         return group;
     }
@@ -5245,7 +5404,7 @@ export class CanvasManager {
             const fileType = this._getFileType(item.data.filePath);
             const w = item.data.width || DOC_DEFAULT_SIZE;
             const h = item.data.height || DOC_DEFAULT_SIZE;
-            item.group.add(this._createFallbackGroup(fileType, w, h));
+            item.group.add(this._createFallbackGroup(fileType, w, h, item.data.filePath));
         }
 
         item.isThumbnail = false;
@@ -5264,11 +5423,12 @@ export class CanvasManager {
         item.loading = false;
         item.loaded = true;
         item.loadError = false;
+        item.loadErrorMessage = '';
         this._completeContentLoad(item);
         return true;
     }
 
-    _failLoad(item, token) {
+    _failLoad(item, token, message = '加载失败') {
         if (!this._isLoadCurrent(item, token)) {
             this._completeContentLoad(item);
             return false;
@@ -5276,10 +5436,38 @@ export class CanvasManager {
         item.loading = false;
         item.loaded = false;
         item.loadError = true;
-        this._markFallbackLoadError(item);
+        this._markFallbackLoadError(item, message);
         this._completeContentLoad(item);
         item.group.getLayer()?.batchDraw();
         return true;
+    }
+
+    async _handleVideoLoadError(item, token, video, label = '视频') {
+        if (video?.__flowCanvasHandlingError) return;
+        if (video) video.__flowCanvasHandlingError = true;
+        const mediaErrorCode = video?.error?.code || 0;
+        const filePath = item?.data?.filePath || '';
+        this._disposeVideoElement(video);
+        if (item.videoElement === video) item.videoElement = null;
+
+        let fileExists = null;
+        try {
+            const inspection = await window.flowCanvas?.file?.inspect?.(filePath);
+            fileExists = inspection?.exists === true && inspection?.isFile !== false;
+        } catch (_) {
+            fileExists = null;
+        }
+        if (!this._isLoadCurrent(item, token)) {
+            this._completeContentLoad(item);
+            return;
+        }
+
+        const badge = fileExists === false ? '文件失联' : fileExists === true ? '无法解码' : '加载失败';
+        this._failLoad(item, token, badge);
+        console.error(`[Canvas] ${label}加载失败:`, filePath, {
+            mediaErrorCode,
+            fileExists
+        });
     }
 
     _disposeVideoElement(video) {
@@ -5418,10 +5606,7 @@ export class CanvasManager {
         video.addEventListener('loadeddata', captureFrame);
         video.addEventListener('seeked', captureFrame);
         video.addEventListener('error', () => {
-            this._disposeVideoElement(video);
-            if (item.videoElement === video) item.videoElement = null;
-            this._failLoad(item, token);
-            console.error('[Canvas] 视频封面加载失败:', data.filePath);
+            this._handleVideoLoadError(item, token, video, '视频封面');
         });
     }
 
@@ -5732,10 +5917,7 @@ export class CanvasManager {
         });
 
         video.addEventListener('error', () => {
-            this._disposeVideoElement(video);
-            if (item.videoElement === video) item.videoElement = null;
-            this._failLoad(item, token);
-            console.error('[Canvas] 视频加载失败:', data.filePath);
+            this._handleVideoLoadError(item, token, video);
         });
     }
 

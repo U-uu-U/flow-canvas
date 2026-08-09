@@ -38,6 +38,22 @@ const VIDEO_MODEL_PROFILES = [
         defaultDuration: 5
     },
     {
+        match: /minimax[^a-z0-9]*h3/i,
+        label: 'MiniMax H3',
+        ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+        resolutions: ['2k'],
+        durations: Array.from({ length: 11 }, (_, index) => index + 5),
+        durationControl: 'slider',
+        supportsWebSearch: false,
+        supportsCameraFixed: false,
+        supportsGeneratedAudio: false,
+        supportsWatermark: false,
+        referenceLimits: { image: 5, video: 0, audio: 1 },
+        defaultRatio: '16:9',
+        defaultResolution: '2k',
+        defaultDuration: 5
+    },
+    {
         match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
         label: 'DashScope',
         ratios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
@@ -104,6 +120,7 @@ const RAVENHASH_IMAGE_SIZES = [
 
 const VIDEO_REFERENCE_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
 const VIDEO_REFERENCE_LABELS = Object.freeze({ image: '图片', video: '视频', audio: '音频' });
+const VIDEO_REFERENCE_LARGE_TOTAL_BYTES = 10 * 1024 * 1024;
 const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
 const GENERATION_TASK_LIMIT = 100;
 const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
@@ -187,13 +204,6 @@ export class AgentSidebar {
         this.videoWebSearchField = document.getElementById('videoWebSearchField');
         this.videoWebSearch = document.getElementById('videoWebSearch');
         this.videoWatermark = document.getElementById('videoWatermark');
-        this.videoSourceCount = document.getElementById('videoSourceCount');
-        this.videoImageSourceCount = document.getElementById('videoImageSourceCount');
-        this.videoVideoSourceCount = document.getElementById('videoVideoSourceCount');
-        this.videoAudioSourceCount = document.getElementById('videoAudioSourceCount');
-        this.videoImageSourceStrip = document.getElementById('videoImageSourceStrip');
-        this.videoVideoSourceStrip = document.getElementById('videoVideoSourceStrip');
-        this.videoAudioSourceStrip = document.getElementById('videoAudioSourceStrip');
         this.videoAddImageBtn = document.getElementById('videoAddImageBtn');
         this.videoAddVideoBtn = document.getElementById('videoAddVideoBtn');
         this.videoAddAudioBtn = document.getElementById('videoAddAudioBtn');
@@ -303,6 +313,11 @@ export class AgentSidebar {
         this.taskHistoryBtn?.addEventListener('click', () => this._setTaskHistoryOpen(!this.taskHistoryOpen));
         document.getElementById('agentTaskHistoryClose')?.addEventListener('click', () => this._setTaskHistoryOpen(false));
         this.taskHistoryList?.addEventListener('click', (event) => {
+            const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
+            if (copyPromptButton) {
+                this._copyGenerationTaskPrompt(copyPromptButton.dataset.copyTaskPrompt, copyPromptButton);
+                return;
+            }
             const retryButton = event.target.closest('[data-retry-task]');
             if (retryButton) this._retryGenerationTask(retryButton.dataset.retryTask);
         });
@@ -445,7 +460,7 @@ export class AgentSidebar {
         const nextMode = ['settings', 'image', 'video', 'review'].includes(mode) ? mode : 'review';
         const body = document.body;
         if (this.currentMode === 'video' && nextMode !== 'video') {
-            this.options.endMediaReferencePick?.();
+            this.options.endMediaReferencePick?.({ clearHighlights: true });
         }
         this.currentMode = nextMode;
         this._setTaskHistoryOpen(false);
@@ -578,42 +593,7 @@ export class AgentSidebar {
     }
 
     _renderVideoSourcePreview() {
-        if (!this.videoSourceCount) return;
-        const images = this.videoReferenceSelections.image;
-        const videos = this.videoReferenceSelections.video;
-        const audio = this.videoReferenceSelections.audio;
-        this.videoSourceCount.textContent = `${images.length + videos.length + audio.length} 个`;
-        if (this.videoImageSourceCount) this.videoImageSourceCount.textContent = `${images.length} / ${VIDEO_REFERENCE_LIMITS.image}`;
-        if (this.videoVideoSourceCount) this.videoVideoSourceCount.textContent = `${videos.length} / ${VIDEO_REFERENCE_LIMITS.video}`;
-        if (this.videoAudioSourceCount) this.videoAudioSourceCount.textContent = `${audio.length} / ${VIDEO_REFERENCE_LIMITS.audio}`;
-        this._renderVideoReferenceStrip('image', this.videoImageSourceStrip, '点击“添加图片”，再按顺序点选画布图片');
-        this._renderVideoReferenceStrip('video', this.videoVideoSourceStrip, '点击“添加视频”，再按顺序点选画布视频');
-        this._renderVideoReferenceStrip('audio', this.videoAudioSourceStrip, '点击“添加音频”，再按顺序点选画布音频');
         this._renderVideoReferencePickState();
-    }
-
-    _renderVideoReferenceStrip(type, strip, emptyText) {
-        if (!strip) return;
-        strip.innerHTML = '';
-        const entries = this.videoReferenceSelections[type] || [];
-        if (entries.length === 0) {
-            const empty = document.createElement('span');
-            empty.className = 'creation-source-empty';
-            empty.textContent = emptyText;
-            strip.appendChild(empty);
-            return;
-        }
-        entries.forEach((entry, index) => {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = `creation-source-chip ${type}`;
-            const label = String(entry.filePath || '').split(/[\\/]/).pop() || `${type} ${index + 1}`;
-            chip.innerHTML = `<b>${index + 1}</b><span></span><i aria-hidden="true">×</i>`;
-            chip.querySelector('span').textContent = label;
-            chip.title = `第 ${index + 1} 个${VIDEO_REFERENCE_LABELS[type]}：${label}；点击移除`;
-            chip.addEventListener('click', () => this._removeVideoReference(type, entry.id || entry.itemId || entry.filePath));
-            strip.appendChild(chip);
-        });
     }
 
     _toggleVideoReferencePick(type) {
@@ -621,10 +601,14 @@ export class AgentSidebar {
             this.options.endMediaReferencePick?.();
             return;
         }
+        const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const limits = this._getVideoReferenceLimits(profile);
+        if ((limits[type] || 0) <= 0) return;
         this.options.beginMediaReferencePick?.(
             type,
             this.videoReferenceSelections[type],
-            VIDEO_REFERENCE_LIMITS[type]
+            limits[type],
+            this.videoReferenceSelections
         );
     }
 
@@ -637,9 +621,7 @@ export class AgentSidebar {
 
     _clearVideoReferences() {
         this.videoReferenceSelections = { image: [], video: [], audio: [] };
-        if (this.activeVideoReferenceType) {
-            this.options.updateMediaReferencePick?.(this.activeVideoReferenceType, []);
-        }
+        this.options.clearMediaReferenceSelections?.();
         this._renderVideoSourcePreview();
     }
 
@@ -743,6 +725,7 @@ export class AgentSidebar {
             '480p': '854 \u00d7 480',
             '720p': '1280 \u00d7 720',
             '1080p': '1920 \u00d7 1080',
+            '2k': '2560 \u00d7 1440',
             '4k': '3840 \u00d7 2160'
         }[key];
         return dimensions ? `${value} (${dimensions})` : String(value);
@@ -795,6 +778,47 @@ export class AgentSidebar {
         if (!provider?.model) return null;
         const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
         return VIDEO_MODEL_PROFILES.find(profile => profile.match.test(marker)) || DEFAULT_VIDEO_MODEL_PROFILE;
+    }
+
+    _getVideoReferenceLimits(profile) {
+        return {
+            ...VIDEO_REFERENCE_LIMITS,
+            ...(profile?.referenceLimits || {})
+        };
+    }
+
+    _applyVideoModelControls(profile) {
+        const limits = this._getVideoReferenceLimits(profile);
+        if (this.activeVideoReferenceType && limits[this.activeVideoReferenceType] <= 0) {
+            this.options.endMediaReferencePick?.();
+        }
+        const referenceButtons = {
+            image: this.videoAddImageBtn,
+            video: this.videoAddVideoBtn,
+            audio: this.videoAddAudioBtn
+        };
+        Object.entries(referenceButtons).forEach(([type, button]) => {
+            if (button) button.hidden = limits[type] <= 0;
+            const entries = this.videoReferenceSelections[type] || [];
+            const trimmed = entries.slice(0, Math.max(0, limits[type]));
+            if (trimmed.length !== entries.length) {
+                this.videoReferenceSelections[type] = trimmed;
+                this.options.updateMediaReferencePick?.(type, trimmed);
+            }
+        });
+
+        const toggleControls = [
+            [this.videoCameraFixed, profile?.supportsCameraFixed !== false],
+            [this.videoGenerateAudio, profile?.supportsGeneratedAudio !== false],
+            [this.videoWatermark, profile?.supportsWatermark !== false]
+        ];
+        toggleControls.forEach(([input, supported]) => {
+            if (!input) return;
+            const field = input.closest('.creation-switch-control');
+            if (field) field.hidden = !supported;
+            if (!supported) input.checked = false;
+        });
+        this._renderVideoReferencePickState();
     }
 
     _replaceSelectOptions(select, values, preferredValue, formatter) {
@@ -940,6 +964,7 @@ export class AgentSidebar {
         const resolutions = profile.resolutions || [];
         const durations = profile.durations || [];
         const ratios = profile.ratios || [];
+        this._applyVideoModelControls(profile);
         this._renderVideoRatios(profile);
         this._replaceSelectOptions(
             this.videoResolutionSelect,
@@ -956,7 +981,7 @@ export class AgentSidebar {
             if (!profile.supportsWebSearch) {
                 this.videoWebSearch.checked = false;
             } else if (this.videoWebSearch.dataset.modelKey !== webSearchModelKey) {
-                this.videoWebSearch.checked = true;
+                this.videoWebSearch.checked = false;
             }
             this.videoWebSearch.dataset.modelKey = webSearchModelKey;
         }
@@ -967,6 +992,12 @@ export class AgentSidebar {
         element.className = 'creation-workspace-message';
         if (type) element.classList.add(type);
         element.textContent = message || '';
+    }
+
+    _setImageWorkspaceStatus(status, label) {
+        if (!this.imageWorkspaceStatus) return;
+        this.imageWorkspaceStatus.dataset.status = status || 'idle';
+        this.imageWorkspaceStatus.textContent = label || '待机';
     }
 
     _loadGenerationTasks() {
@@ -1033,13 +1064,28 @@ export class AgentSidebar {
         const task = this.generationTasks.find(item => item.id === clientTaskId)
             || this.generationTasks.find(item => item.taskId === remoteTaskId);
         if (!task) return;
+        const syncStage = event.recovering === true
+            ? 'recovering'
+            : event.recovered === true
+                ? null
+                : task.params?.syncStage || null;
         this._updateGenerationTask(task.id, {
             taskId: remoteTaskId,
             params: {
                 ...(task.params || {}),
+                syncStage,
                 targetDir: event.targetDir || task.params?.targetDir || null
             }
         });
+        if (event.recovering === true) {
+            this._setWorkspaceMessage(
+                this.videoGenerateMessage,
+                '',
+                '\u670d\u52a1\u5668\u5df2\u63a5\u6536\u4efb\u52a1\uff0c\u6b63\u5728\u6062\u590d\u4efb\u52a1\u8fde\u63a5...'
+            );
+        } else if (event.recovered === true) {
+            this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u4efb\u52a1\u8fde\u63a5\u5df2\u6062\u590d\uff0c\u6b63\u5728\u751f\u6210...');
+        }
     }
 
     async _pollBrowserSyncEvents() {
@@ -1274,12 +1320,14 @@ export class AgentSidebar {
                 ? '待下载'
                 : status === 'running' && task.params?.syncStage === 'downloading'
                     ? '下载中'
-                    : statusLabels[status];
+                    : status === 'running' && task.params?.syncStage === 'recovering'
+                        ? '\u6062\u590d\u8fde\u63a5\u4e2d'
+                        : statusLabels[status];
             const sourceCount = (Array.isArray(task.sourcePaths) ? task.sourcePaths.length : 0)
                 + (task.params?.videoSourcePaths?.length || 0)
                 + (task.params?.audioSourcePaths?.length || 0);
             const canRetry = status === 'failed' || status === 'disconnected';
-            const retryLabel = status === 'disconnected' ? '重新传输' : '重试';
+            const retryLabel = status === 'disconnected' ? '重新连接' : '重试';
             const errorCopy = status === 'disconnected'
                 ? '与生成服务断开，任务参数已保留。'
                 : task.error;
@@ -1290,7 +1338,14 @@ export class AgentSidebar {
                         <span class="agent-task-status"><i aria-hidden="true"></i>${syncStageLabel}</span>
                         <time>${this._escapeTaskText(this._formatTaskTime(task.updatedAt || task.createdAt))}</time>
                     </div>
-                    <p class="agent-task-prompt" title="${this._escapeTaskText(task.prompt)}">${this._escapeTaskText(task.prompt)}</p>
+                    <div class="agent-task-prompt-row">
+                        <p class="agent-task-prompt" title="${this._escapeTaskText(task.prompt)}">${this._escapeTaskText(task.prompt)}</p>
+                        <button class="agent-task-copy-prompt" type="button" data-copy-task-prompt="${this._escapeTaskText(task.id)}" title="复制提示词" aria-label="复制提示词">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                <rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path>
+                            </svg>
+                        </button>
+                    </div>
                     <div class="agent-task-meta">
                         <span title="${this._escapeTaskText(task.providerName)}">${this._escapeTaskText(task.providerName || 'API 已移除')}</span>
                         <span title="${this._escapeTaskText(task.model)}">${this._escapeTaskText(task.model || '未知模型')}</span>
@@ -1301,7 +1356,7 @@ export class AgentSidebar {
                     ${errorCopy ? `<p class="agent-task-error">${this._escapeTaskText(errorCopy)}</p>` : ''}
                     ${canRetry ? `
                         <div class="agent-task-retry-row">
-                            <span>${status === 'disconnected' ? '可使用当前 API 配置重新提交' : `第 ${task.attempts || 1} 次请求未完成`}</span>
+                            <span>${status === 'disconnected' ? (task.taskId ? '使用任务 ID 恢复，不会重复提交' : '缺少任务 ID，只能重新提交') : `第 ${task.attempts || 1} 次请求未完成`}</span>
                             <button type="button" data-retry-task="${this._escapeTaskText(task.id)}">
                                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"></path>
@@ -1313,9 +1368,42 @@ export class AgentSidebar {
         }).join('');
     }
 
+    async _copyGenerationTaskPrompt(taskId, button) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        const prompt = String(task?.prompt || '');
+        if (!prompt) return;
+
+        try {
+            const result = await window.flowCanvas?.clipboard?.writeText?.(prompt);
+            if (result && result.success === false) throw new Error(result.error || '复制失败');
+            if (!window.flowCanvas?.clipboard?.writeText) await navigator.clipboard.writeText(prompt);
+            button.classList.remove('copy-failed');
+            button.classList.add('copied');
+            button.title = '已复制';
+            button.setAttribute('aria-label', '提示词已复制');
+        } catch (error) {
+            console.warn('[Agent] 复制任务提示词失败', error);
+            button.classList.remove('copied');
+            button.classList.add('copy-failed');
+            button.title = '复制失败';
+            button.setAttribute('aria-label', '提示词复制失败');
+        }
+
+        setTimeout(() => {
+            if (!button.isConnected) return;
+            button.classList.remove('copied', 'copy-failed');
+            button.title = '复制提示词';
+            button.setAttribute('aria-label', '复制提示词');
+        }, 1400);
+    }
+
     async _retryGenerationTask(taskId) {
         const task = this.generationTasks.find(item => item.id === taskId);
         if (!task || !['failed', 'disconnected'].includes(task.status)) return;
+        const shouldResumeVideo = task.kind === 'video'
+            && task.status === 'disconnected'
+            && Boolean(task.taskId)
+            && Boolean(window.flowCanvas?.mcp?.resumeVideo);
         const sourceProviderId = String(task.providerId || '').split('::model:')[0];
         const currentProvider = this.providers.find(item => item.id === sourceProviderId);
         const provider = currentProvider
@@ -1340,9 +1428,10 @@ export class AgentSidebar {
             attempts: (task.attempts || 1) + 1
         });
         let placeholder = null;
+        let result = null;
         try {
-            let result;
             if (task.kind === 'image') {
+                placeholder = this.options.beginImageGeneration?.({ size: task.params?.size }) || null;
                 if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
                 result = await window.flowCanvas.mcp.generateImage({
                     provider: 'openai',
@@ -1352,12 +1441,25 @@ export class AgentSidebar {
                     quality: 'auto',
                     responseFormat: 'url',
                     sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
+                    x: placeholder?.x,
+                    y: placeholder?.y,
                     addToCanvas: true
                 });
             } else {
-                if (!window.flowCanvas?.mcp?.generateVideo) throw new Error('本地视频接口不可用');
+                if (!window.flowCanvas?.mcp?.generateVideo && !shouldResumeVideo) throw new Error('本地视频接口不可用');
                 placeholder = this.options.beginVideoGeneration?.({ ratio: task.params?.ratio || '16:9' }) || null;
-                result = await window.flowCanvas.mcp.generateVideo({
+                result = shouldResumeVideo
+                    ? await window.flowCanvas.mcp.resumeVideo({
+                        providerConfig: provider,
+                        clientTaskId: task.id,
+                        taskId: task.taskId,
+                        prompt: task.prompt,
+                        targetDir: task.params?.targetDir || undefined,
+                        x: placeholder?.x,
+                        y: placeholder?.y,
+                        addToCanvas: true
+                    })
+                    : await window.flowCanvas.mcp.generateVideo({
                     provider: 'openai-video',
                     providerConfig: provider,
                     clientTaskId: task.id,
@@ -1372,6 +1474,7 @@ export class AgentSidebar {
                     generateAudio: task.params?.generateAudio,
                     webSearch: task.params?.webSearch,
                     watermark: task.params?.watermark,
+                    compressReferenceImages: task.params?.compressReferenceImages === true,
                     x: placeholder?.x,
                     y: placeholder?.y,
                     addToCanvas: true
@@ -1387,11 +1490,102 @@ export class AgentSidebar {
         } catch (error) {
             this._recordGenerationError(task.id, error);
         } finally {
-            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+            if (placeholder?.id) {
+                if (task.kind === 'image') this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
+                else this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
+            }
         }
     }
 
+    async _inspectLargeVideoReferenceImages(references) {
+        if (!window.flowCanvas?.file?.inspect || references.length === 0) return null;
+        const entries = (await Promise.all(references.map(async reference => {
+            try {
+                const inspection = await window.flowCanvas.file.inspect(reference.filePath);
+                if (!inspection?.exists || !inspection?.isFile || !Number.isFinite(inspection.size)) return null;
+                return {
+                    filePath: reference.filePath,
+                    name: String(reference.filePath || '').split(/[\\/]/).pop() || '\u672a\u547d\u540d\u56fe\u7247',
+                    size: inspection.size
+                };
+            } catch (_) {
+                return null;
+            }
+        }))).filter(Boolean);
+        const totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+        if (totalBytes <= VIDEO_REFERENCE_LARGE_TOTAL_BYTES) return null;
+        return {
+            entries,
+            totalBytes,
+            encodedBytes: Math.ceil(totalBytes * 4 / 3)
+        };
+    }
+
+    _formatFileSize(bytes) {
+        const value = Number(bytes) || 0;
+        if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+        return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    _showVideoReferenceCompressionDialog(summary) {
+        return new Promise(resolve => {
+            document.querySelector('.video-compression-dialog-overlay')?.remove();
+            const overlay = document.createElement('div');
+            overlay.className = 'video-compression-dialog-overlay';
+            overlay.innerHTML = `
+                <div class="video-compression-dialog" role="dialog" aria-modal="true" aria-labelledby="videoCompressionDialogTitle">
+                    <div class="video-compression-dialog-header">
+                        <div>
+                            <h2 id="videoCompressionDialogTitle">\u53c2\u8003\u56fe\u8f83\u5927</h2>
+                            <p>\u4e0a\u4f20\u7f16\u7801\u540e\u7ea6 ${this._formatFileSize(summary.encodedBytes)}\uff0c\u53ef\u80fd\u88ab API \u7f51\u5173\u62d2\u7edd\u3002</p>
+                        </div>
+                        <button class="video-compression-dialog-close" type="button" aria-label="\u5173\u95ed">\u00d7</button>
+                    </div>
+                    <div class="video-compression-file-list"></div>
+                    <p class="video-compression-dialog-note">\u538b\u7f29\u53ea\u7528\u4e8e\u672c\u6b21\u63d0\u4ea4\uff0c\u4e0d\u4f1a\u4fee\u6539\u78c1\u76d8\u539f\u56fe\u6216\u753b\u677f\u7d20\u6750\u3002</p>
+                    <div class="video-compression-dialog-actions">
+                        <button class="video-compression-cancel" type="button">\u53d6\u6d88</button>
+                        <button class="video-compression-original" type="button">\u4f7f\u7528\u539f\u56fe</button>
+                        <button class="video-compression-confirm" type="button">\u538b\u7f29\u540e\u63d0\u4ea4</button>
+                    </div>
+                </div>
+            `;
+            const list = overlay.querySelector('.video-compression-file-list');
+            summary.entries.forEach(entry => {
+                const row = document.createElement('div');
+                row.className = 'video-compression-file-row';
+                const name = document.createElement('span');
+                name.textContent = entry.name;
+                name.title = entry.filePath;
+                const size = document.createElement('strong');
+                size.textContent = this._formatFileSize(entry.size);
+                row.append(name, size);
+                list.appendChild(row);
+            });
+
+            const finish = choice => {
+                document.removeEventListener('keydown', onKeyDown);
+                overlay.remove();
+                resolve(choice);
+            };
+            const onKeyDown = event => {
+                if (event.key === 'Escape') finish('cancel');
+            };
+            overlay.querySelector('.video-compression-dialog-close')?.addEventListener('click', () => finish('cancel'));
+            overlay.querySelector('.video-compression-cancel')?.addEventListener('click', () => finish('cancel'));
+            overlay.querySelector('.video-compression-original')?.addEventListener('click', () => finish('original'));
+            overlay.querySelector('.video-compression-confirm')?.addEventListener('click', () => finish('compress'));
+            overlay.addEventListener('click', event => {
+                if (event.target === overlay) finish('cancel');
+            });
+            document.addEventListener('keydown', onKeyDown);
+            document.body.appendChild(overlay);
+            overlay.querySelector('.video-compression-confirm')?.focus();
+        });
+    }
+
     async _generateVideoFromWorkspace() {
+        if (this.videoGenerateBtn?.disabled) return;
         const provider = this._getVideoProvider();
         const prompt = this.videoPromptInput?.value?.trim() || '';
         if (!prompt) {
@@ -1419,6 +1613,17 @@ export class AgentSidebar {
             itemId: entry.itemId || entry.id,
             filePath: entry.filePath
         }));
+        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
+        let compressionChoice = 'original';
+        const compressionSummary = await this._inspectLargeVideoReferenceImages(imageReferences);
+        if (compressionSummary) {
+            compressionChoice = await this._showVideoReferenceCompressionDialog(compressionSummary);
+            if (compressionChoice === 'cancel') {
+                if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
+                this._setWorkspaceMessage(this.videoGenerateMessage, '', '');
+                return;
+            }
+        }
         const durationValue = this.videoDurationSelect?.value;
         const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
         const ratio = this.videoRatioSelect?.value || '16:9';
@@ -1430,6 +1635,7 @@ export class AgentSidebar {
             generateAudio: Boolean(this.videoGenerateAudio?.checked),
             webSearch: profile.supportsWebSearch ? Boolean(this.videoWebSearch?.checked) : null,
             watermark: Boolean(this.videoWatermark?.checked),
+            compressReferenceImages: compressionChoice === 'compress',
             videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
             audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
         };
@@ -1444,9 +1650,10 @@ export class AgentSidebar {
         if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
         this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
         const placeholder = this.options.beginVideoGeneration?.({ ratio }) || null;
+        let result = null;
 
         try {
-            const result = await window.flowCanvas.mcp.generateVideo({
+            result = await window.flowCanvas.mcp.generateVideo({
                 provider: 'openai-video',
                 providerConfig: provider,
                 clientTaskId: generationTask.id,
@@ -1461,6 +1668,7 @@ export class AgentSidebar {
                 generateAudio: videoParams.generateAudio,
                 webSearch: videoParams.webSearch ?? undefined,
                 watermark: videoParams.watermark,
+                compressReferenceImages: videoParams.compressReferenceImages,
                 x: placeholder?.x,
                 y: placeholder?.y,
                 addToCanvas: true
@@ -1483,7 +1691,7 @@ export class AgentSidebar {
             if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u5931\u8d25';
             this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
         } finally {
-            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
             if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
         }
     }
@@ -1508,11 +1716,13 @@ export class AgentSidebar {
         const sourcePaths = this._selectedImagePaths();
         const generationTask = this._createGenerationTask('image', provider, prompt, { size: size || null }, sourcePaths);
         if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = true;
-        if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
+        this._setImageWorkspaceStatus('running', '\u751f\u6210\u4e2d');
         this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
+        const placeholder = this.options.beginImageGeneration?.({ size }) || null;
+        let result = null;
 
         try {
-            const result = await window.flowCanvas.mcp.generateImage({
+            result = await window.flowCanvas.mcp.generateImage({
                 provider: 'openai',
                 providerConfig: provider,
                 prompt,
@@ -1520,6 +1730,8 @@ export class AgentSidebar {
                 quality: 'auto',
                 responseFormat: 'url',
                 sourceReferences: sourcePaths.map(filePath => ({ filePath })),
+                x: placeholder?.x,
+                y: placeholder?.y,
                 addToCanvas: true
             });
             if (result?.success === false) throw new Error(result.error || '\u56fe\u7247\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
@@ -1529,7 +1741,7 @@ export class AgentSidebar {
                 filePath: result?.filePath || null,
                 taskId: result?.taskId || null
             });
-            if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u5df2\u5b8c\u6210';
+            this._setImageWorkspaceStatus('success', '\u5df2\u5b8c\u6210');
             const sizeMessage = result?.actualSize
                 ? `\uff0c\u5b9e\u9645\u5c3a\u5bf8 ${result.actualSize}${result.sizeMatchesRequest === false ? `\uff08\u8bf7\u6c42 ${result.requestedSize}\uff09` : ''}`
                 : '';
@@ -1540,9 +1752,10 @@ export class AgentSidebar {
             );
         } catch (error) {
             this._recordGenerationError(generationTask.id, error);
-            if (this.imageWorkspaceStatus) this.imageWorkspaceStatus.textContent = '\u5931\u8d25';
+            this._setImageWorkspaceStatus('failed', '\u5931\u8d25');
             this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
         } finally {
+            if (placeholder?.id) this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
             if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = false;
         }
     }
@@ -1607,7 +1820,7 @@ export class AgentSidebar {
 
     _isVideoProvider(provider) {
         const marker = `${provider?.model || ''} ${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        return /(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker);
+        return /(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|minimax[^a-z0-9]*h3|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker);
     }
 
     _findProvider(id) {
@@ -2882,8 +3095,9 @@ export class AgentSidebar {
         const selectedPaths = this.options.getSelectedFilePaths?.() || [];
         const profile = this._getVideoModelProfile(videoProvider) || DEFAULT_VIDEO_MODEL_PROFILE;
         const placeholder = this.options.beginVideoGeneration?.({ ratio: '16:9' }) || null;
+        let result = null;
         try {
-            const result = await window.flowCanvas.mcp.generateVideo({
+            result = await window.flowCanvas.mcp.generateVideo({
                 provider: 'openai-video',
                 providerConfig: videoProvider,
                 prompt,
@@ -2904,7 +3118,7 @@ export class AgentSidebar {
                 result?.targetDirFallback ? '\u4fdd\u5b58\u76ee\u5f55\u56de\u9000\uff1a' + result.targetDirFallback : ''
             ].filter(Boolean).join('\n');
         } finally {
-            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id);
+            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
         }
     }
 

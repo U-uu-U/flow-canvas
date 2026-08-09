@@ -94,6 +94,33 @@
             filter: brightness(1.35);
         }
 
+        .orb.drop-target {
+            transform: scale(1.12);
+            border-color: rgba(255, 210, 64, 0.95);
+            box-shadow:
+                0 4px 11px rgba(0, 0, 0, 0.48),
+                0 0 0 4px rgba(255, 210, 64, 0.2),
+                0 0 22px rgba(255, 210, 64, 0.78);
+        }
+
+        .orb.drop-success {
+            border-color: rgba(83, 225, 151, 0.95);
+            filter: brightness(1.28);
+            box-shadow:
+                0 4px 11px rgba(0, 0, 0, 0.48),
+                0 0 0 4px rgba(83, 225, 151, 0.2),
+                0 0 22px rgba(83, 225, 151, 0.78);
+        }
+
+        .orb.drop-error {
+            border-color: rgba(255, 102, 102, 0.96);
+            filter: brightness(1.2);
+            box-shadow:
+                0 4px 11px rgba(0, 0, 0, 0.48),
+                0 0 0 4px rgba(255, 102, 102, 0.18),
+                0 0 20px rgba(255, 102, 102, 0.72);
+        }
+
         .orb-mark {
             position: absolute;
             z-index: 2;

@@ -10,12 +10,14 @@ const Watcher = require('./watcher');
 const Thumbnailer = require('./thumbnailer');
 const FlowCanvasBridge = require('./mcp-bridge');
 const BrowserSyncService = require('./browser-sync');
+const { handleLocalResourceRequest } = require('./local-resource');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 let mainWindow = null;
 let orbWindow = null;
 let orbPosition = null;
 let orbDragTimer = null;
+const pendingOrbDropPaths = new Map();
 let isQuitting = false;
 let store = null;
 let watcher = null;
@@ -319,6 +321,12 @@ function restoreMainWindowFromOrb() {
 
     if (orbWindow && !orbWindow.isDestroyed()) {
         orbWindow.hide();
+    }
+
+    if (pendingOrbDropPaths.size > 0 && !mainWindow.webContents.isDestroyed()) {
+        const filePaths = Array.from(pendingOrbDropPaths.values());
+        pendingOrbDropPaths.clear();
+        mainWindow.webContents.send('orb-files-dropped', filePaths);
     }
     return true;
 }
@@ -805,6 +813,26 @@ ipcMain.handle('file:selectReplacement', async (_, options = {}) => {
     return { success: true, filePath: result.filePaths[0] };
 });
 
+ipcMain.handle('file:inspect', async (_, filePath) => {
+    try {
+        const stat = await fs.promises.stat(String(filePath || ''));
+        return {
+            success: true,
+            exists: true,
+            isFile: stat.isFile(),
+            size: stat.size,
+            modifiedAt: stat.mtime.toISOString()
+        };
+    } catch (error) {
+        return {
+            success: true,
+            exists: false,
+            isFile: false,
+            error: error?.code || error?.message || String(error)
+        };
+    }
+});
+
 
 // 缩略图
 ipcMain.handle('thumb:get', async (_, filePath, maxDim) => {
@@ -1093,7 +1121,34 @@ ipcMain.handle('window:getAlwaysOnTop', () => {
 });
 
 ipcMain.handle('window:collapseToOrb', () => collapseMainWindowToOrb());
-ipcMain.handle('window:restoreFromOrb', () => restoreMainWindowFromOrb());
+ipcMain.handle('window:restoreFromOrb', (event) => {
+    if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return false;
+    return restoreMainWindowFromOrb();
+});
+ipcMain.handle('window:queueOrbFiles', (event, filePaths) => {
+    if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) {
+        return { accepted: 0, rejected: Array.isArray(filePaths) ? filePaths.length : 0 };
+    }
+
+    const candidates = Array.isArray(filePaths) ? filePaths : [];
+    let accepted = 0;
+    let added = 0;
+    candidates.forEach(filePath => {
+        if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) return;
+        try {
+            if (!fs.statSync(filePath).isFile()) return;
+            const normalizedPath = path.normalize(filePath);
+            const pathKey = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
+            accepted += 1;
+            if (!pendingOrbDropPaths.has(pathKey)) added += 1;
+            pendingOrbDropPaths.set(pathKey, normalizedPath);
+        } catch (err) {
+            console.warn('[Orb] Ignoring unavailable dropped file:', filePath, err.message);
+        }
+    });
+
+    return { accepted, added, rejected: candidates.length - accepted, queued: pendingOrbDropPaths.size };
+});
 ipcMain.on('window:startOrbDrag', (event) => {
     if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return;
     startOrbDrag();
@@ -1206,6 +1261,17 @@ ipcMain.handle('mcp:video:generate', async (_, body) => {
             return { success: false, error: 'Flow Canvas bridge is not ready' };
         }
         return { success: true, ...(await flowCanvasBridge.generateVideoFromRenderer(body || {})) };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('mcp:video:resume', async (_, body) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...(await flowCanvasBridge.resumeVideoFromRenderer(body || {})) };
     } catch (err) {
         return { success: false, error: err.message };
     }
@@ -1759,14 +1825,7 @@ async function downloadImageFromUrl(url, targetDir) {
 // ── 应用生命周期 ────────────────────────────────────────
 app.whenReady().then(() => {
     // 监听本地文件加载
-    protocol.handle('local-res', (request) => {
-        const urlStr = request.url.slice('local-res://'.length);
-        const decodedPath = decodeURIComponent(urlStr);
-        // 去除可能的 query 字符串并标准化路径
-        const normalizedPath = decodedPath.split('?')[0].replace(/\\/g, '/');
-        // 使用 net.fetch 获取文件原生流返回给前端
-        return net.fetch('file:///' + normalizedPath);
-    });
+    protocol.handle('local-res', handleLocalResourceRequest);
 
     initServices();
     createWindow();

@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
 
     file: {
         selectReplacement: (options) => ipcRenderer.invoke('file:selectReplacement', options),
+        inspect: (filePath) => ipcRenderer.invoke('file:inspect', filePath),
     },
 
     // 窗口控制
@@ -76,6 +77,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
+        resumeVideo: (body) => ipcRenderer.invoke('mcp:video:resume', body),
     },
 
     browserSync: {
@@ -98,6 +100,10 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 外部拖拽图片事件（从浏览器拖图片进来时由主进程触发）
     onExternalImageDropped: (callback) => {
         ipcRenderer.on('external-image-dropped', (_, filePath) => callback(filePath));
+    },
+
+    onOrbFilesDropped: (callback) => {
+        ipcRenderer.on('orb-files-dropped', (_, filePaths) => callback(filePaths));
     },
 
     onMcpStoreUpdated: (callback) => {

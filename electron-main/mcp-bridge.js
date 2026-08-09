@@ -9,6 +9,11 @@ const { PlanService, DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg']);
+const VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
+const VIDEO_REFERENCE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+const TEMP_REFERENCE_UPLOAD_ENDPOINT = 'https://litterbox.catbox.moe/resources/internals/api.php';
+const TEMP_REFERENCE_CACHE_TTL_MS = 50 * 60 * 1000;
+const temporaryReferenceUrlCache = new Map();
 const ROUTE_TO_TOOL = {
     'GET /health': 'flow_canvas.health',
     'GET /config': 'flow_canvas.config.get',
@@ -503,12 +508,14 @@ class FlowCanvasBridge {
             sourceReferences: sourceContext.references,
             videoReferences: videoSourceContext.references,
             audioReferences: audioSourceContext.references,
-            onTaskSubmitted: ({ taskId, model }) => this.notifyTaskSubmitted?.({
+            onTaskSubmitted: ({ taskId, model, recovering, recovered }) => this.notifyTaskSubmitted?.({
                 clientTaskId: body.clientTaskId || null,
                 remoteTaskId: taskId,
                 targetDir,
                 model,
                 prompt,
+                recovering: recovering === true,
+                recovered: recovered === true,
                 createdAt: new Date().toISOString()
             })
         });
@@ -555,6 +562,60 @@ class FlowCanvasBridge {
             audioReferences: audioSourceContext.references,
             missingSourceReferences: [...sourceContext.missing, ...videoSourceContext.missing, ...audioSourceContext.missing],
             plan: body.planId ? planService.getPlan(body.planId) : null,
+            targetDir,
+            requestedTargetDir,
+            targetDirFallback: targetInfo.fallbackReason
+        };
+    }
+
+    async resumeVideoFromRenderer(body) {
+        const taskId = String(body?.taskId || '').trim();
+        if (!taskId) throw new Error('\u7f3a\u5c11\u53ef\u6062\u590d\u7684\u89c6\u9891\u4efb\u52a1 ID');
+        const prompt = String(body?.prompt || '').trim();
+        const providerConfig = body?.providerConfig || {};
+        const apiKey = String(providerConfig.apiKey || process.env.FLOW_CANVAS_VIDEO_API_KEY || '').trim();
+        const endpoint = buildOpenAiVideoEndpoint(providerConfig.endpoint || process.env.FLOW_CANVAS_VIDEO_ENDPOINT);
+        const model = String(providerConfig.model || body?.model || process.env.FLOW_CANVAS_VIDEO_MODEL || '').trim();
+        if (!apiKey) throw new Error('\u672a\u914d\u7f6e\u89c6\u9891 API Key');
+        if (!endpoint) throw new Error('\u672a\u914d\u7f6e\u89c6\u9891 API \u5730\u5740');
+
+        const { data } = this._loadWithPlanService();
+        const requestedTargetDir = body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.();
+        if (!requestedTargetDir) throw new Error('\u6ca1\u6709\u53ef\u7528\u7684\u89c6\u9891\u4fdd\u5b58\u76ee\u5f55');
+        const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
+        const targetDir = targetInfo.targetDir;
+        const completed = await pollOpenAiVideoTask(
+            endpoint,
+            apiKey,
+            taskId,
+            { id: taskId, task_id: taskId, status: 'pending', recovering: true },
+            {
+                model,
+                preferVideoTaskEndpoint: isMiniMaxH3Model(model),
+                onTaskIdResolved: (resolvedTaskId) => this.notifyTaskSubmitted?.({
+                    clientTaskId: body.clientTaskId || null,
+                    remoteTaskId: resolvedTaskId,
+                    targetDir,
+                    model,
+                    prompt,
+                    recovered: true,
+                    createdAt: new Date().toISOString()
+                })
+            }
+        );
+        const resolvedTaskId = completed.taskId || taskId;
+        const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        this.notifyTaskCompleted?.({ remoteTaskId: resolvedTaskId, filePath });
+        const item = body.addToCanvas === false
+            ? null
+            : addBoardItem(data, filePath, { x: body.x, y: body.y });
+        this._saveAndNotify(data, 'mcp:video-recovered');
+        return {
+            item,
+            filePath,
+            provider: 'openai-video',
+            taskId: resolvedTaskId,
+            video: { url: completed.url },
             targetDir,
             requestedTargetDir,
             targetDirFallback: targetInfo.fallbackReason
@@ -1056,30 +1117,76 @@ async function fetchTextWithRetry(url, options, stage, attempts = 3) {
     throw remoteConnectionError(stage, url, lastError, attempts);
 }
 
-function collectVideoReferenceImages(sourceReferences = []) {
-    const references = sourceReferences.slice(0, 9);
-    return references.map((reference, index) => {
-        const filePath = String(reference?.filePath || '');
-        const size = fs.statSync(filePath).size;
-        if (size > 12 * 1024 * 1024) {
-            throw new Error(`\u89c6\u9891\u53c2\u8003\u56fe\u8d85\u8fc7 12 MB \u9650\u5236\uff1a${path.basename(filePath)}`);
+async function compressVideoReferenceImage(filePath, targetBytes) {
+    const metadata = await sharp(filePath).metadata();
+    const outputFormat = metadata.hasAlpha ? 'webp' : 'jpeg';
+    const attempts = [
+        { maxEdge: null, quality: 90 },
+        { maxEdge: 3072, quality: 86 },
+        { maxEdge: 2048, quality: 82 },
+        { maxEdge: 1536, quality: 78 }
+    ];
+    let best = null;
+
+    for (const attempt of attempts) {
+        let pipeline = sharp(filePath).rotate();
+        if (attempt.maxEdge) {
+            pipeline = pipeline.resize({
+                width: attempt.maxEdge,
+                height: attempt.maxEdge,
+                fit: 'inside',
+                withoutEnlargement: true
+            });
         }
+        const buffer = outputFormat === 'webp'
+            ? await pipeline.webp({ quality: attempt.quality }).toBuffer()
+            : await pipeline.jpeg({ quality: attempt.quality, mozjpeg: true }).toBuffer();
+        if (!best || buffer.length < best.length) best = buffer;
+        if (buffer.length <= targetBytes) break;
+    }
+
+    return {
+        buffer: best,
+        mimeType: outputFormat === 'webp' ? 'image/webp' : 'image/jpeg'
+    };
+}
+
+async function collectVideoReferenceImages(sourceReferences = [], compressLargeImages = false, maxItems = 9) {
+    const references = sourceReferences.slice(0, maxItems);
+    const targetBytes = Math.max(
+        768 * 1024,
+        Math.min(VIDEO_REFERENCE_MAX_OUTPUT_BYTES, Math.floor(VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES / Math.max(1, references.length)))
+    );
+    return Promise.all(references.map(async (reference, index) => {
+        const filePath = String(reference?.filePath || '');
         const extension = path.extname(filePath).toLowerCase();
-        const mimeType = extension === '.png'
+        let mimeType = extension === '.png'
             ? 'image/png'
             : extension === '.webp'
                 ? 'image/webp'
                 : 'image/jpeg';
+        let buffer = await fs.promises.readFile(filePath);
+        if (compressLargeImages && buffer.length > targetBytes) {
+            const originalBytes = buffer.length;
+            const compressed = await compressVideoReferenceImage(filePath, targetBytes);
+            buffer = compressed.buffer;
+            mimeType = compressed.mimeType;
+            console.info('[FlowCanvasBridge] Compressed video reference image:', {
+                fileName: path.basename(filePath),
+                originalBytes,
+                compressedBytes: buffer.length
+            });
+        }
         const role = references.length === 1
             ? 'first_frame'
             : references.length === 2
                 ? (index === 0 ? 'first_frame' : 'last_frame')
                 : 'reference_image';
         return {
-            url: `data:${mimeType};base64,${fs.readFileSync(filePath).toString('base64')}`,
+            url: `data:${mimeType};base64,${buffer.toString('base64')}`,
             role
         };
-    });
+    }));
 }
 
 function collectVideoReferenceVideos(videoReferences = []) {
@@ -1099,12 +1206,12 @@ function collectVideoReferenceVideos(videoReferences = []) {
     });
 }
 
-function collectVideoReferenceAudio(audioReferences = []) {
-    return audioReferences.slice(0, 3).map(reference => {
+function collectVideoReferenceAudio(audioReferences = [], maxItems = 3, maxBytes = 32 * 1024 * 1024) {
+    return audioReferences.slice(0, maxItems).map(reference => {
         const filePath = String(reference?.filePath || '');
         const size = fs.statSync(filePath).size;
-        if (size > 32 * 1024 * 1024) {
-            throw new Error(`音频参考素材超过 32 MB 限制：${path.basename(filePath)}`);
+        if (size > maxBytes) {
+            throw new Error(`音频参考素材超过 ${Math.round(maxBytes / (1024 * 1024))} MB 限制：${path.basename(filePath)}`);
         }
         const extension = path.extname(filePath).toLowerCase();
         const mimeTypes = {
@@ -1119,12 +1226,97 @@ function collectVideoReferenceAudio(audioReferences = []) {
     });
 }
 
+function decodeReferenceDataUri(dataUri) {
+    const match = /^data:([^;,]+);base64,([\s\S]+)$/i.exec(String(dataUri || '').trim());
+    if (!match) throw new Error('参考素材不是有效的 Base64 数据');
+    return {
+        mimeType: match[1].toLowerCase(),
+        buffer: Buffer.from(match[2], 'base64')
+    };
+}
+
+function extensionForReferenceMimeType(mimeType) {
+    const extensions = {
+        'image/png': 'png',
+        'image/jpeg': 'jpg',
+        'image/webp': 'webp',
+        'audio/mpeg': 'mp3',
+        'audio/wav': 'wav',
+        'audio/aac': 'aac',
+        'audio/flac': 'flac',
+        'audio/ogg': 'ogg'
+    };
+    return extensions[mimeType] || 'bin';
+}
+
+function multipartField(boundary, name, value) {
+    return Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+        'utf8'
+    );
+}
+
+async function uploadTemporaryReference(dataUri, label) {
+    if (/^https?:\/\//i.test(String(dataUri || '').trim())) return String(dataUri).trim();
+
+    const { mimeType, buffer } = decodeReferenceDataUri(dataUri);
+    if (buffer.length === 0) throw new Error(`${label}内容为空`);
+    const contentHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const cached = temporaryReferenceUrlCache.get(contentHash);
+    if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+    const extension = extensionForReferenceMimeType(mimeType);
+    const fileName = `flow-canvas-${contentHash.slice(0, 16)}.${extension}`;
+    const boundary = `----FlowCanvas${crypto.randomBytes(12).toString('hex')}`;
+    const body = Buffer.concat([
+        multipartField(boundary, 'reqtype', 'fileupload'),
+        multipartField(boundary, 'time', '1h'),
+        Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="fileToUpload"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`,
+            'utf8'
+        ),
+        buffer,
+        Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
+    ]);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45_000);
+    let response;
+    let responseText;
+    try {
+        response = await net.fetch(TEMP_REFERENCE_UPLOAD_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                Accept: 'text/plain'
+            },
+            body,
+            signal: controller.signal,
+            redirect: 'follow'
+        });
+        responseText = (await response.text()).trim();
+    } catch (error) {
+        throw new Error(`${label}临时上传失败：${error.message || String(error)}`);
+    } finally {
+        clearTimeout(timeout);
+    }
+    if (!response.ok || !/^https?:\/\/\S+$/i.test(responseText)) {
+        throw new Error(`${label}临时上传失败：HTTP ${response.status} ${responseText.slice(0, 300)}`);
+    }
+
+    temporaryReferenceUrlCache.set(contentHash, {
+        url: responseText,
+        expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
+    });
+    return responseText;
+}
+
 function getVideoResultUrl(payload) {
     const first = Array.isArray(payload?.data) ? payload.data[0] : null;
     const candidates = [
         typeof first === 'string' ? first : first?.url,
         payload?.content?.video_url,
         payload?.video_url,
+        payload?.result_url,
         payload?.url
     ];
     return candidates.find(value => typeof value === 'string' && value.trim()) || '';
@@ -1133,6 +1325,19 @@ function getVideoResultUrl(payload) {
 function getVideoTaskId(payload) {
     const value = payload?.task_id || payload?.id || payload?.data?.task_id || payload?.data?.id;
     return value == null ? '' : String(value).trim();
+}
+
+function createVideoRecoveryId() {
+    return `fc_${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
+function isAmbiguousVideoSubmitError(error) {
+    return /ERR_CONNECTION_(?:CLOSED|RESET)|ERR_TIMED_OUT|socket hang up|other side closed|fetch failed/i
+        .test(error?.message || String(error));
+}
+
+function isMiniMaxH3Model(model) {
+    return /minimax[^a-z0-9]*h3/i.test(String(model || ''));
 }
 
 function isCompletedVideoStatus(status) {
@@ -1147,44 +1352,86 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialResponse) {
+async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialResponse, options = {}) {
     const directUrl = getVideoResultUrl(initialResponse);
-    if (directUrl) return { payload: initialResponse, url: directUrl };
+    if (directUrl) return { payload: initialResponse, url: directUrl, taskId };
     if (!taskId) throw new Error('\u89c6\u9891\u63a5\u53e3\u8fd4\u56de\u4e2d\u6ca1\u6709\u4efb\u52a1 ID \u6216\u89c6\u9891\u5730\u5740');
 
-    const taskUrls = [
-        buildOpenAiTaskEndpoint(generationEndpoint, taskId),
-        buildOpenAiVideoTaskEndpoint(generationEndpoint, taskId)
-    ].filter((value, index, values) => values.indexOf(value) === index);
+    let currentTaskId = String(taskId);
+    const buildTaskUrls = value => {
+        const addModelQuery = endpoint => {
+            if (!options.model) return endpoint;
+            const url = new URL(endpoint);
+            url.searchParams.set('model', options.model);
+            return url.toString();
+        };
+        const genericTaskEndpoint = addModelQuery(buildOpenAiTaskEndpoint(generationEndpoint, value));
+        const videoTaskEndpoint = addModelQuery(buildOpenAiVideoTaskEndpoint(generationEndpoint, value));
+        const candidates = options.preferVideoTaskEndpoint
+            ? [videoTaskEndpoint, genericTaskEndpoint]
+            : [genericTaskEndpoint, videoTaskEndpoint];
+        return candidates.filter((candidate, index, values) => values.indexOf(candidate) === index);
+    };
+    let taskUrls = buildTaskUrls(currentTaskId);
     let taskUrlIndex = 0;
+    let recoveryNotFoundCount = 0;
+    let consecutiveConnectionFailures = 0;
+    const isRecoveringSubmission = initialResponse?.recovering === true;
     for (let attempt = 0; attempt < 720; attempt += 1) {
         if (attempt > 0) await sleep(5000);
         let taskUrl = taskUrls[taskUrlIndex];
-        let { response, text } = await fetchTextWithRetry(taskUrl, {
-            method: 'GET',
-            headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-            redirect: 'follow'
-        }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001');
-        if ([404, 405].includes(response.status) && taskUrlIndex < taskUrls.length - 1) {
-            taskUrlIndex += 1;
-            taskUrl = taskUrls[taskUrlIndex];
+        let response;
+        let text;
+        try {
             ({ response, text } = await fetchTextWithRetry(taskUrl, {
                 method: 'GET',
                 headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
                 redirect: 'follow'
             }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001'));
+            if ([404, 405].includes(response.status) && taskUrlIndex < taskUrls.length - 1) {
+                taskUrlIndex += 1;
+                taskUrl = taskUrls[taskUrlIndex];
+                ({ response, text } = await fetchTextWithRetry(taskUrl, {
+                    method: 'GET',
+                    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+                    redirect: 'follow'
+                }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001'));
+            }
+            consecutiveConnectionFailures = 0;
+        } catch (error) {
+            consecutiveConnectionFailures += 1;
+            if (consecutiveConnectionFailures < 24) {
+                console.warn('[FlowCanvasBridge] Video status connection interrupted; polling will continue:', error.message);
+                continue;
+            }
+            throw error;
+        }
+        if ([400, 404].includes(response.status) && isRecoveringSubmission && recoveryNotFoundCount < 24) {
+            recoveryNotFoundCount += 1;
+            taskUrlIndex = 0;
+            continue;
         }
         if (!response.ok) {
             throw new Error(`\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u5931\u8d25\uff08${describeRemoteEndpoint(taskUrl)}\uff09\uff1a${response.status} ${text.slice(0, 1000)}`);
         }
+        recoveryNotFoundCount = 0;
         let payload;
         try {
             payload = JSON.parse(text);
         } catch (_) {
             throw new Error('\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u65f6\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON');
         }
+        const resolvedTaskId = getVideoTaskId(payload);
+        if (resolvedTaskId && resolvedTaskId !== currentTaskId) {
+            currentTaskId = resolvedTaskId;
+            taskUrls = buildTaskUrls(currentTaskId);
+            taskUrlIndex = 0;
+            options.onTaskIdResolved?.(currentTaskId, payload);
+        }
         const url = getVideoResultUrl(payload);
-        if (url && (isCompletedVideoStatus(payload?.status) || !payload?.status)) return { payload, url };
+        if (url && (isCompletedVideoStatus(payload?.status) || !payload?.status)) {
+            return { payload, url, taskId: currentTaskId };
+        }
         if (isFailedVideoStatus(payload?.status)) {
             const reason = payload?.error?.message || payload?.message || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
             throw new Error(`\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff1a${reason}`);
@@ -1254,28 +1501,80 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         if (!apiKey) return { success: false, error: '\u672a\u914d\u7f6e\u89c6\u9891 API Key' };
         if (!endpoint) return { success: false, error: '\u672a\u914d\u7f6e\u89c6\u9891 API \u5730\u5740' };
 
+        const isMiniMaxH3 = isMiniMaxH3Model(model);
         const body = { model, prompt };
         const resolution = String(options.resolution || '').trim();
         const ratio = String(options.ratio || '').trim();
         const duration = Number(options.duration);
-        if (resolution) body.resolution = resolution;
-        if (ratio) body.ratio = ratio;
-        if (Number.isInteger(duration)) body.duration = duration;
-        if (typeof options.cameraFixed === 'boolean') body.camera_fixed = options.cameraFixed;
-        if (typeof options.generateAudio === 'boolean') body.generate_audio = options.generateAudio;
-        const webSearch = options.webSearch ?? options.web_search;
-        if (typeof webSearch === 'boolean') body.web_search = webSearch;
-        if (typeof options.watermark === 'boolean') body.watermark = options.watermark;
+        if (isMiniMaxH3) {
+            if (prompt.length > 2000) {
+                return { success: false, error: 'MiniMax H3 提示词不能超过 2000 个字符' };
+            }
+            if (Number.isInteger(duration) && (duration < 5 || duration > 15)) {
+                return { success: false, error: 'MiniMax H3 视频时长必须在 5 到 15 秒之间' };
+            }
+            if (ratio && !['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'].includes(ratio)) {
+                return { success: false, error: `MiniMax H3 不支持画幅比例 ${ratio}` };
+            }
+            body.resolution = '2k';
+            if (ratio) body.aspect_ratio = ratio;
+            if (Number.isInteger(duration)) body.duration = duration;
+        } else {
+            if (resolution) body.resolution = resolution;
+            if (ratio) body.ratio = ratio;
+            if (Number.isInteger(duration)) body.duration = duration;
+            if (typeof options.cameraFixed === 'boolean') body.camera_fixed = options.cameraFixed;
+            if (typeof options.generateAudio === 'boolean') body.generate_audio = options.generateAudio;
+            const webSearch = options.webSearch ?? options.web_search;
+            if (typeof webSearch === 'boolean') body.web_search = webSearch;
+            if (typeof options.watermark === 'boolean') body.watermark = options.watermark;
+        }
 
-        const images = collectVideoReferenceImages(options.sourceReferences || []);
-        if (images.length > 0) body.images = images;
-        const videos = collectVideoReferenceVideos(options.videoReferences || []);
-        if (videos.length > 0) body.videos = videos;
-        const audioUrls = collectVideoReferenceAudio(options.audioReferences || []);
-        if (audioUrls.length > 0) body.audio_urls = audioUrls;
+        const videoReferences = options.videoReferences || [];
+        if (isMiniMaxH3 && videoReferences.length > 0) {
+            return { success: false, error: 'MiniMax H3 不支持参考视频，请改用参考图片或参考音频' };
+        }
+        const images = await collectVideoReferenceImages(
+            options.sourceReferences || [],
+            options.compressReferenceImages === true,
+            isMiniMaxH3 ? 5 : 9
+        );
+        const videos = isMiniMaxH3 ? [] : collectVideoReferenceVideos(videoReferences);
+        const audioUrls = collectVideoReferenceAudio(
+            options.audioReferences || [],
+            isMiniMaxH3 ? 1 : 3,
+            isMiniMaxH3 ? 15 * 1024 * 1024 : 32 * 1024 * 1024
+        );
+        if (isMiniMaxH3) {
+            if (audioUrls.length > 0 && images.length === 0) {
+                return { success: false, error: 'MiniMax H3 使用参考音频时必须同时提供至少一张参考图片' };
+            }
+            const imageUrls = await Promise.all(images.map((image, index) => (
+                uploadTemporaryReference(image.url, `参考图片 ${index + 1}`)
+            )));
+            const referenceAudioUrls = await Promise.all(audioUrls.map((url, index) => (
+                uploadTemporaryReference(url, `参考音频 ${index + 1}`)
+            )));
+            if (imageUrls.length === 1) {
+                body.first_image = imageUrls[0];
+            } else if (imageUrls.length === 2) {
+                body.first_image = imageUrls[0];
+                body.last_image = imageUrls[1];
+            } else if (imageUrls.length > 2) {
+                body.reference_images = imageUrls;
+            }
+            if (referenceAudioUrls.length > 0) body.reference_audios = referenceAudioUrls.slice(0, 1);
+        } else {
+            if (images.length > 0) body.images = images;
+            if (videos.length > 0) body.videos = videos;
+            if (audioUrls.length > 0) body.audio_urls = audioUrls;
+        }
 
+        const recoveryId = createVideoRecoveryId();
         let response;
         let text;
+        let initialResponse;
+        let recoveringSubmission = false;
         try {
             response = await net.fetch(endpoint, {
                 method: 'POST',
@@ -1283,42 +1582,68 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                     Authorization: `Bearer ${apiKey}`,
                     'Content-Type': 'application/json',
                     Accept: 'application/json',
-                    'X-Playground': '1'
+                    'X-Playground': '1',
+                    'X-Log-Id': recoveryId
                 },
                 body: JSON.stringify(body),
                 redirect: 'follow'
             });
             text = await response.text();
         } catch (error) {
-            throw remoteConnectionError('\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1', endpoint, error);
+            if (!isAmbiguousVideoSubmitError(error)) {
+                throw remoteConnectionError('\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1', endpoint, error);
+            }
+            recoveringSubmission = true;
+            initialResponse = {
+                id: recoveryId,
+                task_id: recoveryId,
+                status: 'pending',
+                recovering: true
+            };
+            console.warn('[FlowCanvasBridge] Video submit response disconnected; recovering by log ID:', recoveryId);
         }
-        if (!response.ok) {
+        if (response && !response.ok) {
             return {
                 success: false,
                 error: `\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff08${describeRemoteEndpoint(endpoint)}\uff09\uff1aHTTP ${response.status} ${text.slice(0, 1000)}`
             };
         }
 
-        let initialResponse;
-        try {
-            initialResponse = JSON.parse(text);
-        } catch (_) {
-            return { success: false, error: '\u63d0\u4ea4\u89c6\u9891\u4efb\u52a1\u540e\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON' };
+        if (!initialResponse) {
+            try {
+                initialResponse = JSON.parse(text);
+            } catch (_) {
+                return { success: false, error: '\u63d0\u4ea4\u89c6\u9891\u4efb\u52a1\u540e\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON' };
+            }
         }
         const taskId = getVideoTaskId(initialResponse);
         if (taskId) {
             try {
-                options.onTaskSubmitted?.({ taskId, model, initialResponse });
+                options.onTaskSubmitted?.({
+                    taskId,
+                    model,
+                    initialResponse,
+                    recovering: recoveringSubmission
+                });
             } catch (error) {
                 console.warn('[FlowCanvasBridge] Failed to persist submitted video task:', error.message);
             }
         }
-        const completed = await pollOpenAiVideoTask(endpoint, apiKey, taskId, initialResponse);
+        const completed = await pollOpenAiVideoTask(endpoint, apiKey, taskId, initialResponse, {
+            model,
+            preferVideoTaskEndpoint: isMiniMaxH3,
+            onTaskIdResolved: (resolvedTaskId, payload) => options.onTaskSubmitted?.({
+                taskId: resolvedTaskId,
+                model,
+                initialResponse: payload,
+                recovered: recoveringSubmission
+            })
+        });
         const filePath = await downloadVideo(completed.url, targetDir, prompt);
         return {
             success: true,
             provider: 'openai-video',
-            taskId,
+            taskId: completed.taskId || taskId,
             url: completed.url,
             filePath,
             width: Number(options.width) || undefined,
