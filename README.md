@@ -45,9 +45,9 @@ Flow Canvas 是一款面向 Windows 的本地素材管理与 AI 创作桌面应�
 
 ### 使用安装包
 
-从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow Canvas Setup 1.0.0.exe`，按提示完成安装。
+从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.0.0.exe`，按提示完成安装。
 
-也可以下载便携版 `Flow Canvas 1.0.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
+也可以下载便携版 `Flow.Canvas.1.0.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
 
 ### 从源码运行
 
