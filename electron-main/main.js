@@ -13,6 +13,10 @@ const BrowserSyncService = require('./browser-sync');
 const { handleLocalResourceRequest } = require('./local-resource');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
+// Some OpenAI-compatible relays close long-running HTTP/2 streams after completing the job.
+// Keep Electron's proxy-aware network stack, but force HTTP/1.1 for reliable response delivery.
+app.commandLine.appendSwitch('disable-http2');
+
 let mainWindow = null;
 let orbWindow = null;
 let orbPosition = null;
@@ -1125,29 +1129,55 @@ ipcMain.handle('window:restoreFromOrb', (event) => {
     if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return false;
     return restoreMainWindowFromOrb();
 });
-ipcMain.handle('window:queueOrbFiles', (event, filePaths) => {
+ipcMain.handle('window:queueOrbFiles', async (event, payload) => {
+    const legacyFilePaths = Array.isArray(payload) ? payload : [];
+    const filePaths = Array.isArray(payload?.filePaths) ? payload.filePaths : legacyFilePaths;
+    const urls = Array.isArray(payload?.urls) ? payload.urls : [];
+    const sourceCount = filePaths.length + urls.length;
+
     if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) {
-        return { accepted: 0, rejected: Array.isArray(filePaths) ? filePaths.length : 0 };
+        return { accepted: 0, added: 0, rejected: sourceCount, queued: pendingOrbDropPaths.size, errors: [] };
     }
 
-    const candidates = Array.isArray(filePaths) ? filePaths : [];
     let accepted = 0;
     let added = 0;
-    candidates.forEach(filePath => {
-        if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) return;
+    const errors = [];
+    const queueFile = (filePath) => {
+        if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) return false;
         try {
-            if (!fs.statSync(filePath).isFile()) return;
+            if (!fs.statSync(filePath).isFile()) return false;
             const normalizedPath = path.normalize(filePath);
             const pathKey = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath;
             accepted += 1;
             if (!pendingOrbDropPaths.has(pathKey)) added += 1;
             pendingOrbDropPaths.set(pathKey, normalizedPath);
+            return true;
         } catch (err) {
             console.warn('[Orb] Ignoring unavailable dropped file:', filePath, err.message);
+            return false;
         }
-    });
+    };
 
-    return { accepted, added, rejected: candidates.length - accepted, queued: pendingOrbDropPaths.size };
+    filePaths.forEach(queueFile);
+
+    const targetDir = getBoardDefaultSaveFolder(store?.load?.()) || getSaveDir();
+    for (const rawUrl of urls.slice(0, 20)) {
+        if (typeof rawUrl !== 'string' || !/^https?:\/\//i.test(rawUrl)) continue;
+        const result = await downloadImageFromUrl(rawUrl, targetDir);
+        if (!result?.success || !queueFile(result.filePath)) {
+            errors.push({ url: rawUrl, error: result?.error || 'Downloaded file is unavailable' });
+        }
+    }
+
+    const result = {
+        accepted,
+        added,
+        rejected: Math.max(0, sourceCount - accepted),
+        queued: pendingOrbDropPaths.size,
+        errors
+    };
+    if (accepted > 0) restoreMainWindowFromOrb();
+    return result;
 });
 ipcMain.on('window:startOrbDrag', (event) => {
     if (!orbWindow || orbWindow.isDestroyed() || event.sender !== orbWindow.webContents) return;
@@ -1250,6 +1280,17 @@ ipcMain.handle('mcp:image:generate', async (_, body) => {
             return { success: false, error: 'Flow Canvas bridge is not ready' };
         }
         return { success: true, ...(await flowCanvasBridge.generateImageFromRenderer(body || {})) };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('mcp:video:compress-references', async (_, body) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...(await flowCanvasBridge.compressVideoReferenceImagesFromRenderer(body || {})) };
     } catch (err) {
         return { success: false, error: err.message };
     }

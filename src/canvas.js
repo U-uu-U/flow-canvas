@@ -19,8 +19,8 @@ const PLAN_HANDLE_X = -16;
 const PLAN_OUTPUT_HANDLE_X_OFFSET = 16;
 const PLAN_HANDLE_RADIUS = 7;
 const PLAN_CONNECTION_BADGE_HEIGHT = 16;
-const PLAN_SOURCE_CONNECTION_COLOR = '#5f8df7';
-const PLAN_OUTPUT_CONNECTION_COLOR = '#9ad8ff';
+const PLAN_SOURCE_CONNECTION_COLOR = '#b9bcc2';
+const PLAN_OUTPUT_CONNECTION_COLOR = '#eceef1';
 const PLAN_CONNECTION_PREVIEW_COLOR = '#34d399';
 const PLAN_CONNECTION_LABEL_MAX_WIDTH = 180;
 const PLAN_CONNECTION_SELECTED_LABEL_MAX_WIDTH = 260;
@@ -36,8 +36,8 @@ const PLAN_CONNECTION_FANOUT_MAX = 24;
 const PLAN_CONNECTION_STYLES = {
     source: {
         color: PLAN_SOURCE_CONNECTION_COLOR,
-        activeColor: '#7fb2ff',
-        halo: 'rgba(95, 141, 247, 0.18)',
+        activeColor: '#d5d7db',
+        halo: 'rgba(255, 255, 255, 0.12)',
         mutedOpacity: 0.34,
         activeOpacity: 0.82,
         mutedWidth: 1.5,
@@ -46,8 +46,8 @@ const PLAN_CONNECTION_STYLES = {
     },
     output: {
         color: PLAN_OUTPUT_CONNECTION_COLOR,
-        activeColor: '#c6f3ff',
-        halo: 'rgba(154, 216, 255, 0.2)',
+        activeColor: '#ffffff',
+        halo: 'rgba(255, 255, 255, 0.16)',
         mutedOpacity: 0.72,
         activeOpacity: 0.96,
         mutedWidth: 2.2,
@@ -98,12 +98,36 @@ export class CanvasManager {
         this.pendingGenerationPlacements = new Map();
 
         this.selectionRect = new Konva.Rect({
-            fill: 'rgba(58, 123, 213, 0.2)',
-            stroke: '#3a7bd5',
+            fill: 'rgba(255, 255, 255, 0.1)',
+            stroke: '#b9bcc2',
             strokeWidth: 1,
             visible: false,
         });
         this.layer.add(this.selectionRect);
+
+        this.imageTransformer = new Konva.Transformer({
+            enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
+            rotateEnabled: false,
+            keepRatio: true,
+            flipEnabled: false,
+            ignoreStroke: true,
+            borderStroke: '#b9bcc2',
+            borderStrokeWidth: 1.5,
+            anchorFill: '#f8fbff',
+            anchorStroke: '#b9bcc2',
+            anchorStrokeWidth: 2,
+            anchorSize: 11,
+            anchorCornerRadius: 6,
+            padding: 2,
+            boundBoxFunc: (oldBox, newBox) => {
+                if (Math.abs(newBox.width) < 48 || Math.abs(newBox.height) < 48) return oldBox;
+                return newBox;
+            }
+        });
+        this.imageTransformer.on('transformstart', () => this._beginImageResize());
+        this.imageTransformer.on('transform', () => this._updateImageResize());
+        this.imageTransformer.on('transformend', () => this._finishImageResize());
+        this.layer.add(this.imageTransformer);
 
         // GIF 叠加层
         this.gifOverlay = document.createElement('div');
@@ -312,7 +336,7 @@ export class CanvasManager {
         };
         this._renderMediaReferencePickHighlights();
         const typeLabel = { image: '图片', video: '视频', audio: '音频' }[normalizedType];
-        this._showCanvasStatus(`按顺序点击画布${typeLabel}，重复点击可移除；按 Esc 完成`, 4200);
+        this._showCanvasStatus(`按顺序点击画布${typeLabel}，选择立即生效；点击右侧继续操作`, 4200);
         this.emit('mediaReferencePickStateChanged', { active: true, type: normalizedType });
         return true;
     }
@@ -393,6 +417,9 @@ export class CanvasManager {
             type: pick.type,
             entries: pick.entries.map(candidate => ({ ...candidate }))
         });
+        if (existingIndex < 0 && pick.entries.length >= pick.maxItems) {
+            this.endMediaReferencePick({ silent: true });
+        }
     }
 
     _renderMediaReferencePickHighlights() {
@@ -759,6 +786,12 @@ export class CanvasManager {
                 lastPanY = pos.y;
                 document.body.style.cursor = 'grabbing';
                 attachPanningEndListeners();
+                return;
+            }
+            const transformerTarget = e.target === this.imageTransformer
+                || e.target?.findAncestor?.(node => node === this.imageTransformer);
+            if (transformerTarget) {
+                e.cancelBubble = true;
                 return;
             }
             if (this._activePlanReferencePick && e.evt.button === 0 && (e.target === this.stage || e.target === this.selectionRect)) {
@@ -1187,7 +1220,8 @@ export class CanvasManager {
     }
 
     _applyMagneticSnapping(movedGroup) {
-        const SNAP_DIST = 8; // 磁吸距离（缩小到 8，避免远距离误吸附）
+        // Keep the snap range stable on screen even when the canvas is zoomed far out.
+        const SNAP_DIST = 14 / Math.max(0.08, this.stage.scaleX());
         const movedNode = movedGroup.findOne('.displayNode') || movedGroup.findOne('.fallbackBg');
         if (!movedNode) return;
 
@@ -1214,13 +1248,21 @@ export class CanvasManager {
             const tw = targetNode.width();
             const th = targetNode.height();
 
-            // 垂直方向接近度：两个图片中心的垂直距离不能超过两者较小高度的 60%
-            const vProximity = Math.min(mh, th) * 0.6;
-            // 水平方向接近度
-            const hProximity = Math.min(mw, tw) * 0.6;
+            const verticalAlignment = Math.min(
+                Math.abs(my - ty),
+                Math.abs(my + mh - (ty + th)),
+                Math.abs(my + mh / 2 - (ty + th / 2))
+            );
+            const horizontalAlignment = Math.min(
+                Math.abs(mx - tx),
+                Math.abs(mx + mw - (tx + tw)),
+                Math.abs(mx + mw / 2 - (tx + tw / 2))
+            );
+            const vProximity = Math.max(SNAP_DIST * 1.5, Math.min(mh, th) * 0.35);
+            const hProximity = Math.max(SNAP_DIST * 1.5, Math.min(mw, tw) * 0.35);
 
             // Check Left/Right edges (Horizontal Alignment)
-            if (Math.abs(mx + mw - tx) < bestDist && Math.abs(my + mh / 2 - (ty + th / 2)) < vProximity) {
+            if (Math.abs(mx + mw - tx) < bestDist && verticalAlignment < vProximity) {
                 bestDist = Math.abs(mx + mw - tx);
                 const scale = th / mh;
                 snappedH = th;
@@ -1228,7 +1270,7 @@ export class CanvasManager {
                 snappedX = tx - snappedW;
                 snappedY = ty;
                 snapped = true;
-            } else if (Math.abs(mx - (tx + tw)) < bestDist && Math.abs(my + mh / 2 - (ty + th / 2)) < vProximity) {
+            } else if (Math.abs(mx - (tx + tw)) < bestDist && verticalAlignment < vProximity) {
                 bestDist = Math.abs(mx - (tx + tw));
                 const scale = th / mh;
                 snappedH = th;
@@ -1239,7 +1281,7 @@ export class CanvasManager {
             }
 
             // Check Top/Bottom edges (Vertical Alignment)
-            if (Math.abs(my + mh - ty) < bestDist && Math.abs(mx + mw / 2 - (tx + tw / 2)) < hProximity) {
+            if (Math.abs(my + mh - ty) < bestDist && horizontalAlignment < hProximity) {
                 bestDist = Math.abs(my + mh - ty);
                 const scale = tw / mw;
                 snappedW = tw;
@@ -1247,7 +1289,7 @@ export class CanvasManager {
                 snappedY = ty - snappedH;
                 snappedX = tx;
                 snapped = true;
-            } else if (Math.abs(my - (ty + th)) < bestDist && Math.abs(mx + mw / 2 - (tx + tw / 2)) < hProximity) {
+            } else if (Math.abs(my - (ty + th)) < bestDist && horizontalAlignment < hProximity) {
                 bestDist = Math.abs(my - (ty + th));
                 const scale = tw / mw;
                 snappedW = tw;
@@ -1298,6 +1340,9 @@ export class CanvasManager {
                     controlsGroup.findOne('.videoProgressHotspot')?.width(Math.max(0, snappedW - 45));
                 }
                 if (coverControls) coverControls.y(snappedH - 30);
+                if (this.imageTransformer?.nodes?.()[0] === movedNode) {
+                    this.imageTransformer.forceUpdate();
+                }
             }
         }
     }
@@ -1585,7 +1630,7 @@ export class CanvasManager {
             const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
             if (node) {
                 if (isSelected) {
-                    node.stroke('#3a7bd5');
+                    node.stroke('#b9bcc2');
                     node.strokeWidth(3);
                 } else {
                     node.stroke(null);
@@ -1598,13 +1643,96 @@ export class CanvasManager {
             const node = plan.group.findOne('.planHitArea');
             if (!node) return;
             if (isSelected) {
-                node.stroke('rgba(58, 123, 213, 0.01)');
+                node.stroke('rgba(255, 255, 255, 0.01)');
                 node.strokeWidth(0);
             } else {
                 node.stroke('transparent');
                 node.strokeWidth(0);
             }
         });
+        this._syncImageTransformer();
+    }
+
+    _getImageTransformerTarget() {
+        const node = this.imageTransformer?.nodes?.()[0];
+        const group = node?.getParent?.();
+        const item = group ? this.items.get(group.id()) : null;
+        if (!node || !item || this._getFileType(item.data.filePath) !== 'image') return null;
+        return { item, group, node };
+    }
+
+    _syncImageTransformer() {
+        if (!this.imageTransformer) return;
+        const selectedIds = Array.from(this.selectedItems);
+        const item = selectedIds.length === 1 ? this.items.get(selectedIds[0]) : null;
+        const isImage = item && this._getFileType(item.data.filePath) === 'image';
+        const node = isImage ? item.group.findOne('.displayNode') : null;
+        const currentNode = this.imageTransformer.nodes()[0];
+
+        if (!node) {
+            if (currentNode) this.imageTransformer.nodes([]);
+            return;
+        }
+        if (currentNode !== node) this.imageTransformer.nodes([node]);
+        this.imageTransformer.moveToTop();
+        this.imageTransformer.forceUpdate();
+    }
+
+    _beginImageResize() {
+        const target = this._getImageTransformerTarget();
+        if (!target) return;
+        const { item, group, node } = target;
+        item.isResizing = true;
+        clearTimeout(item.hoverTimer);
+        item.hoverTimer = null;
+        if (item.loading && item.transitionOldNode === node) {
+            this._prepareQualityReload(item, item.transitionPreviousIsThumbnail);
+        }
+        if (item.qualityTransition?.finish) item.qualityTransition.finish();
+        group.draggable(false);
+        if (item.gifDomElement) item.gifDomElement.style.display = 'none';
+    }
+
+    _updateImageResize() {
+        const target = this._getImageTransformerTarget();
+        if (!target) return;
+        this._scheduleDragConnectionRefresh(target.item);
+    }
+
+    _finishImageResize() {
+        const target = this._getImageTransformerTarget();
+        if (!target) return;
+        const { item, group, node } = target;
+        const width = Math.max(48, node.width() * Math.abs(node.scaleX()));
+        const height = Math.max(48, node.height() * Math.abs(node.scaleY()));
+
+        group.position({
+            x: group.x() + node.x(),
+            y: group.y() + node.y()
+        });
+        node.position({ x: 0, y: 0 });
+        node.scale({ x: 1, y: 1 });
+        node.size({ width, height });
+
+        item.data.x = group.x();
+        item.data.y = group.y();
+        item.data.width = width;
+        item.data.height = height;
+        item.isResizing = false;
+        group.draggable(true);
+
+        if (item.gifDomElement) {
+            item.gifDomElement.style.width = `${width}px`;
+            item.gifDomElement.style.height = `${height}px`;
+            this.syncGifs();
+        }
+
+        this.imageTransformer.forceUpdate();
+        this._flushDragConnectionRefresh();
+        this._refreshVisiblePlanConnections();
+        this.layer.batchDraw();
+        this.emit('change');
+        if (this.resourceSaverMode) this._scheduleResourceSaverPromote(item);
     }
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
@@ -2032,6 +2160,10 @@ export class CanvasManager {
             queuedUseThumbnail: false,
             hoverTimer: null,
             hoverFull: false,
+            isResizing: false,
+            qualityTransition: null,
+            transitionOldNode: null,
+            transitionPreviousIsThumbnail: null,
             gifDomElement: null,
             videoElement: null,
             videoAnimation: null,
@@ -2202,7 +2334,7 @@ export class CanvasManager {
             });
             group.add(new Konva.Line({
                 points: [PLAN_HANDLE_X + PLAN_HANDLE_RADIUS, anchorY, 0, anchorY],
-                stroke: sourceReferences.length ? 'rgba(95,141,247,0.62)' : 'rgba(255,255,255,0.18)',
+                stroke: sourceReferences.length ? 'rgba(210,213,218,0.62)' : 'rgba(255,255,255,0.18)',
                 strokeWidth: sourceReferences.length ? 1.6 : 1,
                 dash: sourceReferences.length ? [] : [3, 4],
                 listening: false
@@ -2211,7 +2343,7 @@ export class CanvasManager {
                 x: PLAN_HANDLE_X,
                 y: anchorY,
                 radius: PLAN_HANDLE_RADIUS + 6,
-                fill: 'rgba(95,141,247,0.11)',
+                fill: 'rgba(255,255,255,0.07)',
                 visible: isRowActive || this.selectedItems.has(plan.id),
                 listening: false
             }));
@@ -2220,7 +2352,7 @@ export class CanvasManager {
                 y: anchorY,
                 radius: PLAN_HANDLE_RADIUS,
                 fill: sourceReferences.length ? '#0f1b2d' : '#0d121c',
-                stroke: sourceReferences.length ? PLAN_SOURCE_CONNECTION_COLOR : 'rgba(127,178,255,0.78)',
+                stroke: sourceReferences.length ? PLAN_SOURCE_CONNECTION_COLOR : 'rgba(210,213,218,0.68)',
                 strokeWidth: sourceReferences.length ? 2.4 : 1.8,
                 name: 'planRowHandle',
                 draggable: true,
@@ -2287,7 +2419,7 @@ export class CanvasManager {
             const outputHandleX = width + PLAN_OUTPUT_HANDLE_X_OFFSET;
             group.add(new Konva.Line({
                 points: [width, anchorY, outputHandleX - PLAN_HANDLE_RADIUS, anchorY],
-                stroke: outputReferences.length ? 'rgba(154,216,255,0.78)' : 'rgba(255,255,255,0.14)',
+                stroke: outputReferences.length ? 'rgba(236,238,241,0.72)' : 'rgba(255,255,255,0.14)',
                 strokeWidth: outputReferences.length ? 1.6 : 1,
                 dash: outputReferences.length ? [] : [3, 4],
                 listening: false
@@ -2296,7 +2428,7 @@ export class CanvasManager {
                 x: outputHandleX,
                 y: anchorY,
                 radius: PLAN_HANDLE_RADIUS + 6,
-                fill: 'rgba(154,216,255,0.11)',
+                fill: 'rgba(255,255,255,0.09)',
                 visible: outputReferences.length > 0 || isRowActive || this.selectedItems.has(plan.id),
                 listening: false
             }));
@@ -2305,7 +2437,7 @@ export class CanvasManager {
                 y: anchorY,
                 radius: PLAN_HANDLE_RADIUS,
                 fill: outputReferences.length ? '#0d2230' : '#0d121c',
-                stroke: outputReferences.length ? PLAN_OUTPUT_CONNECTION_COLOR : 'rgba(154,216,255,0.58)',
+                stroke: outputReferences.length ? PLAN_OUTPUT_CONNECTION_COLOR : 'rgba(236,238,241,0.52)',
                 strokeWidth: outputReferences.length ? 2.4 : 1.6,
                 name: 'planOutputHandle',
                 listening: false
@@ -2381,7 +2513,7 @@ export class CanvasManager {
         const labelWidth = Math.min(width - 32, Math.max(230, this._estimateTextWidth(text) + 38));
         const x = width - labelWidth - 12;
         const y = -34;
-        const stroke = overview ? 'rgba(255, 209, 102, 0.5)' : 'rgba(127, 178, 255, 0.38)';
+        const stroke = overview ? 'rgba(255, 209, 102, 0.5)' : 'rgba(210, 213, 218, 0.34)';
         const fill = overview ? 'rgba(42, 32, 13, 0.94)' : 'rgba(9, 18, 34, 0.94)';
         const textFill = overview ? '#ffe6a3' : '#dce9ff';
         const hint = new Konva.Group({
@@ -2539,7 +2671,7 @@ export class CanvasManager {
         const width = text.length > 1 ? 22 : 18;
         const badgeX = isOutput ? x + 6 : x - width - 6;
         const badgeY = y - PLAN_HANDLE_RADIUS - PLAN_CONNECTION_BADGE_HEIGHT + 3;
-        const stroke = isOutput ? 'rgba(154,216,255,0.58)' : 'rgba(127,178,255,0.55)';
+        const stroke = isOutput ? 'rgba(236,238,241,0.52)' : 'rgba(210,213,218,0.5)';
         const fill = isOutput ? '#102536' : '#141a24';
         const textFill = isOutput ? '#d6f6ff' : '#c9ddff';
 
@@ -2585,7 +2717,7 @@ export class CanvasManager {
             name: 'planConnectionHintBg',
             height: PLAN_CONNECTION_HINT_HEIGHT,
             fill: 'rgba(11, 19, 34, 0.95)',
-            stroke: 'rgba(127, 178, 255, 0.42)',
+            stroke: 'rgba(210, 213, 218, 0.38)',
             strokeWidth: 1,
             cornerRadius: PLAN_CONNECTION_HINT_HEIGHT / 2,
             shadowColor: PLAN_SOURCE_CONNECTION_COLOR,
@@ -2827,8 +2959,8 @@ export class CanvasManager {
             y: 10,
             width: typeWidth,
             height: 20,
-            fill: isOutput ? 'rgba(154, 216, 255, 0.13)' : 'rgba(95, 141, 247, 0.13)',
-            stroke: isOutput ? 'rgba(154, 216, 255, 0.36)' : 'rgba(127, 178, 255, 0.34)',
+            fill: isOutput ? 'rgba(255, 255, 255, 0.09)' : 'rgba(255, 255, 255, 0.07)',
+            stroke: isOutput ? 'rgba(236, 238, 241, 0.34)' : 'rgba(210, 213, 218, 0.3)',
             strokeWidth: 1,
             cornerRadius: 10,
             listening: false,
@@ -3082,7 +3214,7 @@ export class CanvasManager {
             x,
             y,
             radius: PLAN_HANDLE_RADIUS + (visual.selected ? 8 : 6),
-            fill: isOutput ? 'rgba(154, 216, 255, 0.1)' : 'rgba(95, 141, 247, 0.1)',
+            fill: isOutput ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.06)',
             stroke: visual.stroke,
             strokeWidth: visual.selected ? 1.5 : 1.1,
             opacity: visual.selected ? 0.78 : 0.52,
@@ -4704,7 +4836,7 @@ export class CanvasManager {
             const isConnection = mode === 'connection';
             const isMedia = mode === 'media';
             const stroke = isConnection ? PLAN_OUTPUT_CONNECTION_COLOR : isMedia ? '#fbbf24' : PLAN_CONNECTION_PREVIEW_COLOR;
-            const fill = isConnection ? 'rgba(154, 216, 255, 0.07)' : isMedia ? 'rgba(251, 191, 36, 0.08)' : 'rgba(52, 211, 153, 0.08)';
+            const fill = isConnection ? 'rgba(255, 255, 255, 0.06)' : isMedia ? 'rgba(251, 191, 36, 0.08)' : 'rgba(52, 211, 153, 0.08)';
             const referenceCount = isConnection
                 ? this._countPlanReferencesToItem(item.data.id, item.data.filePath)
                 : 0;
@@ -4760,7 +4892,7 @@ export class CanvasManager {
             label.findOne('.referenceDropLabelBg')?.setAttrs({
                 width: labelWidth,
                 fill: isConnection ? 'rgba(8, 35, 48, 0.96)' : 'rgba(8, 45, 34, 0.96)',
-                stroke: isConnection ? 'rgba(154, 216, 255, 0.42)' : 'rgba(52, 211, 153, 0.48)',
+                stroke: isConnection ? 'rgba(236, 238, 241, 0.38)' : 'rgba(52, 211, 153, 0.48)',
                 strokeWidth: 1,
                 shadowColor: stroke,
                 shadowBlur: 10,
@@ -5211,7 +5343,7 @@ export class CanvasManager {
             item.autoPlayVideo = false;
             item.loadQueued = false;
             if (item.loaded || item.loading) {
-                this._unloadContent(item);
+                this._prepareQualityReload(item, this.resourceSaverMode);
             }
         });
 
@@ -5219,14 +5351,14 @@ export class CanvasManager {
     }
 
     _scheduleResourceSaverPromote(item) {
-        if (!this.resourceSaverMode || !item.group.getLayer()) return;
+        if (!this.resourceSaverMode || item.isResizing || !item.group.getLayer()) return;
         clearTimeout(item.hoverTimer);
         item.hoverTimer = setTimeout(() => {
             item.hoverTimer = null;
-            if (!this.resourceSaverMode || !item.group.getLayer() || item.hoverFull) return;
+            if (!this.resourceSaverMode || item.isResizing || !item.group.getLayer() || item.hoverFull) return;
             item.hoverFull = true;
             if (item.loaded || item.loading || item.loadQueued) {
-                this._unloadContent(item);
+                this._prepareQualityReload(item, false);
             }
             this._queueContentLoad(item, false, true);
             this._drainContentLoadQueue();
@@ -5236,13 +5368,13 @@ export class CanvasManager {
     _demoteResourceSaverItem(item) {
         clearTimeout(item.hoverTimer);
         item.hoverTimer = null;
-        if (!this.resourceSaverMode || !item.hoverFull || !item.group.getLayer()) return;
+        if (!this.resourceSaverMode || item.isResizing || !item.hoverFull || !item.group.getLayer()) return;
         if (item.autoPlayVideo || (item.videoElement && !item.videoElement.paused)) return;
 
         item.hoverFull = false;
         item.autoPlayVideo = false;
         if (item.loaded || item.loading || item.loadQueued) {
-            this._unloadContent(item);
+            this._prepareQualityReload(item, true);
         }
         this._queueContentLoad(item, true, true);
         this._drainContentLoadQueue();
@@ -5254,7 +5386,7 @@ export class CanvasManager {
             if (!item.loaded && !item.loading) {
                 this._queueContentLoad(item, useThumbnail);
             } else if ((item.loaded || item.loading) && item.isThumbnail !== useThumbnail && !item.hoverFull) {
-                this._unloadContent(item);
+                this._prepareQualityReload(item, useThumbnail);
                 this._queueContentLoad(item, useThumbnail);
             }
         });
@@ -5355,11 +5487,225 @@ export class CanvasManager {
         }
     }
 
+    _captureVideoTransitionFrame(item, displayNode) {
+        let transitionNode = displayNode;
+        const source = displayNode?.image?.();
+        if (source?.tagName === 'VIDEO') {
+            const naturalWidth = Number(source.videoWidth) || Math.round(displayNode.width()) || 1;
+            const naturalHeight = Number(source.videoHeight) || Math.round(displayNode.height()) || 1;
+            const captureWidth = Math.max(1, Math.min(960, naturalWidth));
+            const captureHeight = Math.max(1, Math.round(captureWidth * naturalHeight / naturalWidth));
+            const canvas = document.createElement('canvas');
+            canvas.width = captureWidth;
+            canvas.height = captureHeight;
+            const context = canvas.getContext('2d');
+            try {
+                context?.drawImage(source, 0, 0, captureWidth, captureHeight);
+            } catch (_) {
+                if (context) {
+                    context.fillStyle = '#2b2b2b';
+                    context.fillRect(0, 0, captureWidth, captureHeight);
+                }
+            }
+
+            transitionNode = new Konva.Image({
+                name: 'displayNode',
+                x: displayNode.x(),
+                y: displayNode.y(),
+                image: canvas,
+                width: displayNode.width(),
+                height: displayNode.height()
+            });
+            transitionNode.setAttr('videoFrameSnapshot', true);
+            item.group.add(transitionNode);
+            transitionNode.zIndex(displayNode.zIndex());
+            displayNode.image(null);
+            displayNode.destroy();
+        }
+
+        if (item.videoAnimation) {
+            item.videoAnimation.stop();
+            item.videoAnimation = null;
+        }
+        if (item.videoElement) {
+            this._disposeVideoElement(item.videoElement);
+            item.videoElement = null;
+        }
+        item.group.findOne('.videoControls')?.destroy();
+        item.group.findOne('.videoCoverControls')?.destroy();
+        item.group.off('mouseenter.video mouseleave.video');
+        return transitionNode;
+    }
+
+    _prepareQualityReload(item, targetUseThumbnail = null) {
+        const filePath = String(item?.data?.filePath || '').toLowerCase();
+        const fileType = this._getFileType(filePath);
+        const isStaticImage = fileType === 'image' && !filePath.endsWith('.gif');
+        const isVideo = fileType === 'video';
+        if (!isStaticImage && !isVideo) {
+            this._unloadContent(item);
+            return false;
+        }
+
+        if (item.loadQueued) {
+            this._contentLoadQueue = this._contentLoadQueue.filter(queuedItem => queuedItem !== item);
+            item.loadQueued = false;
+        }
+
+        // A quick pointer reversal can make the quality currently being loaded unnecessary.
+        // Restore the still-visible previous image instead of exposing the fallback.
+        if (item.loading && item.transitionOldNode?.getLayer()) {
+            const oldNode = item.transitionOldNode;
+            const previousIsThumbnail = item.transitionPreviousIsThumbnail;
+            this._completeContentLoad(item);
+            item.loadToken = (item.loadToken || 0) + 1;
+            if (isVideo) {
+                if (item.videoAnimation) {
+                    item.videoAnimation.stop();
+                    item.videoAnimation = null;
+                }
+                if (item.videoElement) {
+                    this._disposeVideoElement(item.videoElement);
+                    item.videoElement = null;
+                }
+            }
+            item.loading = false;
+            item.loaded = true;
+            item.isThumbnail = previousIsThumbnail;
+            item.transitionOldNode = null;
+            item.transitionPreviousIsThumbnail = null;
+            oldNode.name('displayNode');
+            oldNode.listening(true);
+            oldNode.opacity(1);
+            oldNode.filters([]);
+            oldNode.clearCache();
+
+            const requiresLiveVideo = isVideo
+                && targetUseThumbnail === false
+                && oldNode.getAttr('videoFrameSnapshot');
+            if (targetUseThumbnail === previousIsThumbnail && !requiresLiveVideo) {
+                item.group.getLayer()?.batchDraw();
+                return false;
+            }
+        }
+
+        // If the previous fade is interrupted, settle its new image before using it as
+        // the source for another transition. This avoids retaining a half-transparent blur.
+        if (item.qualityTransition) {
+            item.qualityTransition.destroy();
+            item.qualityTransition = null;
+        }
+        let currentNode = item.group.findOne('.displayNode');
+        if (currentNode) {
+            currentNode.opacity(1);
+            currentNode.filters([]);
+            currentNode.clearCache();
+        }
+        if (item.transitionOldNode && item.transitionOldNode !== currentNode) {
+            item.transitionOldNode.image?.(null);
+            item.transitionOldNode.destroy();
+            item.transitionOldNode = null;
+            item.transitionPreviousIsThumbnail = null;
+        }
+
+        const requiresLiveVideo = isVideo
+            && targetUseThumbnail === false
+            && currentNode?.getAttr('videoFrameSnapshot');
+        if (targetUseThumbnail === item.isThumbnail && item.loaded && currentNode && !requiresLiveVideo) {
+            item.group.getLayer()?.batchDraw();
+            return false;
+        }
+
+        if (isVideo && currentNode) {
+            currentNode = this._captureVideoTransitionFrame(item, currentNode);
+        }
+
+        const canPreserveImage = item.loaded && !item.loading && currentNode;
+        const displayNode = canPreserveImage ? currentNode : null;
+        if (!displayNode) {
+            this._unloadContent(item);
+            return false;
+        }
+
+        this._completeContentLoad(item);
+        item.loadToken = (item.loadToken || 0) + 1;
+        item.loading = false;
+        item.loaded = false;
+        item.loadQueued = false;
+        item.transitionPreviousIsThumbnail = item.isThumbnail;
+        item.transitionOldNode = displayNode;
+        displayNode.name('transitionOldDisplay');
+        displayNode.listening(false);
+        return true;
+    }
+
+    _placeLoadedDisplayNode(item, node, token) {
+        const oldNode = item.transitionOldNode;
+        if (!oldNode || !oldNode.getLayer() || oldNode.getParent() !== node.getParent()) {
+            node.moveToBottom();
+            return;
+        }
+
+        node.opacity(0);
+        node.zIndex(oldNode.zIndex() + 1);
+        let blurEnabled = false;
+        try {
+            node.cache({ pixelRatio: 1 });
+            node.filters([Konva.Filters.Blur]);
+            node.blurRadius(7);
+            blurEnabled = true;
+        } catch (error) {
+            node.filters([]);
+            node.clearCache();
+        }
+
+        const finishTransition = () => {
+            if (item.qualityTransition !== tween) return;
+            item.qualityTransition = null;
+            node.opacity(1);
+            if (blurEnabled) {
+                node.filters([]);
+                node.clearCache();
+            }
+            if (item.transitionOldNode === oldNode) {
+                oldNode.image?.(null);
+                oldNode.destroy();
+                item.transitionOldNode = null;
+                item.transitionPreviousIsThumbnail = null;
+            }
+            item.group.getLayer()?.batchDraw();
+        };
+        const tween = new Konva.Tween({
+            node,
+            duration: 0.32,
+            opacity: 1,
+            ...(blurEnabled ? { blurRadius: 0 } : {}),
+            easing: Konva.Easings.EaseOut,
+            onFinish: finishTransition
+        });
+        item.qualityTransition = tween;
+        tween.play();
+    }
+
     /**
      * 卸载节点内容 — 释放图片纹理和视频资源
      */
     _unloadContent(item) {
         this._completeContentLoad(item);
+        const transformerNode = this.imageTransformer?.nodes?.()[0];
+        if (transformerNode?.getParent?.() === item.group) {
+            this.imageTransformer.nodes([]);
+        }
+        if (item.qualityTransition) {
+            item.qualityTransition.destroy();
+            item.qualityTransition = null;
+        }
+        if (item.transitionOldNode) {
+            item.transitionOldNode.image?.(null);
+            item.transitionOldNode.destroy();
+            item.transitionOldNode = null;
+            item.transitionPreviousIsThumbnail = null;
+        }
         item.loadToken = (item.loadToken || 0) + 1;
         item.loading = false;
         item.loaded = false;
@@ -5434,6 +5780,20 @@ export class CanvasManager {
             return false;
         }
         item.loading = false;
+        const oldNode = item.transitionOldNode;
+        if (oldNode?.getLayer()) {
+            oldNode.name('displayNode');
+            oldNode.listening(true);
+            item.transitionOldNode = null;
+            item.loaded = true;
+            item.isThumbnail = item.transitionPreviousIsThumbnail;
+            item.transitionPreviousIsThumbnail = null;
+            item.loadError = false;
+            item.loadErrorMessage = '';
+            this._completeContentLoad(item);
+            item.group.getLayer()?.batchDraw();
+            return false;
+        }
         item.loaded = false;
         item.loadError = true;
         this._markFallbackLoadError(item, message);
@@ -5530,7 +5890,7 @@ export class CanvasManager {
         item.hoverFull = true;
         item.autoPlayVideo = true;
         if (item.loaded || item.loading || item.loadQueued) {
-            this._unloadContent(item);
+            this._prepareQualityReload(item, false);
         }
         this._queueContentLoad(item, false, true);
         this._drainContentLoadQueue();
@@ -5581,7 +5941,7 @@ export class CanvasManager {
                 height: displayHeight
             });
             group.add(cover);
-            cover.moveToBottom();
+            this._placeLoadedDisplayNode(item, cover, token);
             group.add(this._createVideoCoverControls(item, displayWidth, displayHeight));
 
             this._disposeVideoElement(video);
@@ -5644,7 +6004,7 @@ export class CanvasManager {
                     height: targetH
                 });
                 item.group.add(node);
-                node.moveToBottom();
+                this._placeLoadedDisplayNode(item, node, token);
 
                 if (this.selectedItems.has(item.data.id)) {
                     this._updateSelectionVisuals();
@@ -5694,7 +6054,7 @@ export class CanvasManager {
                 if (fallback) fallback.destroy();
 
                 group.add(imageNode);
-                imageNode.moveToBottom();
+                this._placeLoadedDisplayNode(item, imageNode, token);
 
                 if (this.selectedItems.has(group.attrs.id)) {
                     this._updateSelectionVisuals();
@@ -5775,7 +6135,7 @@ export class CanvasManager {
         item.videoElement = video;
         document.body.appendChild(video);
 
-        video.addEventListener('loadedmetadata', () => {
+        video.addEventListener('loadeddata', () => {
             if (!this._isLoadCurrent(item, token)) {
                 this._disposeVideoElement(video);
                 if (item.videoElement === video) item.videoElement = null;
@@ -5808,6 +6168,7 @@ export class CanvasManager {
             if (fallback) fallback.destroy();
 
             group.add(videoImage);
+            this._placeLoadedDisplayNode(item, videoImage, token);
 
             // -- 进度条和控制按钮 --
             const controlsGroup = new Konva.Group({
@@ -5842,7 +6203,7 @@ export class CanvasManager {
 
             // 进度条前景
             const progressFg = new Konva.Rect({
-                x: 35, y: 13, width: 0, height: 4, fill: '#3a7bd5', cornerRadius: 2, visible: false
+                x: 35, y: 13, width: 0, height: 4, fill: '#b9bcc2', cornerRadius: 2, visible: false
             });
 
             // 进度条热区，方便点击
@@ -5854,8 +6215,6 @@ export class CanvasManager {
 
             controlsGroup.add(ctrlBg, playButtonBg, progressBg, progressFg, playPauseBtnText, playPauseHotspot, progressHotspot);
             group.add(controlsGroup);
-
-            videoImage.moveToBottom();
 
             // 控制逻辑 —— 用 mousedown 替代 click，避免 Konva 动画层干扰点击检测
             const revealTimeline = () => {
@@ -5908,13 +6267,12 @@ export class CanvasManager {
             item.videoAnimation = anim;
 
             this._finishLoad(item, token);
-            video.addEventListener('loadeddata', () => group.getLayer()?.batchDraw());
             if (item.autoPlayVideo) {
                 item.autoPlayVideo = false;
                 playVideo();
             }
             group.getLayer().batchDraw();
-        });
+        }, { once: true });
 
         video.addEventListener('error', () => {
             this._handleVideoLoadError(item, token, video);

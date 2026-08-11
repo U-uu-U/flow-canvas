@@ -1,91 +1,61 @@
 # Flow Canvas
 
-Flow Canvas 是一个面向本地创作素材的 Windows 桌面无限画布。它将文件夹中的图片、视频和音频以路径索引的方式组织到画板中，并提供图片生成、视频生成、规划表、任务记录和 MCP 接入能力。
+Flow Canvas 是一款面向 Windows 的本地素材管理与 AI 创作桌面应用。它把文件夹中的图片、视频和音频组织到无限画布上，并将多 API 模型、图片生成、视频生成、任务恢复和 MCP 自动化集中在同一个工作区中。
 
-当前仓库为实验版本，主要用于验证本地素材工作流、多模型 API 编排，以及生成任务断线恢复。重要项目请保留原始素材，并定期备份 Flow Canvas 用户数据。
+当前稳定版本：`v1.0.0`
 
-## 主要功能
+## 功能概览
 
-### 本地素材画板
+### 本地无限画布
 
-- 监听多个本地文件夹，并按文件夹组保存独立画板和视口。
-- 使用 Konva 提供缩放、平移、框选、拖放和素材排布。
-- 索引原文件路径，不会为了显示素材而复制整个资源库。
+- 关联多个本地文件夹，并按文件夹组保存独立画板和视口。
+- 支持缩放、平移、框选、拖放、边角等比缩放和素材排布。
+- 直接索引原始文件路径，无需复制整个素材库。
 - 支持图片、视频、音频及常见文档类型的识别和预览。
-- 支持手动重接、自动修补和模糊匹配断联素材。
-- 支持将画板素材复制或映射到 Windows 资源管理器目录。
+- 支持断联素材的手动重接、自动修补和模糊匹配。
+- 支持把画板素材复制到映射的 Windows 资源管理器目录。
+- 针对大型画板提供缩略图、视口裁剪和资源节省模式。
 
-### 创作工作区
+### 图片与视频创作
 
-- `阅览模式`：保留完整画板和本地素材管理界面。
-- `图片模式`：选择图片模型、参考图、尺寸和质量后直接生成并回填画板。
-- `视频模式`：按模型能力显示画面比例、分辨率、时长、音频、联网搜索和水印参数。
-- `设置模式`：管理多个 OpenAI 兼容 API、拉取模型列表并设置全局调用关系。
-- 大尺寸视频参考图可在提交前确认压缩。
-- 生成期间在画板中显示占位动画，完成后自动替换为本地文件。
+- `图片模式`：选择模型、生成/编辑模式、参考图、比例、尺寸和质量。
+- `视频模式`：根据所选模型显示可用的时长、分辨率、画面比例、音频、联网搜索和水印参数。
+- 支持配置多个 OpenAI 兼容 API，并分别调用不同供应商的图片、视频或对话模型。
+- 支持从 `/v1/models` 拉取模型列表，也可以手动添加模型位。
+- 大尺寸参考图提交前会询问是否压缩，压缩结果只用于上传，不覆盖原图。
+- 生成任务可并行提交；画布会立即创建占位动画，完成后自动替换为本地素材。
+- 图片清晰度切换与视频封面更新使用模糊过渡，减少黑屏闪烁。
 
-### 任务记录与恢复
+### 任务记录与断线恢复
 
-- 在图片和视频模式中记录提示词、模型、参数、素材和输出路径。
-- 提示词可一键复制；失败任务可重试，断连任务可重新连接。
-- 视频提交携带唯一 `X-Log-Id`。当 POST 响应连接意外关闭时，客户端不会重复提交，而是使用恢复 ID 继续 GET 轮询，避免重复任务和重复扣费。
-- 应用重启后保留任务记录；已有远端任务 ID 的视频可以继续恢复和下载。
-
-无插件恢复需要 API 服务端支持以下协议：
-
-1. 接收并持久化请求头 `X-Log-Id`。
-2. 允许通过 `/v1/tasks/{log_id}` 或 `/v1/video/generations/{log_id}` 查询任务。
-3. 上游任务 ID 尚未返回时响应 `202 pending`，获得后返回真实任务 ID。
-
-不支持该协议的服务仍可使用仓库中的浏览器扩展作为补充下载链路。
+- 记录任务状态、提示词、模型、参数、参考素材和输出路径。
+- 提示词可直接复制，失败任务可重试，断连任务可重新连接。
+- 视频请求使用唯一 `X-Log-Id`。POST 连接意外关闭时，Flow Canvas 不会盲目重复提交，而是优先恢复轮询，降低重复任务和重复扣费风险。
+- 应用重启后保留任务记录；已获得远端任务 ID 的视频可以继续查询和下载。
+- 对不支持恢复协议的平台，可选用仓库内的 Chrome 同步扩展补充下载链路。
 
 ### MCP 与规划表
 
-Flow Canvas 启动后会在本机开放受限 HTTP 桥接。配套 MCP 服务可以让 Codex 等客户端读取当前文件夹组、规划表和画板素材，并执行受允许的新增、更新、删除和生成操作。
+- Codex 等 MCP 客户端可以读取当前文件夹组、画板素材和规划表。
+- 支持创建、读取和更新规划表及表格行。
+- 支持通过 MCP 新增、更新、删除画板元素，并调用已授权的图片或视频模型。
+- 本地桥接只监听 `127.0.0.1`，工具权限由 Flow Canvas 设置中的允许列表控制。
 
-默认地址：
+## 安装
 
-- Vite 开发服务：`http://127.0.0.1:15321`
-- Flow Canvas 本地桥接：`http://127.0.0.1:18765`
+### 使用安装包
 
-桥接只监听 `127.0.0.1`，可用工具由 Flow Canvas 设置中的允许列表控制。
+从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow Canvas Setup 1.0.0.exe`，按提示完成安装。
 
-## 技术架构
+也可以下载便携版 `Flow Canvas 1.0.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
 
-```mermaid
-flowchart LR
-    F["本地文件夹"] --> W["Watcher / Store"]
-    W --> C["Konva 无限画布"]
-    C --> U["图片与视频工作区"]
-    U --> B["Electron MCP Bridge"]
-    B --> A["OpenAI 兼容 API"]
-    A --> D["任务轮询与本地下载"]
-    D --> C
-    M["Codex / MCP Client"] --> S["stdio MCP Server"]
-    S --> B
-    X["可选 Chrome 扩展"] --> D
-```
+### 从源码运行
 
-| 目录 | 作用 |
-| --- | --- |
-| `src/` | Vite 前端、Konva 画布、素材侧栏和图片/视频工作区 |
-| `electron-main/` | Electron 主进程、文件监听、缩略图、剪贴板、生成请求和任务恢复 |
-| `shared/` | Electron 与 MCP 共用的规划表数据服务 |
-| `mcp/` | stdio MCP 服务入口与工具定义 |
-| `browser-extension/flow-canvas-sync/` | 可选 Chrome 任务同步与 Native Messaging 扩展 |
+环境要求：
 
-核心技术：Electron 28、Vite 5、Konva 9、Sharp 和 Chokidar。
-
-## 环境要求
-
-- Windows 10 或 Windows 11。
-- Node.js 18 或更高版本。
-- npm 9 或更高版本。
-- 使用外部生成能力时，需要一个 OpenAI 兼容 API Key。
-
-当前版本重点适配 Windows。其他桌面平台尚未验证文件剪贴板、资源管理器映射和安装包行为。
-
-## 本地运行
+- Windows 10 或 Windows 11
+- Node.js 18 或更高版本
+- npm 9 或更高版本
 
 ```powershell
 git clone https://github.com/U-uu-U/flow-canvas.git
@@ -94,43 +64,59 @@ npm ci
 npm run electron:dev
 ```
 
-也可以在依赖已安装后运行：
+依赖已经安装时，也可以运行：
 
 ```powershell
 .\start.bat
 ```
 
-仅启动前端预览：
+仅预览前端界面：
 
 ```powershell
 npm run dev
 ```
 
-浏览器预览无法使用 Electron 文件系统、系统剪贴板和窗口能力，完整体验应使用 `npm run electron:dev`。
+浏览器预览无法使用 Electron 文件系统、系统剪贴板、窗口置顶和资源管理器映射能力，完整功能应使用桌面应用。
 
-## API 配置
+## 快速开始
 
-1. 打开右上角设置。
-2. 添加 API 名称、Base URL 和 API Key。
-3. 点击拉取模型，从 `/v1/models` 返回结果中选择模型。
-4. 为模型选择图片或视频用途，并配置相应能力参数。
-5. 返回图片模式或视频模式开始生成。
+1. 启动 Flow Canvas，在左侧创建文件夹组并关联本地素材目录。
+2. 使用右上角设置按钮添加 API 名称、Base URL 和 API Key。
+3. 点击“拉取模型”，选择该 API 可用的模型并设置图片或视频用途。
+4. 从右下角模式按钮进入图片模式或视频模式。
+5. 选择模型和参数后开始生成；结果完成后会自动下载并写入当前画板。
 
-Flow Canvas 会根据配置规范化常见 OpenAI 兼容端点。视频服务至少需要支持：
+RavenHash 入口可从设置页直接打开：
+
+- [AI 中转站](https://ai.ravenhash.org/)
+- [创作中转站](https://art.ravenhash.org/)
+
+## API 兼容约定
+
+Flow Canvas 面向 OpenAI 兼容服务设计。模型列表默认请求：
+
+```text
+GET /v1/models
+```
+
+视频服务通常需要支持：
 
 ```text
 POST /v1/video/generations
 GET  /v1/video/generations/{task_id}
 ```
 
-也兼容使用 `/v1/tasks/{task_id}` 轮询的视频服务。RavenHash 入口可从设置页直接打开：
+也兼容使用 `/v1/tasks/{task_id}` 查询的视频服务。不同供应商的字段和能力并不完全一致，Flow Canvas 会根据模型配置决定可提交的时长、分辨率、比例及附加参数。
 
-- [AI 中转站](https://ai.ravenhash.org/)
-- [创作中转站](https://art.ravenhash.org/)
+若要在 POST 响应提前关闭后无插件恢复任务，服务端需要：
+
+1. 接收并持久化请求头 `X-Log-Id`。
+2. 允许通过 `/v1/tasks/{log_id}` 或 `/v1/video/generations/{log_id}` 查询任务。
+3. 上游任务 ID 尚未返回时响应 `202 pending`，获得后返回真实任务 ID。
 
 ## MCP 接入
 
-先启动 Flow Canvas，再把以下服务加入支持 MCP stdio 的客户端。Windows 示例：
+先启动 Flow Canvas，再把 stdio 服务加入支持 MCP 的客户端。Windows 配置示例：
 
 ```json
 {
@@ -138,7 +124,7 @@ GET  /v1/video/generations/{task_id}
     "flow-canvas": {
       "command": "node",
       "args": [
-        "E:\\案例\\flow-canvas\\mcp\\flow-canvas-mcp.mjs"
+        "C:\\path\\to\\flow-canvas\\mcp\\flow-canvas-mcp.mjs"
       ],
       "env": {
         "FLOW_CANVAS_BRIDGE_URL": "http://127.0.0.1:18765"
@@ -148,33 +134,32 @@ GET  /v1/video/generations/{task_id}
 }
 ```
 
-常用工具包括：
+常用工具：
 
-- `flow_canvas.context.get_active_group`：读取当前文件夹组和画板上下文。
-- `flow_canvas.plan.*`：创建、读取和更新规划表及表格行。
-- `flow_canvas.item.*`：读取和维护画板素材。
-- `flow_canvas.image.generate`：生成图片并写入当前画板。
-- `flow_canvas.video.generate`：提交视频任务、下载结果并写入当前画板。
+| 工具 | 用途 |
+| --- | --- |
+| `flow_canvas.context.get_active_group` | 读取当前文件夹组和画板上下文 |
+| `flow_canvas.plan.*` | 创建、读取和更新规划表 |
+| `flow_canvas.item.*` | 读取和维护画板素材 |
+| `flow_canvas.image.generate` | 生成图片并写入当前画板 |
+| `flow_canvas.video.generate` | 提交视频任务并将结果写入画板 |
 
-可通过环境变量 `FLOW_CANVAS_MCP_PORT` 修改默认端口，或使用 `FLOW_CANVAS_BRIDGE_URL` 指向已经运行的本地桥接。
+默认本地桥接地址是 `http://127.0.0.1:18765`。可通过 `FLOW_CANVAS_MCP_PORT` 修改端口，或使用 `FLOW_CANVAS_BRIDGE_URL` 指向已经运行的桥接服务。
 
-## 可选浏览器同步
+## 浏览器同步扩展
 
-浏览器扩展用于兼容尚未支持恢复协议的任务平台，也可以接管已登录 RavenHash 页面的历史任务下载。它不是支持恢复 ID 的新任务所必需的步骤。
+扩展主要用于兼容无法通过 API 恢复历史任务的平台，并不是正常生成流程的必需组件。
 
 1. 在 Chrome 打开 `chrome://extensions`。
 2. 启用“开发者模式”。
 3. 选择“加载已解压的扩展程序”。
 4. 加载 `browser-extension/flow-canvas-sync/`。
-5. 复制扩展 ID，运行 `browser-extension/flow-canvas-sync/install.bat <扩展ID>`。
-6. 重新加载扩展，并保持兼容站点处于登录状态。
+5. 按照[扩展说明](browser-extension/flow-canvas-sync/README.md)安装 Native Messaging 主机。
 
-扩展只注入以下站点：
+扩展仅注入以下站点：
 
 - `https://ai.ravenhash.org/*`
 - `https://art.ravenhash.org/*`
-
-页面登录令牌仅在页面上下文内用于调用同源任务接口，不会发送给扩展后台或 Flow Canvas。更多说明见 [扩展 README](browser-extension/flow-canvas-sync/README.md)。
 
 ## 数据与隐私
 
@@ -184,81 +169,73 @@ GET  /v1/video/generations/{task_id}
 %APPDATA%\flow-canvas\data\board.json
 ```
 
-同目录的 `backups/` 保存自动备份。画板数据主要包含文件路径、坐标、文件夹组和规划表，不包含原始素材文件本身。
+同目录的 `backups/` 保存自动备份。画板数据包含文件路径、坐标、文件夹组和规划表，不包含原始素材文件本身。
 
-API 配置和任务记录目前保存在 Electron `localStorage`。API Key 尚未接入 Windows Credential Manager，请勿把 `%APPDATA%\flow-canvas`、浏览器用户数据或包含密钥的截图提交到仓库。
+API 配置和任务记录目前保存在 Electron 本地存储中。`v1.0.0` 尚未接入 Windows Credential Manager，因此不要提交 `%APPDATA%\flow-canvas`、浏览器用户数据、包含密钥的截图或本地配置文件。仓库的 `.gitignore` 已排除常见凭据、用户数据、生成媒体和安装包。
 
-仓库的 `.gitignore` 已排除常见凭据、用户数据、数据库、生成媒体、安装包和测试输出，但提交前仍应检查：
+## 项目结构
 
-```powershell
-git status --short
+```mermaid
+flowchart LR
+    F["本地文件夹"] --> W["Watcher / Store"]
+    W --> C["Konva 无限画布"]
+    C --> U["图片与视频工作区"]
+    U --> B["Electron 本地桥接"]
+    B --> A["OpenAI 兼容 API"]
+    A --> D["任务轮询与本地下载"]
+    D --> C
+    M["Codex / MCP 客户端"] --> S["stdio MCP Server"]
+    S --> B
+    X["可选 Chrome 扩展"] --> D
 ```
 
-## 构建
-
-构建生产前端：
-
-```powershell
-npm run build
-```
-
-构建 Windows 安装版和便携版：
-
-```powershell
-npm run electron:build
-```
-
-产物写入 `release/`。当前仓库未配置正式应用图标和代码签名证书，Windows 可能显示 SmartScreen 提示。
-
-| 命令 | 说明 |
+| 目录 | 用途 |
 | --- | --- |
-| `npm run dev` | 启动 Vite 前端开发服务 |
-| `npm run electron:dev` | 启动 Vite 与 Electron 完整开发环境 |
-| `npm run build` | 构建生产前端 |
-| `npm run electron:build` | 构建 Windows 安装版和便携版 |
-| `npm run mcp` | 单独启动 stdio MCP 服务 |
+| `src/` | Vite 前端、Konva 画布、素材侧栏及图片/视频工作区 |
+| `electron-main/` | Electron 主进程、文件监听、缩略图、剪贴板、任务恢复与下载 |
+| `shared/` | Electron 与 MCP 共用的规划表数据服务 |
+| `mcp/` | stdio MCP 服务入口和工具定义 |
+| `browser-extension/flow-canvas-sync/` | 可选 Chrome 任务同步扩展 |
 
-## 常见问题
+核心技术：Electron 28、Vite 5、Konva 9、Sharp、Chokidar 和 GSAP。
 
-### 素材显示为断联
+## 开发与构建
 
-先确认原文件仍存在，再使用画板右键菜单中的自动修补或手动重接。自动修补会基于文件名、扩展名和相近路径进行容错匹配；重接后保留画板位置和显示尺寸。
+```powershell
+# 前端开发服务
+npm run dev
 
-### 视频已在服务器处理，本地却显示断开
+# Electron 完整开发环境
+npm run electron:dev
 
-不要立即重新生成。打开任务记录并点击“重新连接”。如果记录中存在任务 ID，Flow Canvas 只会恢复 GET 轮询，不会重新提交 POST。若服务端不支持 `X-Log-Id` 恢复协议，则需要通过兼容平台获取真实任务 ID，或启用可选浏览器扩展。
+# 构建生产前端
+npm run build
 
-### 模型列表拉取失败
+# 构建 Windows 安装版和便携版
+npm run electron:build
 
-检查 Base URL 是否指向 OpenAI 兼容 API 根路径、API Key 是否有效，以及服务是否实现 `/v1/models`。错误信息会显示在设置页对应 API 项中。
+# 单独启动 MCP stdio 服务
+npm run mcp
+```
 
-### 图片参考素材过大
-
-视频提交前可选择压缩参考图。压缩只生成用于上传的内存数据，不会覆盖本地原图。
-
-### 开发端口被占用
-
-结束旧的 Flow Canvas 开发进程后重新运行 `npm run electron:dev`。Vite 固定使用 `15321`，本地桥接默认使用 `18765`。
-
-## 开发状态
-
-该项目仍处于实验阶段，以下方面尚未完成稳定承诺：
-
-- 跨版本数据迁移和异常退出恢复。
-- 大型画板及高分辨率素材的内存优化。
-- 不同视频供应商参数能力的完整校验。
-- API Key 的系统凭据加密存储。
-- macOS 和 Linux 的桌面能力适配。
-- 安装包签名和自动更新。
-
-提交变更前至少执行：
+Windows 构建产物写入 `release/`。提交代码前至少执行：
 
 ```powershell
 node --check src/agent-sidebar.js
+node --check src/canvas.js
+node --check electron-main/mcp-bridge.js
 npm run build
 git diff --check
 ```
 
+## v1.0.0 支持范围
+
+- 桌面文件系统、剪贴板和资源管理器工作流目前只在 Windows 10/11 验证。
+- macOS 和 Linux 尚未完成桌面能力适配。
+- API 参数兼容程度取决于供应商对 OpenAI 风格端点和任务查询协议的实现。
+- 安装包尚未进行代码签名，也没有内置自动更新。
+- API Key 当前为本地应用存储，尚未使用系统凭据库加密。
+
 ## License
 
-仓库目前未包含开源许可证文件。在许可证补充前，源码的使用、修改与再分发不自动获得开源授权。
+当前仓库尚未包含开源许可证。在许可证文件补充前，公开源码不代表自动授予使用、修改或再分发权利。

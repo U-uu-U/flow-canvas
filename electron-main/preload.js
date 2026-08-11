@@ -76,6 +76,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 原生文件拖出到外部应用（支持单文件或多文件数组）
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
+        compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
         resumeVideo: (body) => ipcRenderer.invoke('mcp:video:resume', body),
     },

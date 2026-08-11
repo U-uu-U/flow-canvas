@@ -3,13 +3,9 @@
 // ============================================================
 
 const DEFAULT_TEMPLATES = {
-    openai: { name: 'OpenAI', type: 'openai', endpoint: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o' },
-    gemini: { name: 'Google Gemini', type: 'google', endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=', model: 'gemini-1.5-pro-latest' },
-    claude: { name: 'Claude', type: 'anthropic', endpoint: 'https://api.anthropic.com/v1/messages', model: 'claude-3-5-sonnet-latest' },
-    deepseek: { name: 'DeepSeek', type: 'openai', endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' },
+    'ravenhash-chat': { name: 'RavenHash Chat', type: 'openai', endpoint: 'https://ai.ravenhash.org', model: '' },
     ravenhash: { name: 'RavenHash Image', type: 'openai', endpoint: 'https://ai.ravenhash.org', model: 'gpt-image-2' },
-    seedance: { name: 'TokensByte Seedance 2.0', type: 'openai', endpoint: '', model: 'doubao-seedance-2-0' },
-    custom: { name: '自定义 API', type: 'openai', endpoint: '', model: '' }
+    'ravenhash-video': { name: 'RavenHash Video', type: 'openai', endpoint: 'https://art.ravenhash.org', model: 'doubao-seedance-2-0' }
 };
 
 const VIDEO_MODEL_PROFILES = [
@@ -104,7 +100,7 @@ const DEFAULT_VIDEO_MODEL_PROFILE = {
 };
 
 const DEFAULT_IMAGE_SIZES = [
-    { value: '', label: '自动（由模型决定）' },
+    { value: '', label: '自动（匹配比例，优先最大）' },
     { value: '1024x1024', label: '1024 × 1024（方图）' },
     { value: '1536x1024', label: '1536 × 1024（横图）' },
     { value: '1024x1536', label: '1024 × 1536（竖图）' }
@@ -143,7 +139,10 @@ export class AgentSidebar {
         this.isStreaming = false;
         this.editingProviderId = null;
         this.availableSkills = [];
+        this.imageGenerationMode = 'text';
+        this.imageReferenceSelections = [];
         this.videoReferenceSelections = { image: [], video: [], audio: [] };
+        this.activeReferenceWorkspace = null;
         this.activeVideoReferenceType = null;
 
         // DOM 引用
@@ -175,6 +174,7 @@ export class AgentSidebar {
         this.taskHistoryPanel = document.getElementById('agentTaskHistory');
         this.taskHistoryList = document.getElementById('agentTaskHistoryList');
         this.taskHistorySummary = document.getElementById('agentTaskHistorySummary');
+        this.agentSidebar = document.getElementById('agentSidebar');
         this.videoModelPicker = document.getElementById('videoModelPicker');
         this.videoModelSearchInput = document.getElementById('videoModelSearchInput');
         this.videoModelList = document.getElementById('videoModelList');
@@ -215,7 +215,14 @@ export class AgentSidebar {
         this.videoPromptModelChip = document.getElementById('videoPromptModelChip');
         this.imageWorkspace = document.getElementById('imageWorkspace');
         this.imagePromptInput = document.getElementById('imagePromptInput');
+        this.imageGenerationModeControl = document.getElementById('imageGenerationModeControl');
+        this.imageReferencePanel = document.getElementById('imageReferencePanel');
+        this.imageReferenceCount = document.getElementById('imageReferenceCount');
+        this.imageReferenceList = document.getElementById('imageReferenceList');
+        this.imageAddReferenceBtn = document.getElementById('imageAddReferenceBtn');
+        this.imageClearReferencesBtn = document.getElementById('imageClearReferencesBtn');
         this.imageSizeSelect = document.getElementById('imageSizeSelect');
+        this.imageQualitySelect = document.getElementById('imageQualitySelect');
         this.imageWorkspaceStatus = document.getElementById('imageWorkspaceStatus');
         this.imageGenerateBtn = document.getElementById('imageGenerateBtn');
         this.imageGenerateMessage = document.getElementById('imageGenerateMessage');
@@ -262,14 +269,23 @@ export class AgentSidebar {
         });
         this.options.subscribeMediaReferenceSelection?.((payload) => {
             const type = payload?.type;
+            if (this.activeReferenceWorkspace === 'image' && type === 'image') {
+                this.imageReferenceSelections = Array.isArray(payload.entries) ? payload.entries : [];
+                this._renderImageReferences();
+                return;
+            }
+            if (this.activeReferenceWorkspace !== 'video') return;
             if (!VIDEO_REFERENCE_LIMITS[type]) return;
             this.videoReferenceSelections[type] = (Array.isArray(payload.entries) ? payload.entries : [])
                 .slice(0, VIDEO_REFERENCE_LIMITS[type]);
             this._renderVideoSourcePreview();
         });
         this.options.subscribeMediaReferencePickState?.((payload) => {
-            this.activeVideoReferenceType = payload?.active ? payload.type : null;
+            const workspace = this.activeReferenceWorkspace;
+            if (!payload?.active) this.activeReferenceWorkspace = null;
+            this.activeVideoReferenceType = payload?.active && workspace === 'video' ? payload.type : null;
             this._renderVideoReferencePickState();
+            this._renderImageReferences();
         });
     }
 
@@ -304,14 +320,10 @@ export class AgentSidebar {
         toggleBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
         this.modePicker?.addEventListener('mouseenter', () => this._showModePicker());
         this.modePicker?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
-        const modeSettingsBtn = document.getElementById('creationModeSettingsBtn');
-        modeSettingsBtn?.addEventListener('mouseenter', () => this._showModePicker());
-        modeSettingsBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
-        modeSettingsBtn?.addEventListener('click', () => this.setMode('settings'));
         document.getElementById('creationModeImageBtn')?.addEventListener('click', () => this.setMode('image'));
         document.getElementById('creationModeVideoBtn')?.addEventListener('click', () => this.setMode('video'));
+        document.getElementById('creationModeReviewBtn')?.addEventListener('click', () => this.setMode('review'));
         this.taskHistoryBtn?.addEventListener('click', () => this._setTaskHistoryOpen(!this.taskHistoryOpen));
-        document.getElementById('agentTaskHistoryClose')?.addEventListener('click', () => this._setTaskHistoryOpen(false));
         this.taskHistoryList?.addEventListener('click', (event) => {
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
             if (copyPromptButton) {
@@ -326,6 +338,20 @@ export class AgentSidebar {
         this.videoAddVideoBtn?.addEventListener('click', () => this._toggleVideoReferencePick('video'));
         this.videoAddAudioBtn?.addEventListener('click', () => this._toggleVideoReferencePick('audio'));
         this.videoClearSourcesBtn?.addEventListener('click', () => this._clearVideoReferences());
+        this.agentSidebar?.addEventListener('pointerdown', (event) => {
+            if (!this.activeReferenceWorkspace || event.target.closest('.creation-source-add')) return;
+            this.options.endMediaReferencePick?.({ silent: true });
+        }, true);
+        this.imageGenerationModeControl?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-image-generation-mode]');
+            if (button) this._setImageGenerationMode(button.dataset.imageGenerationMode);
+        });
+        this.imageAddReferenceBtn?.addEventListener('click', () => this._toggleImageReferencePick());
+        this.imageClearReferencesBtn?.addEventListener('click', () => this._clearImageReferences());
+        this.imageReferenceList?.addEventListener('click', (event) => {
+            const button = event.target.closest('[data-remove-image-reference]');
+            if (button) this._removeImageReference(button.dataset.removeImageReference);
+        });
         this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
         document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
         this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
@@ -459,7 +485,7 @@ export class AgentSidebar {
     setMode(mode = 'review') {
         const nextMode = ['settings', 'image', 'video', 'review'].includes(mode) ? mode : 'review';
         const body = document.body;
-        if (this.currentMode === 'video' && nextMode !== 'video') {
+        if (['image', 'video'].includes(this.currentMode) && nextMode !== this.currentMode) {
             this.options.endMediaReferencePick?.({ clearHighlights: true });
         }
         this.currentMode = nextMode;
@@ -504,6 +530,8 @@ export class AgentSidebar {
         if (nextMode === 'video') {
             this._renderVideoSourcePreview();
             this._renderVideoStage();
+        } else if (nextMode === 'image') {
+            this._renderImageReferences();
         }
         this.modePicker?.classList.remove('mode-picker-visible');
         this.open();
@@ -573,7 +601,7 @@ export class AgentSidebar {
 
             const icon = document.createElement('span');
             icon.className = 'video-model-option-icon';
-            icon.textContent = '▶';
+            icon.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>';
 
             const copy = document.createElement('span');
             copy.className = 'video-model-option-copy';
@@ -604,6 +632,8 @@ export class AgentSidebar {
         const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
         const limits = this._getVideoReferenceLimits(profile);
         if ((limits[type] || 0) <= 0) return;
+        this.options.endMediaReferencePick?.({ silent: true });
+        this.activeReferenceWorkspace = 'video';
         this.options.beginMediaReferencePick?.(
             type,
             this.videoReferenceSelections[type],
@@ -631,17 +661,101 @@ export class AgentSidebar {
         this.videoAddVideoBtn?.classList.toggle('active', activeType === 'video');
         this.videoAddAudioBtn?.classList.toggle('active', activeType === 'audio');
         if (this.videoAddImageBtn) {
-            this.videoAddImageBtn.querySelector('span').textContent = activeType === 'image' ? '完成选图' : '添加图片';
+            this.videoAddImageBtn.querySelector('span').textContent = activeType === 'image' ? '选择图片中' : '添加图片';
             this.videoAddImageBtn.setAttribute('aria-pressed', String(activeType === 'image'));
         }
         if (this.videoAddVideoBtn) {
-            this.videoAddVideoBtn.querySelector('span').textContent = activeType === 'video' ? '完成选视频' : '添加视频';
+            this.videoAddVideoBtn.querySelector('span').textContent = activeType === 'video' ? '选择视频中' : '添加视频';
             this.videoAddVideoBtn.setAttribute('aria-pressed', String(activeType === 'video'));
         }
         if (this.videoAddAudioBtn) {
-            this.videoAddAudioBtn.querySelector('span').textContent = activeType === 'audio' ? '完成选音频' : '添加音频';
+            this.videoAddAudioBtn.querySelector('span').textContent = activeType === 'audio' ? '选择音频中' : '添加音频';
             this.videoAddAudioBtn.setAttribute('aria-pressed', String(activeType === 'audio'));
         }
+    }
+
+    _setImageGenerationMode(mode) {
+        this.imageGenerationMode = mode === 'reference' ? 'reference' : 'text';
+        if (this.imageGenerationMode !== 'reference' && this.activeReferenceWorkspace === 'image') {
+            this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
+        }
+        this._renderImageReferences();
+    }
+
+    _toggleImageReferencePick() {
+        if (this.activeReferenceWorkspace === 'image') {
+            this.options.endMediaReferencePick?.({ silent: true });
+            return;
+        }
+        this._setImageGenerationMode('reference');
+        this.options.endMediaReferencePick?.({ silent: true });
+        this.activeReferenceWorkspace = 'image';
+        this.options.beginMediaReferencePick?.(
+            'image',
+            this.imageReferenceSelections,
+            Number.MAX_SAFE_INTEGER,
+            { image: this.imageReferenceSelections }
+        );
+    }
+
+    _removeImageReference(id) {
+        this.imageReferenceSelections = this.imageReferenceSelections.filter(entry => (
+            String(entry.id || entry.itemId || entry.filePath) !== String(id)
+        ));
+        this.options.updateMediaReferencePick?.('image', this.imageReferenceSelections);
+        this._renderImageReferences();
+    }
+
+    _clearImageReferences() {
+        this.imageReferenceSelections = [];
+        if (this.activeReferenceWorkspace === 'image') {
+            this.options.endMediaReferencePick?.({ silent: true });
+        }
+        this.options.clearMediaReferenceSelections?.();
+        this._renderImageReferences();
+    }
+
+    _renderImageReferences() {
+        const isReferenceMode = this.imageGenerationMode === 'reference';
+        this.imageGenerationModeControl?.querySelectorAll('[data-image-generation-mode]').forEach(button => {
+            const active = button.dataset.imageGenerationMode === this.imageGenerationMode;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', String(active));
+        });
+        if (this.imageReferencePanel) this.imageReferencePanel.hidden = !isReferenceMode;
+        if (this.imageReferenceCount) this.imageReferenceCount.textContent = `已选 ${this.imageReferenceSelections.length} 张`;
+        if (this.imageClearReferencesBtn) this.imageClearReferencesBtn.hidden = this.imageReferenceSelections.length === 0;
+        const selecting = this.activeReferenceWorkspace === 'image';
+        this.imageAddReferenceBtn?.classList.toggle('active', selecting);
+        this.imageAddReferenceBtn?.setAttribute('aria-pressed', String(selecting));
+        const addLabel = this.imageAddReferenceBtn?.querySelector('span');
+        if (addLabel) addLabel.textContent = selecting ? '选择图片中' : '添加参考图';
+        if (!this.imageReferenceList) return;
+        this.imageReferenceList.replaceChildren();
+        if (this.imageReferenceSelections.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'creation-image-reference-empty';
+            empty.textContent = '点击“添加参考图”，再从画布中选择图片';
+            this.imageReferenceList.appendChild(empty);
+            return;
+        }
+        this.imageReferenceSelections.forEach((entry, index) => {
+            const item = document.createElement('div');
+            item.className = 'creation-image-reference-item';
+            const order = document.createElement('b');
+            order.textContent = String(index + 1);
+            const name = document.createElement('span');
+            name.textContent = String(entry.filePath || '').split(/[\\/]/).pop() || `参考图 ${index + 1}`;
+            name.title = entry.filePath || '';
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.dataset.removeImageReference = entry.id || entry.itemId || entry.filePath;
+            remove.title = '移除参考图';
+            remove.setAttribute('aria-label', `移除参考图 ${index + 1}`);
+            remove.innerHTML = '<svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>';
+            item.append(order, name, remove);
+            this.imageReferenceList.appendChild(item);
+        });
     }
 
     _renderVideoProviderContext() {
@@ -1235,13 +1349,18 @@ export class AgentSidebar {
 
     _setTaskHistoryOpen(open) {
         const nextOpen = Boolean(open) && ['image', 'video'].includes(this.currentMode);
+        const modeLabel = this.currentMode === 'image' ? '图片模式' : '视频模式';
         this.taskHistoryOpen = nextOpen;
         document.body.classList.toggle('task-history-open', nextOpen);
         if (this.taskHistoryPanel) this.taskHistoryPanel.hidden = !nextOpen;
+        if (this.modeTitle && ['image', 'video'].includes(this.currentMode)) {
+            this.modeTitle.textContent = nextOpen ? '任务记录' : modeLabel;
+        }
         if (this.taskHistoryBtn) {
             this.taskHistoryBtn.classList.toggle('active', nextOpen);
             this.taskHistoryBtn.setAttribute('aria-expanded', String(nextOpen));
-            this.taskHistoryBtn.title = nextOpen ? '返回当前模式' : '打开任务记录';
+            this.taskHistoryBtn.querySelector('.agent-task-history-label').textContent = nextOpen ? modeLabel : '任务记录';
+            this.taskHistoryBtn.title = nextOpen ? `返回${modeLabel}` : '打开任务记录';
             this.taskHistoryBtn.setAttribute('aria-label', this.taskHistoryBtn.title);
         }
         if (nextOpen) this._renderGenerationTasks();
@@ -1268,7 +1387,15 @@ export class AgentSidebar {
     }
 
     _taskParameterSummary(task) {
-        if (task.kind === 'image') return task.params?.size || '自动尺寸';
+        if (task.kind === 'image') {
+            const qualityLabel = {
+                auto: '自动质量',
+                low: '低质量',
+                medium: '中等质量',
+                high: '高质量'
+            }[task.params?.quality || 'high'];
+            return [task.params?.size || '自动尺寸', qualityLabel].filter(Boolean).join(' · ');
+        }
         return [
             task.params?.resolution,
             task.params?.ratio,
@@ -1299,9 +1426,7 @@ export class AgentSidebar {
         if (this.generationTasks.length === 0) {
             this.taskHistoryList.innerHTML = `
                 <div class="agent-task-history-empty">
-                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-                        <path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h6"></path>
-                    </svg>
+                    <svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
                     <strong>暂无任务记录</strong>
                     <span>图片和视频生成任务会显示在这里</span>
                 </div>`;
@@ -1341,9 +1466,7 @@ export class AgentSidebar {
                     <div class="agent-task-prompt-row">
                         <p class="agent-task-prompt" title="${this._escapeTaskText(task.prompt)}">${this._escapeTaskText(task.prompt)}</p>
                         <button class="agent-task-copy-prompt" type="button" data-copy-task-prompt="${this._escapeTaskText(task.id)}" title="复制提示词" aria-label="复制提示词">
-                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-                                <rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path>
-                            </svg>
+                            <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg>
                         </button>
                     </div>
                     <div class="agent-task-meta">
@@ -1438,7 +1561,7 @@ export class AgentSidebar {
                     providerConfig: provider,
                     prompt: task.prompt,
                     size: task.params?.size || undefined,
-                    quality: 'auto',
+                    quality: task.params?.quality || 'high',
                     responseFormat: 'url',
                     sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
                     x: placeholder?.x,
@@ -1542,11 +1665,11 @@ export class AgentSidebar {
                         <button class="video-compression-dialog-close" type="button" aria-label="\u5173\u95ed">\u00d7</button>
                     </div>
                     <div class="video-compression-file-list"></div>
-                    <p class="video-compression-dialog-note">\u538b\u7f29\u53ea\u7528\u4e8e\u672c\u6b21\u63d0\u4ea4\uff0c\u4e0d\u4f1a\u4fee\u6539\u78c1\u76d8\u539f\u56fe\u6216\u753b\u677f\u7d20\u6750\u3002</p>
+                    <p class="video-compression-dialog-note">\u538b\u7f29\u4f1a\u751f\u6210\u65b0\u56fe\u7247\u5e76\u653e\u5230\u753b\u677f\u4e0a\uff0c\u539f\u56fe\u4e0d\u4f1a\u88ab\u4fee\u6539\u3002\u538b\u7f29\u5b8c\u6210\u540e\u4e0d\u4f1a\u81ea\u52a8\u751f\u6210\u89c6\u9891\u3002</p>
                     <div class="video-compression-dialog-actions">
                         <button class="video-compression-cancel" type="button">\u53d6\u6d88</button>
-                        <button class="video-compression-original" type="button">\u4f7f\u7528\u539f\u56fe</button>
-                        <button class="video-compression-confirm" type="button">\u538b\u7f29\u540e\u63d0\u4ea4</button>
+                        <button class="video-compression-original" type="button">\u4f7f\u7528\u539f\u56fe\u7ee7\u7eed\u751f\u6210</button>
+                        <button class="video-compression-confirm" type="button">\u538b\u7f29\u5230\u753b\u677f</button>
                     </div>
                 </div>
             `;
@@ -1614,16 +1737,62 @@ export class AgentSidebar {
             filePath: entry.filePath
         }));
         if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
-        let compressionChoice = 'original';
         const compressionSummary = await this._inspectLargeVideoReferenceImages(imageReferences);
         if (compressionSummary) {
-            compressionChoice = await this._showVideoReferenceCompressionDialog(compressionSummary);
+            const compressionChoice = await this._showVideoReferenceCompressionDialog(compressionSummary);
             if (compressionChoice === 'cancel') {
                 if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
                 this._setWorkspaceMessage(this.videoGenerateMessage, '', '');
                 return;
             }
+            if (compressionChoice === 'compress') {
+                if (!window.flowCanvas?.mcp?.compressVideoReferences) {
+                    if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
+                    this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u538b\u7f29\u63a5\u53e3\u4e0d\u53ef\u7528\uff0c\u8bf7\u5b8c\u5168\u9000\u51fa\u5e76\u91cd\u65b0\u542f\u52a8 Flow Canvas');
+                    return;
+                }
+                this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u538b\u7f29\u53c2\u8003\u56fe...');
+                try {
+                    const compressionResult = await window.flowCanvas.mcp.compressVideoReferences({
+                        sourceReferences: imageReferences
+                    });
+                    if (compressionResult?.success === false) {
+                        throw new Error(compressionResult.error || '\u53c2\u8003\u56fe\u538b\u7f29\u5931\u8d25');
+                    }
+                    const replacements = new Map((compressionResult?.outputs || []).map(output => [
+                        String(output.sourceItemId || output.sourceFilePath),
+                        output
+                    ]));
+                    this.videoReferenceSelections.image = this.videoReferenceSelections.image.map(entry => {
+                        const replacement = replacements.get(String(entry.itemId || entry.id))
+                            || replacements.get(String(entry.filePath));
+                        if (!replacement?.item) return entry;
+                        return {
+                            id: replacement.item.id,
+                            itemId: replacement.item.id,
+                            filePath: replacement.filePath,
+                            mediaType: 'image'
+                        };
+                    });
+                    this.options.clearMediaReferenceSelections?.();
+                    this._renderVideoSourcePreview();
+                    const count = compressionResult?.outputs?.length || 0;
+                    this._setWorkspaceMessage(
+                        this.videoGenerateMessage,
+                        'success',
+                        `\u5df2\u5c06 ${count} \u5f20\u538b\u7f29\u56fe\u6dfb\u52a0\u5230\u753b\u677f\uff0c\u8bf7\u68c0\u67e5\u540e\u518d\u70b9\u51fb\u751f\u6210\u89c6\u9891`
+                    );
+                } catch (error) {
+                    this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
+                } finally {
+                    if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
+                }
+                return;
+            }
         }
+        // The expensive generation request is independent per task. Only the optional
+        // compression preflight keeps the button locked; submissions may run in parallel.
+        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
         const durationValue = this.videoDurationSelect?.value;
         const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
         const ratio = this.videoRatioSelect?.value || '16:9';
@@ -1635,7 +1804,7 @@ export class AgentSidebar {
             generateAudio: Boolean(this.videoGenerateAudio?.checked),
             webSearch: profile.supportsWebSearch ? Boolean(this.videoWebSearch?.checked) : null,
             watermark: Boolean(this.videoWatermark?.checked),
-            compressReferenceImages: compressionChoice === 'compress',
+            compressReferenceImages: false,
             videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
             audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
         };
@@ -1646,7 +1815,6 @@ export class AgentSidebar {
             videoParams,
             imageReferences.map(reference => reference.filePath).filter(Boolean)
         );
-        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
         if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
         this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
         const placeholder = this.options.beginVideoGeneration?.({ ratio }) || null;
@@ -1692,7 +1860,6 @@ export class AgentSidebar {
             this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
         } finally {
             if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
-            if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
         }
     }
 
@@ -1713,9 +1880,18 @@ export class AgentSidebar {
         }
 
         const size = this.imageSizeSelect?.value || undefined;
-        const sourcePaths = this._selectedImagePaths();
-        const generationTask = this._createGenerationTask('image', provider, prompt, { size: size || null }, sourcePaths);
-        if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = true;
+        const quality = this.imageQualitySelect?.value || 'high';
+        const sourcePaths = this.imageGenerationMode === 'reference'
+            ? this.imageReferenceSelections.map(entry => entry.filePath).filter(Boolean)
+            : [];
+        if (this.imageGenerationMode === 'reference' && sourcePaths.length === 0) {
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u4ece\u753b\u5e03\u4e2d\u9009\u62e9\u81f3\u5c11\u4e00\u5f20\u53c2\u8003\u56fe');
+            return;
+        }
+        const generationTask = this._createGenerationTask('image', provider, prompt, {
+            size: size || null,
+            quality
+        }, sourcePaths);
         this._setImageWorkspaceStatus('running', '\u751f\u6210\u4e2d');
         this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
         const placeholder = this.options.beginImageGeneration?.({ size }) || null;
@@ -1727,7 +1903,7 @@ export class AgentSidebar {
                 providerConfig: provider,
                 prompt,
                 size,
-                quality: 'auto',
+                quality,
                 responseFormat: 'url',
                 sourceReferences: sourcePaths.map(filePath => ({ filePath })),
                 x: placeholder?.x,
@@ -1756,7 +1932,6 @@ export class AgentSidebar {
             this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
         } finally {
             if (placeholder?.id) this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
-            if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = false;
         }
     }
 
@@ -2201,10 +2376,10 @@ export class AgentSidebar {
         } else {
             this.editingProviderId = null;
             this.apiFormTitle.textContent = '添加 API';
-            this._applyTemplate('openai'); // 默认模板
+            this._applyTemplate('ravenhash');
             this.formKey.value = '';
             this._resetModelSlots();
-            document.querySelector('.agent-template-chip[data-template="openai"]')?.classList.add('active');
+            document.querySelector('.agent-template-chip[data-template="ravenhash"]')?.classList.add('active');
         }
     }
 
@@ -2216,7 +2391,7 @@ export class AgentSidebar {
     }
 
     _applyTemplate(id) {
-        const tpl = DEFAULT_TEMPLATES[id] || DEFAULT_TEMPLATES.custom;
+        const tpl = DEFAULT_TEMPLATES[id] || DEFAULT_TEMPLATES.ravenhash;
         if (this.formName) this.formName.value = tpl.name;
         if (this.formType) this.formType.value = tpl.type;
         if (this.formEndpoint) this.formEndpoint.value = tpl.endpoint;
@@ -2490,12 +2665,7 @@ export class AgentSidebar {
 
             const delBtn = document.createElement('button');
             delBtn.className = 'agent-provider-action delete';
-            delBtn.innerHTML = `
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3 6 5 6 21 6"></polyline>
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
-            `;
+            delBtn.innerHTML = '<svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>';
             delBtn.title = '删除';
             delBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -3066,7 +3236,7 @@ export class AgentSidebar {
             prompt,
             title: 'Agent chat image',
             size: this.imageSizeSelect?.value || undefined,
-            quality: 'auto',
+            quality: this.imageQualitySelect?.value || 'high',
             responseFormat: 'url',
             sourceReferences: this._selectedImagePaths().map(filePath => ({ filePath })),
             addToCanvas: true

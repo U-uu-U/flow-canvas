@@ -1,7 +1,7 @@
 {
     "name": "flow-canvas",
     "version": "1.0.0",
-    "description": "Flow 本地资源白板工具 — 零拷贝索引，实时监听，智能剪贴板",
+    "description": "本地素材管理、无限画布与 AI 图片/视频创作桌面应用",
     "main": "electron-main/main.js",
     "scripts": {
         "dev": "vite",

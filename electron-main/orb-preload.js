@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webUtils } = require('electron');
 
 window.addEventListener('DOMContentLoaded', () => {
     const button = document.getElementById('orbButton');
@@ -16,10 +16,54 @@ window.addEventListener('DOMContentLoaded', () => {
         if (state) button.classList.add(state);
     };
 
-    const getDroppedFilePaths = (dataTransfer) => {
-        return Array.from(dataTransfer?.files || [])
-            .map(file => file?.path)
-            .filter(filePath => typeof filePath === 'string' && filePath.length > 0);
+    const getDroppedFilePath = (file) => {
+        if (!file) return '';
+        if (typeof file.path === 'string' && file.path) return file.path;
+        try {
+            return webUtils?.getPathForFile?.(file) || '';
+        } catch (_) {
+            return '';
+        }
+    };
+
+    const getTransferText = (dataTransfer, type) => {
+        try {
+            return String(dataTransfer?.getData?.(type) || '').trim();
+        } catch (_) {
+            return '';
+        }
+    };
+
+    const collectHttpUrls = (value) => String(value || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#') && /^https?:\/\//i.test(line));
+
+    const getDroppedPayload = (dataTransfer) => {
+        const filePaths = Array.from(dataTransfer?.files || [])
+            .map(getDroppedFilePath)
+            .filter(Boolean);
+        const urls = collectHttpUrls(getTransferText(dataTransfer, 'text/uri-list'));
+        const html = getTransferText(dataTransfer, 'text/html');
+
+        if (html) {
+            try {
+                const document = new DOMParser().parseFromString(html, 'text/html');
+                document.querySelectorAll('img[src]').forEach(image => {
+                    const src = image.getAttribute('src') || '';
+                    if (/^https?:\/\//i.test(src)) urls.push(src);
+                });
+            } catch (_) { }
+        }
+
+        if (urls.length === 0) {
+            urls.push(...collectHttpUrls(getTransferText(dataTransfer, 'text/plain')));
+        }
+
+        return {
+            filePaths: Array.from(new Set(filePaths)),
+            urls: Array.from(new Set(urls)).slice(0, 20)
+        };
     };
 
     const stopDragging = () => {
@@ -88,15 +132,15 @@ window.addEventListener('DOMContentLoaded', () => {
         event.stopPropagation();
         dragDepth = 0;
 
-        const filePaths = getDroppedFilePaths(event.dataTransfer);
-        if (filePaths.length === 0) {
+        const payload = getDroppedPayload(event.dataTransfer);
+        if (payload.filePaths.length === 0 && payload.urls.length === 0) {
             setDropState('drop-error');
             dropStateTimer = setTimeout(() => setDropState(), 900);
             return;
         }
 
         try {
-            const result = await ipcRenderer.invoke('window:queueOrbFiles', filePaths);
+            const result = await ipcRenderer.invoke('window:queueOrbFiles', payload);
             setDropState(result?.accepted > 0 ? 'drop-success' : 'drop-error');
         } catch (err) {
             console.error('[Orb] Failed to queue dropped files:', err);

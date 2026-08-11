@@ -799,9 +799,7 @@ export class SidebarManager {
             return `
             <div class="folder-group-item ${isActive ? 'active' : ''}" data-group-id="${safeGroupId}">
                 <div class="group-header" title="左键选中激活，双击重命名">
-                    <svg class="group-icon-svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                    </svg>
+                    <svg class="flow-icon flow-icon-sm group-icon-svg" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
                     <span class="group-name">${safeGroupName}</span>
                     <span class="group-folder-count">${folders.length}</span>
                     <button class="group-remove" title="删除组">×</button>

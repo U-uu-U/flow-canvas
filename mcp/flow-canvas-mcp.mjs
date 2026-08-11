@@ -203,7 +203,7 @@ const tools = [
                     type: 'string',
                     description: 'OpenAI-compatible size string, for example 1024x1024, 2880x2880, 3840x2160, or 2160x3840.'
                 },
-                quality: { type: 'string', default: 'auto' },
+                quality: { type: 'string', default: 'high' },
                 responseFormat: { type: 'string', enum: ['url', 'b64_json'], default: 'url' },
                 historyDisabled: { type: 'boolean', default: true }
             },

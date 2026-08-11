@@ -24,21 +24,14 @@
         <div class="sidebar-wrapper" id="sidebarWrapper">
             <aside class="sidebar" id="sidebar">
                 <button class="sidebar-collapse-btn" id="collapseSidebarBtn" title="收起栏目">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="15 18 9 12 15 6"></polyline>
-                    </svg>
+                    <span class="sidebar-collapse-triangle" aria-hidden="true"></span>
                 </button>
                 <div class="sidebar-content">
                     <div class="resource-saver-panel">
                         <button class="resource-saver-toggle" id="resourceSaverBtn" type="button" role="switch"
                             aria-checked="false" title="资源节省模式：常驻缩略图，悬停后临时加载原图">
                             <span class="resource-saver-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-                                    <path d="M12 3v18"></path>
-                                    <path d="M5 8h14"></path>
-                                    <path d="M7 16h10"></path>
-                                </svg>
+                                <svg class="flow-icon"><use href="./icons/flow-icons.svg#icon-filter"></use></svg>
                             </span>
                             <span class="resource-saver-copy">
                                 <span class="resource-saver-title">资源节省</span>
@@ -52,11 +45,7 @@
                         <div class="sidebar-header">
                             <span class="sidebar-label">文件夹组</span>
                             <button class="sidebar-btn" id="addGroupBtn" title="新建文件夹组">
-                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-                                    <line x1="12" y1="5" x2="12" y2="19" />
-                                    <line x1="5" y1="12" x2="19" y2="12" />
-                                </svg>
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
                             </button>
                         </div>
                         <div class="folder-group-list" id="folderGroupList">
@@ -69,10 +58,7 @@
                     <!-- 过滤器 -->
                     <div class="accordion-section" data-accordion>
                         <div class="accordion-header">
-                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-filter"></use></svg>
                             <span class="sidebar-label">过滤器</span>
                             <span class="accordion-chevron">▾</span>
                         </div>
@@ -93,12 +79,7 @@
                     <!-- 画布 -->
                     <div class="accordion-section" data-accordion>
                         <div class="accordion-header">
-                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                                <line x1="3" y1="9" x2="21" y2="9" />
-                                <line x1="9" y1="21" x2="9" y2="9" />
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
                             <span class="sidebar-label">画布</span>
                             <span class="accordion-chevron">▾</span>
                         </div>
@@ -119,12 +100,7 @@
                     <!-- 窗口 -->
                     <div class="accordion-section" data-accordion>
                         <div class="accordion-header">
-                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                                <line x1="8" y1="21" x2="16" y2="21" />
-                                <line x1="12" y1="17" x2="12" y2="21" />
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
                             <span class="sidebar-label">窗口</span>
                             <span class="accordion-chevron">▾</span>
                         </div>
@@ -157,29 +133,18 @@
             <div class="canvas-grid-overlay" id="canvasGrid"></div>
             <div id="canvasContainer"></div>
             <div class="board-usage" id="boardUsage" title="仅统计当前 Flow Canvas 白板窗口">
-                <span class="board-usage-label">白板</span>
                 <span class="board-usage-memory" id="boardUsageMemory">-- MB</span>
                 <span class="board-usage-detail" id="boardUsageDetail">0/0</span>
             </div>
             <!-- 画布空状态 -->
             <div class="canvas-empty" id="canvasEmpty">
                 <div class="canvas-empty-icon" aria-hidden="true">
-                    <svg viewBox="0 0 48 48" width="34" height="34" fill="none" stroke="currentColor"
-                        stroke-width="2">
-                        <rect x="9" y="13" width="30" height="23" rx="4"></rect>
-                        <path d="M9 19h30"></path>
-                        <path d="M17 13l3-5h8l3 5"></path>
-                        <path d="M19 27h10"></path>
-                    </svg>
+                    <svg class="flow-icon flow-icon-xl"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
                 </div>
                 <div class="canvas-empty-title">Flow Canvas</div>
                 <div class="canvas-empty-desc">关联一个本地文件夹开始使用</div>
                 <button class="canvas-empty-btn" id="emptyAddBtn">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                        stroke-width="2">
-                        <path d="M12 5v14"></path>
-                        <path d="M5 12h14"></path>
-                    </svg>
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
                     添加文件夹
                 </button>
             </div>
@@ -190,34 +155,19 @@
                 <div class="creation-source-card">
                     <div class="creation-source-actions" role="group" aria-label="添加视频参考素材">
                         <button class="creation-source-add" id="videoAddImageBtn" type="button">
-                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                                <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-                                <circle cx="8.5" cy="9" r="1.5"></circle>
-                                <path d="m4 17 5-5 4 4 3-3 4 4"></path>
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
                             <span>添加图片</span>
                         </button>
                         <button class="creation-source-add" id="videoAddVideoBtn" type="button">
-                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                                <rect x="3" y="5" width="13" height="14" rx="2"></rect>
-                                <path d="m16 10 5-3v10l-5-3z"></path>
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
                             <span>添加视频</span>
                         </button>
                         <button class="creation-source-add" id="videoAddAudioBtn" type="button">
-                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                                <path d="M9 18V5l10-2v13"></path>
-                                <circle cx="6" cy="18" r="3"></circle>
-                                <circle cx="16" cy="16" r="3"></circle>
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-audio"></use></svg>
                             <span>添加音频</span>
                         </button>
                         <button class="creation-source-clear" id="videoClearSourcesBtn" type="button" title="清空参考素材" aria-label="清空参考素材">
-                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                                <path d="M4 7h16"></path>
-                                <path d="M9 7V4h6v3"></path>
-                                <path d="m7 7 1 13h8l1-13"></path>
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
                         </button>
                     </div>
                 </div>
@@ -227,7 +177,7 @@
                         <button class="creation-prompt-chip model" id="videoPromptModelChip" type="button">未选择模型</button>
                     </div>
                     <button class="creation-generate-btn" id="videoGenerateBtn" type="button">
-                        <span class="creation-generate-icon" aria-hidden="true">▶</span>
+                        <svg class="flow-icon creation-generate-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-generate"></use></svg>
                         Run
                     </button>
                 </div>
@@ -240,19 +190,11 @@
                 <div class="agent-edge-controls" aria-label="模式控制">
                     <button class="agent-edge-btn agent-collapse-btn" id="agentCollapseBtn" title="收起边栏"
                         aria-label="收起边栏">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M5 5v14"></path>
-                            <polyline points="13 17 18 12 13 7"></polyline>
-                        </svg>
+                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
                     </button>
                     <button class="agent-edge-btn creation-mode-close-btn" id="creationModeCloseBtn"
                         title="退出当前模式" aria-label="退出当前模式">
-                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 3v8"></path>
-                            <path d="M6.7 6.7a7.5 7.5 0 1 0 10.6 0"></path>
-                        </svg>
+                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
                     </button>
                 </div>
                 <!-- 头部 -->
@@ -261,42 +203,22 @@
                         <span class="creation-mode-title" id="creationModeTitle">设置模式</span>
                         <button class="agent-task-history-btn" id="agentTaskHistoryBtn" type="button"
                             title="打开任务记录" aria-label="打开任务记录" aria-expanded="false">
-                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path>
-                                <path d="M3 3v5h5"></path>
-                                <path d="M12 7v5l3 2"></path>
-                            </svg>
-                            <span>任务记录</span>
+                            <svg class="flow-icon agent-task-history-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
+                            <i class="agent-task-history-return-icon" aria-hidden="true"></i>
+                            <span class="agent-task-history-label">任务记录</span>
                             <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
                         </button>
                     </div>
                     <div class="agent-header-right">
                         <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <circle cx="12" cy="12" r="3" />
-                                <path
-                                    d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
                         </button>
                     </div>
                 </div>
 
                 <section class="agent-task-history" id="agentTaskHistory" aria-label="任务记录" hidden>
                     <div class="agent-task-history-toolbar">
-                        <div>
-                            <h2>任务记录</h2>
-                            <p id="agentTaskHistorySummary">还没有生成任务</p>
-                        </div>
-                        <button class="agent-task-history-close" id="agentTaskHistoryClose" type="button"
-                            title="返回当前模式" aria-label="返回当前模式">
-                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M19 12H5"></path>
-                                <path d="m12 19-7-7 7-7"></path>
-                            </svg>
-                        </button>
+                        <p id="agentTaskHistorySummary">还没有生成任务</p>
                     </div>
                     <div class="agent-task-history-list" id="agentTaskHistoryList"></div>
                 </section>
@@ -344,20 +266,12 @@
                 <section class="video-model-picker" id="videoModelPicker" hidden aria-label="选择视频模型">
                     <div class="video-model-picker-header">
                         <div class="video-model-picker-title">
-                            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
-                                <rect x="3" y="3" width="7" height="7" rx="1"></rect>
-                                <rect x="14" y="3" width="7" height="7" rx="1"></rect>
-                                <rect x="3" y="14" width="7" height="7" rx="1"></rect>
-                                <rect x="14" y="14" width="7" height="7" rx="1"></rect>
-                            </svg>
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-models"></use></svg>
                             <h2>选择模型</h2>
                         </div>
                     </div>
                     <label class="video-model-search">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="11" cy="11" r="7"></circle>
-                            <path d="m20 20-3.5-3.5"></path>
-                        </svg>
+                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
                         <input id="videoModelSearchInput" type="search" placeholder="搜索视频模型..." autocomplete="off">
                     </label>
                     <div class="video-model-list" id="videoModelList"></div>
@@ -373,10 +287,7 @@
                     <article class="video-selected-model-card" id="videoSelectedModelCard">
                         <div class="video-selected-model-topline">
                             <span class="video-selected-model-avatar" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
-                                    <rect x="3" y="5" width="13" height="14" rx="3"></rect>
-                                    <path d="m16 10 5-3v10l-5-3z"></path>
-                                </svg>
+                                <svg class="flow-icon flow-icon-lg"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
                             </span>
                             <div class="video-selected-model-identity">
                                 <strong id="videoSelectedModelName">未选择模型</strong>
@@ -384,23 +295,13 @@
                             </div>
                             <div class="video-selected-model-actions">
                                 <button id="videoModelFavoriteBtn" type="button" title="收藏模型" aria-label="收藏模型" aria-pressed="false">
-                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"></path>
-                                    </svg>
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-favorite"></use></svg>
                                 </button>
                                 <button id="videoModelCopyBtn" type="button" title="复制模型 ID" aria-label="复制模型 ID">
-                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <rect x="8" y="8" width="11" height="11" rx="2"></rect>
-                                        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
-                                    </svg>
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg>
                                 </button>
                                 <button id="videoChangeModelBtn" type="button" title="更换视频模型" aria-label="更换视频模型">
-                                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8">
-                                        <rect x="3" y="3" width="7" height="7" rx="1"></rect>
-                                        <rect x="14" y="3" width="7" height="7" rx="1"></rect>
-                                        <rect x="3" y="14" width="7" height="7" rx="1"></rect>
-                                        <rect x="14" y="14" width="7" height="7" rx="1"></rect>
-                                    </svg>
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-models"></use></svg>
                                 </button>
                             </div>
                         </div>
@@ -473,17 +374,51 @@
                         <span>提示词</span>
                         <textarea id="imagePromptInput" rows="5" placeholder="描述你要生成的画面"></textarea>
                     </label>
+                    <div class="creation-image-mode-field">
+                        <span>生成模式</span>
+                        <div class="creation-image-mode-control" id="imageGenerationModeControl" role="group" aria-label="图片生成模式">
+                            <button class="active" type="button" data-image-generation-mode="text" aria-pressed="true">文生图</button>
+                            <button type="button" data-image-generation-mode="reference" aria-pressed="false">参考模式</button>
+                        </div>
+                    </div>
+                    <div class="creation-image-reference-panel" id="imageReferencePanel" hidden>
+                        <div class="creation-image-reference-head">
+                            <div>
+                                <span>参考图片</span>
+                                <small id="imageReferenceCount">已选 0 张</small>
+                            </div>
+                            <div class="creation-image-reference-actions">
+                                <button class="creation-source-add" id="imageAddReferenceBtn" type="button" aria-pressed="false">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
+                                    <span>添加参考图</span>
+                                </button>
+                                <button class="creation-source-clear" id="imageClearReferencesBtn" type="button" title="清空参考图" aria-label="清空参考图" hidden>
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="creation-image-reference-list" id="imageReferenceList"></div>
+                    </div>
                     <label class="creation-image-size-field">
                         <span>尺寸</span>
                         <select id="imageSizeSelect">
-                            <option value="">自动（由模型决定）</option>
+                            <option value="">自动（匹配比例，优先最大）</option>
                             <option value="1024x1024">1024 × 1024（方图）</option>
                             <option value="1536x1024">1536 × 1024（横图）</option>
                             <option value="1024x1536">1024 × 1536（竖图）</option>
                         </select>
                     </label>
+                    <label class="creation-image-quality-field">
+                        <span>质量</span>
+                        <select id="imageQualitySelect">
+                            <option value="auto">自动</option>
+                            <option value="low">低</option>
+                            <option value="medium">中</option>
+                            <option value="high" selected>高</option>
+                        </select>
+                    </label>
                     <button class="creation-generate-btn image-generate-btn" id="imageGenerateBtn" type="button">
-                        <span class="creation-generate-icon" aria-hidden="true">✦</span>
+                        <svg class="flow-icon creation-generate-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-generate"></use></svg>
                         生成图片
                     </button>
                     <div class="creation-workspace-message" id="imageGenerateMessage" aria-live="polite"></div>
@@ -497,11 +432,7 @@
 
                     <!-- 添加 API 按钮 -->
                     <button class="agent-add-api-btn" id="agentAddApiBtn">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <line x1="12" y1="5" x2="12" y2="19"></line>
-                            <line x1="5" y1="12" x2="19" y2="12"></line>
-                        </svg>
+                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
                         添加 API
                     </button>
 
@@ -540,13 +471,9 @@
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">快速模板</label>
                             <div class="agent-template-chips">
-                                <button class="agent-template-chip" data-template="openai">OpenAI</button>
-                                <button class="agent-template-chip" data-template="gemini">Google Gemini</button>
-                                <button class="agent-template-chip" data-template="claude">Claude</button>
-                                <button class="agent-template-chip" data-template="deepseek">DeepSeek</button>
+                                <button class="agent-template-chip" data-template="ravenhash-chat">RavenHash Chat</button>
                                 <button class="agent-template-chip" data-template="ravenhash">RavenHash Image</button>
-                                <button class="agent-template-chip" data-template="seedance">Seedance 2.0</button>
-                                <button class="agent-template-chip" data-template="custom">自定义</button>
+                                <button class="agent-template-chip" data-template="ravenhash-video">RavenHash Video</button>
                             </div>
                         </div>
 
@@ -654,25 +581,21 @@
             </aside>
         </div>
 
-        <!-- 图片 / 视频模式切换 -->
+        <!-- 视频 / 图片 / 阅览模式切换 -->
         <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
-            <button class="creation-mode-option image" id="creationModeImageBtn" type="button">
-                <span class="creation-mode-option-icon" aria-hidden="true">▧</span>
-                图片模式
-            </button>
             <button class="creation-mode-option video" id="creationModeVideoBtn" type="button">
-                <span class="creation-mode-option-icon" aria-hidden="true">▶</span>
+                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
                 视频模式
             </button>
+            <button class="creation-mode-option image" id="creationModeImageBtn" type="button">
+                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
+                图片模式
+            </button>
+            <button class="creation-mode-option review" id="creationModeReviewBtn" type="button">
+                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
+                阅览模式
+            </button>
         </div>
-        <button class="creation-mode-settings-shortcut" id="creationModeSettingsBtn" type="button"
-            title="设置模式" aria-label="打开设置模式">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-        </button>
         <button class="agent-toggle-btn" id="agentToggleBtn" title="点击收起窗口，悬停切换模式" aria-label="收起为置顶浮动按钮">
             <div class="toggle-btn-glow"></div>
             <svg class="toggle-btn-icon" viewBox="0 0 24 24" width="12" height="18" fill="currentColor">

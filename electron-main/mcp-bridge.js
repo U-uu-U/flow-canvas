@@ -13,7 +13,16 @@ const VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 const VIDEO_REFERENCE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const TEMP_REFERENCE_UPLOAD_ENDPOINT = 'https://litterbox.catbox.moe/resources/internals/api.php';
 const TEMP_REFERENCE_CACHE_TTL_MS = 50 * 60 * 1000;
+const TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS = 3;
 const temporaryReferenceUrlCache = new Map();
+const DEFAULT_IMAGE_SIZE_OPTIONS = ['1024x1024', '1536x1024', '1024x1536'];
+const RAVENHASH_IMAGE_SIZE_OPTIONS = [
+    ...DEFAULT_IMAGE_SIZE_OPTIONS,
+    '2048x2048',
+    '2880x2880',
+    '3840x2160',
+    '2160x3840'
+];
 const ROUTE_TO_TOOL = {
     'GET /health': 'flow_canvas.health',
     'GET /config': 'flow_canvas.config.get',
@@ -73,6 +82,13 @@ class FlowCanvasBridge {
         this.host = DEFAULT_MCP_CONFIG.host;
         this.port = DEFAULT_MCP_CONFIG.port;
         this.allowedTools = new Set(DEFAULT_MCP_CONFIG.allowedTools);
+        this.boardMutationQueue = Promise.resolve();
+    }
+
+    _commitBoardMutation(action) {
+        const commit = this.boardMutationQueue.catch(() => {}).then(action);
+        this.boardMutationQueue = commit;
+        return commit;
     }
 
     start(config = {}) {
@@ -427,10 +443,10 @@ class FlowCanvasBridge {
         const targetDir = targetInfo.targetDir;
 
         const sourceContext = collectImageSourceReferences(data, planService, body);
-        const generationOptions = {
+        const generationOptions = await resolveImageGenerationOptions({
             ...body,
             sourceReferences: sourceContext.references
-        };
+        });
 
         let result = null;
         if (body.provider !== 'builtin') {
@@ -443,49 +459,58 @@ class FlowCanvasBridge {
             result = await generateBuiltinPlaceholder(prompt, targetDir, generationOptions);
         }
 
-        const shouldAddToCanvas = result.provider !== 'builtin' || body.addToCanvas === true;
-        const item = shouldAddToCanvas
-            ? addBoardItem(data, result.filePath, {
-                x: body.x,
-                y: body.y,
-                width: result.width,
-                height: result.height
-            })
-            : null;
+        const committed = await this._commitBoardMutation(async () => {
+            const { data: latestData, planService: latestPlanService } = this._loadWithPlanService();
+            const shouldAddToCanvas = result.provider !== 'builtin' || body.addToCanvas === true;
+            const item = shouldAddToCanvas
+                ? addBoardItem(latestData, result.filePath, {
+                    x: body.x,
+                    y: body.y,
+                    width: result.width,
+                    height: result.height
+                })
+                : null;
 
-        if (body.planId && body.rowId && item) {
-            const generatedReference = {
-                itemId: item.id,
-                filePath: item.filePath,
-                name: path.basename(item.filePath),
-                kind: 'output'
-            };
-            const references = body.replaceReferences === true
-                ? [generatedReference]
-                : dedupeRowReferences([
-                    ...((planService.getPlan(body.planId)?.rows || []).find(entry => entry.id === body.rowId)?.references || []),
-                    generatedReference
-                ]);
-            const row = planService.updateRow(body.planId, body.rowId, {
-                references
-            });
-            if (!row) {
-                console.warn('[FlowCanvasBridge] generated image added, but row reference failed:', body.planId, body.rowId);
+            if (body.planId && body.rowId && item) {
+                const generatedReference = {
+                    itemId: item.id,
+                    filePath: item.filePath,
+                    name: path.basename(item.filePath),
+                    kind: 'output'
+                };
+                const references = body.replaceReferences === true
+                    ? [generatedReference]
+                    : dedupeRowReferences([
+                        ...((latestPlanService.getPlan(body.planId)?.rows || []).find(entry => entry.id === body.rowId)?.references || []),
+                        generatedReference
+                    ]);
+                const row = latestPlanService.updateRow(body.planId, body.rowId, { references });
+                if (!row) {
+                    console.warn('[FlowCanvasBridge] generated image added, but row reference failed:', body.planId, body.rowId);
+                }
             }
-        }
 
-        this._saveAndNotify(data, 'mcp:image-generated');
+            this._saveAndNotify(latestData, 'mcp:image-generated');
+            return {
+                item,
+                plan: body.planId ? latestPlanService.getPlan(body.planId) : null
+            };
+        });
         return {
-            item,
+            item: committed.item,
             filePath: result.filePath,
             provider: result.provider,
             image: {
                 width: result.width,
                 height: result.height
             },
+            requestedSize: result.requestedSize || generationOptions.size || null,
+            actualSize: result.actualSize || null,
+            sizeMatchesRequest: result.sizeMatchesRequest,
+            quality: generationOptions.quality,
             sourceReferences: sourceContext.references,
             missingSourceReferences: sourceContext.missing,
-            plan: body.planId ? planService.getPlan(body.planId) : null,
+            plan: committed.plan,
             targetDir,
             requestedTargetDir,
             targetDirFallback: targetInfo.fallbackReason
@@ -525,34 +550,41 @@ class FlowCanvasBridge {
             filePath: result.filePath
         });
 
-        const item = body.addToCanvas === false
-            ? null
-            : addBoardItem(data, result.filePath, {
-                x: body.x,
-                y: body.y,
-                width: result.width,
-                height: result.height
-            });
+        const committed = await this._commitBoardMutation(async () => {
+            const { data: latestData, planService: latestPlanService } = this._loadWithPlanService();
+            const item = body.addToCanvas === false
+                ? null
+                : addBoardItem(latestData, result.filePath, {
+                    x: body.x,
+                    y: body.y,
+                    width: result.width,
+                    height: result.height
+                });
 
-        if (body.planId && body.rowId && item) {
-            const generatedReference = {
-                itemId: item.id,
-                filePath: item.filePath,
-                name: path.basename(item.filePath),
-                kind: 'output'
+            if (body.planId && body.rowId && item) {
+                const generatedReference = {
+                    itemId: item.id,
+                    filePath: item.filePath,
+                    name: path.basename(item.filePath),
+                    kind: 'output'
+                };
+                const references = body.replaceReferences === true
+                    ? [generatedReference]
+                    : dedupeRowReferences([
+                        ...((latestPlanService.getPlan(body.planId)?.rows || []).find(entry => entry.id === body.rowId)?.references || []),
+                        generatedReference
+                    ]);
+                latestPlanService.updateRow(body.planId, body.rowId, { references });
+            }
+
+            this._saveAndNotify(latestData, 'mcp:video-generated');
+            return {
+                item,
+                plan: body.planId ? latestPlanService.getPlan(body.planId) : null
             };
-            const references = body.replaceReferences === true
-                ? [generatedReference]
-                : dedupeRowReferences([
-                    ...((planService.getPlan(body.planId)?.rows || []).find(entry => entry.id === body.rowId)?.references || []),
-                    generatedReference
-                ]);
-            planService.updateRow(body.planId, body.rowId, { references });
-        }
-
-        this._saveAndNotify(data, 'mcp:video-generated');
+        });
         return {
-            item,
+            item: committed.item,
             filePath: result.filePath,
             provider: result.provider,
             taskId: result.taskId,
@@ -561,7 +593,73 @@ class FlowCanvasBridge {
             videoReferences: videoSourceContext.references,
             audioReferences: audioSourceContext.references,
             missingSourceReferences: [...sourceContext.missing, ...videoSourceContext.missing, ...audioSourceContext.missing],
-            plan: body.planId ? planService.getPlan(body.planId) : null,
+            plan: committed.plan,
+            targetDir,
+            requestedTargetDir,
+            targetDirFallback: targetInfo.fallbackReason
+        };
+    }
+
+    async compressVideoReferenceImagesFromRenderer(body) {
+        const { data, planService } = this._loadWithPlanService();
+        const sourceContext = collectImageSourceReferences(data, planService, body);
+        const references = sourceContext.references.slice(0, 9);
+        if (references.length === 0) throw new Error('\u6ca1\u6709\u53ef\u538b\u7f29\u7684\u53c2\u8003\u56fe\u7247');
+
+        const requestedTargetDir = body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.();
+        if (!requestedTargetDir) throw new Error('\u6ca1\u6709\u53ef\u7528\u7684\u538b\u7f29\u56fe\u7247\u4fdd\u5b58\u76ee\u5f55');
+        const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
+        const targetDir = targetInfo.targetDir;
+        const targetBytes = Math.max(
+            768 * 1024,
+            Math.min(VIDEO_REFERENCE_MAX_OUTPUT_BYTES, Math.floor(VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES / references.length))
+        );
+        const outputs = [];
+
+        for (const reference of references) {
+            const sourcePath = String(reference.filePath || '');
+            const originalBytes = fs.statSync(sourcePath).size;
+            if (originalBytes <= targetBytes) continue;
+
+            const compressed = await compressVideoReferenceImage(sourcePath, targetBytes);
+            const extension = compressed.mimeType === 'image/webp' ? '.webp' : '.jpg';
+            const filePath = path.join(
+                targetDir,
+                uniqueImageName('flow_compressed', path.basename(sourcePath, path.extname(sourcePath)), extension)
+            );
+            await fs.promises.writeFile(filePath, compressed.buffer);
+            const metadata = await sharp(compressed.buffer).metadata();
+            const sourceItem = findBoardItem(data, reference.itemId)
+                || (data.items || []).find(item => normalizeFsPath(item.filePath) === normalizeFsPath(sourcePath));
+            const sourceWidth = Number(sourceItem?.width);
+            const sourceHeight = Number(sourceItem?.height);
+            const item = addBoardItem(data, filePath, {
+                x: Number.isFinite(sourceItem?.x)
+                    ? sourceItem.x + (Number.isFinite(sourceWidth) ? sourceWidth : 320) + 40
+                    : undefined,
+                y: Number.isFinite(sourceItem?.y) ? sourceItem.y : undefined,
+                width: Number.isFinite(sourceWidth) ? sourceWidth : undefined,
+                height: Number.isFinite(sourceHeight) ? sourceHeight : undefined
+            });
+            outputs.push({
+                sourceItemId: reference.itemId || null,
+                sourceFilePath: sourcePath,
+                item: describeBoardItem(item),
+                filePath,
+                originalBytes,
+                compressedBytes: compressed.buffer.length,
+                width: metadata.width || null,
+                height: metadata.height || null
+            });
+        }
+
+        if (outputs.length === 0) {
+            throw new Error('\u53c2\u8003\u56fe\u5df2\u7b26\u5408\u4e0a\u4f20\u5927\u5c0f\uff0c\u65e0\u9700\u538b\u7f29');
+        }
+        this._saveAndNotify(data, 'mcp:image-compressed');
+        return {
+            outputs,
+            missingSourceReferences: sourceContext.missing,
             targetDir,
             requestedTargetDir,
             targetDirFallback: targetInfo.fallbackReason
@@ -816,6 +914,59 @@ function collectImageSourceReferences(data, planService, body = {}) {
     return { references, missing };
 }
 
+async function resolveImageGenerationOptions(options = {}) {
+    const requestedSize = String(options.size || '').trim().replace(/\u00d7/g, 'x');
+    const requestedQuality = String(options.quality || '').trim().toLowerCase();
+    const quality = ['auto', 'low', 'medium', 'high'].includes(requestedQuality)
+        ? requestedQuality
+        : 'high';
+    if (requestedSize) return { ...options, size: requestedSize, quality };
+
+    const marker = `${options?.providerConfig?.endpoint || ''} ${options?.providerConfig?.name || ''}`.toLowerCase();
+    const candidates = /ai\.ravenhash\.org|ravenhash/.test(marker)
+        ? RAVENHASH_IMAGE_SIZE_OPTIONS
+        : DEFAULT_IMAGE_SIZE_OPTIONS;
+    const referenceAspect = await resolveLargestReferenceAspect(options.sourceReferences);
+    const size = chooseLargestClosestImageSize(candidates, referenceAspect);
+    return { ...options, size, quality };
+}
+
+async function resolveLargestReferenceAspect(references = []) {
+    let selected = null;
+    for (const reference of Array.isArray(references) ? references : []) {
+        try {
+            const metadata = await sharp(reference.filePath).rotate().metadata();
+            const width = Number(metadata.width) || 0;
+            const height = Number(metadata.height) || 0;
+            const area = width * height;
+            if (width > 0 && height > 0 && (!selected || area > selected.area)) {
+                selected = { area, aspect: width / height };
+            }
+        } catch (_) {
+            // Ignore a reference whose metadata cannot be inspected.
+        }
+    }
+    return selected?.aspect || null;
+}
+
+function chooseLargestClosestImageSize(candidates = [], referenceAspect = null) {
+    const parsed = candidates.map(value => {
+        const match = String(value).match(/^(\d+)x(\d+)$/i);
+        if (!match) return null;
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        return { value, width, height, area: width * height, aspect: width / height };
+    }).filter(Boolean);
+    parsed.sort((left, right) => {
+        const leftDistance = referenceAspect ? Math.abs(Math.log(left.aspect / referenceAspect)) : 0;
+        const rightDistance = referenceAspect ? Math.abs(Math.log(right.aspect / referenceAspect)) : 0;
+        if (Math.abs(leftDistance - rightDistance) > 0.0001) return leftDistance - rightDistance;
+        if (left.area !== right.area) return right.area - left.area;
+        return right.width - left.width;
+    });
+    return parsed[0]?.value || '1024x1024';
+}
+
 function collectVideoSourceReferences(data, requested = []) {
     const references = [];
     const missing = [];
@@ -934,12 +1085,44 @@ function collectImageEditInputs(sourceReferences = []) {
             : extension === '.webp'
                 ? 'image/webp'
                 : 'image/jpeg';
+        const base64 = fs.readFileSync(filePath).toString('base64');
         return {
-            base64: fs.readFileSync(filePath).toString('base64'),
-            filename: path.basename(filePath),
-            mime_type: mimeType
+            image_url: `data:${mimeType};base64,${base64}`
         };
     });
+}
+
+async function resolveGeneratedImageBuffer(image, endpoint) {
+    const base64Value = String(image?.b64_json || image?.base64 || '').trim();
+    if (base64Value) return Buffer.from(base64Value.replace(/\s+/g, ''), 'base64');
+
+    const sourceValue = image?.url?.url || image?.url || image?.image_url?.url || image?.image_url;
+    const source = String(sourceValue || '').trim();
+    if (!source) return null;
+
+    if (/^data:/i.test(source)) {
+        const commaIndex = source.indexOf(',');
+        if (commaIndex < 0) throw new Error('Image API returned an invalid Data URL');
+        const metadata = source.slice(0, commaIndex);
+        const payload = source.slice(commaIndex + 1);
+        return /;base64(?:;|$)/i.test(metadata)
+            ? Buffer.from(payload.replace(/\s+/g, ''), 'base64')
+            : Buffer.from(decodeURIComponent(payload), 'utf8');
+    }
+
+    if (source.length > 512 && /^[A-Za-z0-9+/=\s]+$/.test(source)) {
+        return Buffer.from(source.replace(/\s+/g, ''), 'base64');
+    }
+
+    let imageUrl;
+    try {
+        imageUrl = new URL(source, endpoint).toString();
+    } catch (_) {
+        throw new Error(`Image API returned an invalid image URL: ${source.slice(0, 160)}`);
+    }
+    const imageRes = await net.fetch(imageUrl, { redirect: 'follow' });
+    if (!imageRes.ok) throw new Error(`Image download failed: ${imageRes.status}`);
+    return Buffer.from(await imageRes.arrayBuffer());
 }
 
 async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
@@ -955,11 +1138,13 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         const endpoint = buildOpenAiImageEndpoint(providerConfig.endpoint, isEdit ? 'edits' : 'generations');
         const model = process.env.FLOW_CANVAS_IMAGE_MODEL || providerConfig.model || options.model || 'gpt-image-2';
         const size = String(options.size || '').trim().replace(/\u00d7/g, 'x');
+        const requestedQuality = String(options.quality || 'high').trim().toLowerCase();
+        const quality = ['auto', 'low', 'medium', 'high'].includes(requestedQuality) ? requestedQuality : 'high';
         const requestBody = {
             model,
             prompt,
             n: Math.min(8, Math.max(1, Number(options.n) || 1)),
-            quality: String(options.quality || 'auto'),
+            quality,
             response_format: options.responseFormat === 'b64_json' ? 'b64_json' : 'url',
             stream: false
         };
@@ -972,15 +1157,18 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 300000);
+        const requestId = options.requestId || crypto.randomUUID?.() || crypto.randomBytes(16).toString('hex');
         let res;
         try {
             res = await net.fetch(endpoint, {
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                Accept: 'application/json'
-            },
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'Idempotency-Key': requestId,
+                    'X-Log-Id': requestId
+                },
                 body: JSON.stringify(requestBody),
                 signal: controller.signal,
                 redirect: 'follow'
@@ -994,15 +1182,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         }
         const json = await res.json();
         const image = json?.data?.[0];
-        let buffer = null;
-        if (image?.b64_json) {
-            buffer = Buffer.from(image.b64_json, 'base64');
-        } else if (image?.url) {
-            const imageUrl = new URL(image.url, endpoint).toString();
-            const imageRes = await net.fetch(imageUrl);
-            if (!imageRes.ok) throw new Error(`Image download failed: ${imageRes.status}`);
-            buffer = Buffer.from(await imageRes.arrayBuffer());
-        }
+        const buffer = await resolveGeneratedImageBuffer(image, endpoint);
         if (!buffer) return { success: false, error: 'OpenAI response did not include image data' };
         const metadata = await sharp(buffer).metadata().catch(() => ({}));
         const extension = metadata.format === 'jpeg'
@@ -1278,36 +1458,60 @@ async function uploadTemporaryReference(dataUri, label) {
         buffer,
         Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
     ]);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 45_000);
-    let response;
-    let responseText;
-    try {
-        response = await net.fetch(TEMP_REFERENCE_UPLOAD_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                Accept: 'text/plain'
-            },
-            body,
-            signal: controller.signal,
-            redirect: 'follow'
-        });
-        responseText = (await response.text()).trim();
-    } catch (error) {
-        throw new Error(`${label}临时上传失败：${error.message || String(error)}`);
-    } finally {
-        clearTimeout(timeout);
-    }
-    if (!response.ok || !/^https?:\/\/\S+$/i.test(responseText)) {
-        throw new Error(`${label}临时上传失败：HTTP ${response.status} ${responseText.slice(0, 300)}`);
+    let lastFailure = '未知错误';
+    for (let attempt = 1; attempt <= TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 45_000);
+        let response;
+        let responseText = '';
+        let retryable = true;
+        try {
+            response = await net.fetch(TEMP_REFERENCE_UPLOAD_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                    Accept: 'text/plain'
+                },
+                body,
+                signal: controller.signal,
+                redirect: 'follow'
+            });
+            responseText = (await response.text()).trim();
+            if (response.ok && /^https?:\/\/\S+$/i.test(responseText)) {
+                temporaryReferenceUrlCache.set(contentHash, {
+                    url: responseText,
+                    expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
+                });
+                return responseText;
+            }
+            lastFailure = `HTTP ${response.status} ${responseText.slice(0, 300)}`.trim();
+            retryable = [408, 425, 429].includes(response.status) || response.status >= 500 || response.ok;
+        } catch (error) {
+            lastFailure = error?.name === 'AbortError'
+                ? '上传超时（45 秒）'
+                : (error.message || String(error));
+        } finally {
+            clearTimeout(timeout);
+        }
+
+        if (!retryable || attempt === TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS) break;
+        const retryAfterSeconds = Number(response?.headers?.get('retry-after'));
+        const delay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? Math.min(10_000, retryAfterSeconds * 1000)
+            : 800 * (2 ** (attempt - 1));
+        console.warn(`[FlowCanvasBridge] ${label} temporary upload failed; retrying ${attempt + 1}/${TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS}:`, lastFailure);
+        await sleep(delay);
     }
 
-    temporaryReferenceUrlCache.set(contentHash, {
-        url: responseText,
-        expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
-    });
-    return responseText;
+    throw new Error(`${label}临时上传失败（最多已尝试 ${TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS} 次）：${lastFailure}`);
+}
+
+async function uploadTemporaryReferences(entries, labelPrefix) {
+    const urls = [];
+    for (let index = 0; index < entries.length; index += 1) {
+        urls.push(await uploadTemporaryReference(entries[index], `${labelPrefix} ${index + 1}`));
+    }
+    return urls;
 }
 
 function getVideoResultUrl(payload) {
@@ -1549,12 +1753,11 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
             if (audioUrls.length > 0 && images.length === 0) {
                 return { success: false, error: 'MiniMax H3 使用参考音频时必须同时提供至少一张参考图片' };
             }
-            const imageUrls = await Promise.all(images.map((image, index) => (
-                uploadTemporaryReference(image.url, `参考图片 ${index + 1}`)
-            )));
-            const referenceAudioUrls = await Promise.all(audioUrls.map((url, index) => (
-                uploadTemporaryReference(url, `参考音频 ${index + 1}`)
-            )));
+            const imageUrls = await uploadTemporaryReferences(
+                images.map(image => image.url),
+                '参考图片'
+            );
+            const referenceAudioUrls = await uploadTemporaryReferences(audioUrls, '参考音频');
             if (imageUrls.length === 1) {
                 body.first_image = imageUrls[0];
             } else if (imageUrls.length === 2) {
