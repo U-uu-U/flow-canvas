@@ -136,6 +136,17 @@
                 <span class="board-usage-memory" id="boardUsageMemory">-- MB</span>
                 <span class="board-usage-detail" id="boardUsageDetail">0/0</span>
             </div>
+            <div class="canvas-minimap" id="canvasMinimap" hidden>
+                <div class="canvas-minimap-toolbar">
+                    <span class="canvas-minimap-zoom" id="canvasMinimapZoom">100%</span>
+                    <button class="canvas-minimap-fit" id="canvasMinimapFit" type="button"
+                        title="适配全部" aria-label="适配全部画布内容">
+                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                    </button>
+                </div>
+                <canvas id="canvasMinimapMap" width="184" height="108" tabindex="0"
+                    aria-label="画布小地图"></canvas>
+            </div>
             <!-- 画布空状态 -->
             <div class="canvas-empty" id="canvasEmpty">
                 <div class="canvas-empty-icon" aria-hidden="true">
@@ -149,32 +160,24 @@
                 </button>
             </div>
             <section class="creation-prompt-dock video-prompt-dock" id="videoPromptDock" hidden aria-label="视频创作提示词">
+                <div class="video-prompt-resize-handle" id="videoPromptResizeHandle" role="separator"
+                    aria-label="调整提示词区域高度" aria-orientation="horizontal" tabindex="0">
+                    <span aria-hidden="true"></span>
+                </div>
                 <label class="creation-prompt-field">
                     <textarea id="videoPromptInput" rows="3" placeholder="Start typing a prompt to create 视频创作..."></textarea>
                 </label>
-                <div class="creation-source-card">
-                    <div class="creation-source-actions" role="group" aria-label="添加视频参考素材">
-                        <button class="creation-source-add" id="videoAddImageBtn" type="button">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
-                            <span>添加图片</span>
-                        </button>
-                        <button class="creation-source-add" id="videoAddVideoBtn" type="button">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
-                            <span>添加视频</span>
-                        </button>
-                        <button class="creation-source-add" id="videoAddAudioBtn" type="button">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-audio"></use></svg>
-                            <span>添加音频</span>
-                        </button>
-                        <button class="creation-source-clear" id="videoClearSourcesBtn" type="button" title="清空参考素材" aria-label="清空参考素材">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
-                        </button>
-                    </div>
-                </div>
                 <div class="creation-prompt-dock-actions">
-                    <div class="creation-prompt-meta">
-                        <span class="creation-prompt-chip key" id="videoPromptProviderChip">未配置视频 API</span>
-                        <button class="creation-prompt-chip model" id="videoPromptModelChip" type="button">未选择模型</button>
+                    <div class="creation-source-card">
+                        <div class="creation-source-actions" role="group" aria-label="添加视频参考素材">
+                            <button class="creation-source-add creation-source-add-media" id="videoAddMediaBtn" type="button" aria-pressed="false">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                <span>添加素材</span>
+                            </button>
+                            <button class="creation-source-clear" id="videoClearSourcesBtn" type="button" title="清空参考素材" aria-label="清空参考素材">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                            </button>
+                        </div>
                     </div>
                     <button class="creation-generate-btn" id="videoGenerateBtn" type="button">
                         <svg class="flow-icon creation-generate-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-generate"></use></svg>
@@ -227,12 +230,6 @@
                 <div class="agent-model-bar">
                     <div class="agent-model-pickers">
                         <label class="agent-model-picker">
-                            <span class="agent-model-picker-label">对话</span>
-                            <select class="agent-model-select" id="agentModelSelect">
-                                <option value="">-- 请先添加 API --</option>
-                            </select>
-                        </label>
-                        <label class="agent-model-picker">
                             <span class="agent-model-picker-label">生图</span>
                             <select class="agent-model-select" id="agentImageModelSelect">
                                 <option value="">-- 请先添加 API --</option>
@@ -245,22 +242,6 @@
                             </select>
                         </label>
                     </div>
-                    <button class="agent-plan-btn" id="agentPlanBtn" title="辅助规划">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-                            <path d="M3 10h18"></path>
-                            <path d="M9 4v16"></path>
-                        </svg>
-                    </button>
-                    <button class="agent-clear-btn" id="agentClearBtn" title="清空对话">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <polyline points="3 6 5 6 21 6"></polyline>
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
-                            </path>
-                        </svg>
-                    </button>
                 </div>
 
                 <section class="video-model-picker" id="videoModelPicker" hidden aria-label="选择视频模型">
@@ -373,6 +354,10 @@
                     <label class="creation-prompt-field">
                         <span>提示词</span>
                         <textarea id="imagePromptInput" rows="5" placeholder="描述你要生成的画面"></textarea>
+                        <div class="creation-prompt-resize-handle" id="imagePromptResizeHandle" role="separator"
+                            aria-label="调整提示词输入框高度" aria-orientation="horizontal" tabindex="0">
+                            <span aria-hidden="true"></span>
+                        </div>
                     </label>
                     <div class="creation-image-mode-field">
                         <span>生成模式</span>
@@ -388,6 +373,9 @@
                                 <small id="imageReferenceCount">已选 0 张</small>
                             </div>
                             <div class="creation-image-reference-actions">
+                                <button class="creation-source-add image-compress-references-btn" id="imageCompressReferencesBtn" type="button" hidden>
+                                    <span>批量转小</span>
+                                </button>
                                 <button class="creation-source-add" id="imageAddReferenceBtn" type="button" aria-pressed="false">
                                     <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
                                     <span>添加参考图</span>
@@ -436,31 +424,6 @@
                         添加 API
                     </button>
 
-                    <div class="agent-ravenhash-links" aria-label="前往 RavenHash 获取 API">
-                        <button class="agent-ravenhash-link ai" type="button" data-ravenhash-site="ai"
-                            title="在默认浏览器打开 ai.ravenhash.org">
-                            <span class="agent-ravenhash-mark" aria-hidden="true">R</span>
-                            AI 中转站
-                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M15 3h6v6"></path>
-                                <path d="M10 14 21 3"></path>
-                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                            </svg>
-                        </button>
-                        <button class="agent-ravenhash-link art" type="button" data-ravenhash-site="art"
-                            title="在默认浏览器打开 art.ravenhash.org">
-                            <span class="agent-ravenhash-mark" aria-hidden="true">R</span>
-                            ART 中转站
-                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M15 3h6v6"></path>
-                                <path d="M10 14 21 3"></path>
-                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                            </svg>
-                        </button>
-                    </div>
-
                     <!-- 添加/编辑 API 表单（默认隐藏） -->
                     <div class="agent-api-form" id="agentApiForm" style="display:none;">
                         <div class="agent-api-form-header">
@@ -471,7 +434,6 @@
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">快速模板</label>
                             <div class="agent-template-chips">
-                                <button class="agent-template-chip" data-template="ravenhash-chat">RavenHash Chat</button>
                                 <button class="agent-template-chip" data-template="ravenhash">RavenHash Image</button>
                                 <button class="agent-template-chip" data-template="ravenhash-video">RavenHash Video</button>
                             </div>
@@ -496,7 +458,20 @@
                         </div>
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">API Key</label>
-                            <input type="password" class="agent-setting-input" id="agentFormKey" placeholder="sk-...">
+                            <div class="agent-api-key-field">
+                                <input type="password" class="agent-setting-input" id="agentFormKey" placeholder="sk-...">
+                                <button type="button" class="agent-get-api-btn" id="agentGetApiBtn"
+                                    title="在默认浏览器获取 RavenHash API">
+                                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                                        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                                        <path d="M3 8h18"></path>
+                                        <circle cx="6" cy="6" r=".6" fill="currentColor" stroke="none"></circle>
+                                        <circle cx="8.5" cy="6" r=".6" fill="currentColor" stroke="none"></circle>
+                                    </svg>
+                                    获取
+                                </button>
+                            </div>
                         </div>
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">模型</label>
@@ -522,61 +497,6 @@
                         <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
                     </div>
 
-                    <!-- 系统提示词（独立区域） -->
-                    <div class="agent-setting-group" style="margin-top: 12px;">
-                        <label class="agent-setting-label">系统提示词（全局）</label>
-                        <div class="agent-prompt-skill-panel">
-                            <div class="agent-prompt-skill-head">
-                                <span class="agent-prompt-skill-title">技能片段</span>
-                                <span class="agent-prompt-skill-status" id="agentPromptSkillStatus">未注入技能片段</span>
-                            </div>
-                            <div class="agent-prompt-skill-actions">
-                                <button type="button" class="agent-prompt-skill-btn" id="agentFetchSkillsBtn">拉取技能列表</button>
-                                <button type="button" class="agent-prompt-skill-btn subtle" id="agentRemoveSkillBtn" disabled>移除技能</button>
-                            </div>
-                            <select class="agent-setting-input agent-skill-select" id="agentSkillSelect" hidden>
-                                <option value="">选择拉取到的技能</option>
-                            </select>
-                            <div class="agent-skill-description" id="agentSkillDescription"></div>
-                            <button type="button" class="agent-prompt-skill-btn agent-use-skill-btn" id="agentUseSkillBtn" disabled>使用选中技能</button>
-                        </div>
-                        <textarea class="agent-setting-input agent-setting-textarea" id="agentSystemPrompt"
-                            placeholder="你是一个有用的 AI 助手..."></textarea>
-                    </div>
-                </div>
-
-                <!-- 消息区域 -->
-                <div class="agent-messages" id="agentMessages">
-                    <div class="agent-welcome">
-                        <div class="agent-welcome-icon" aria-hidden="true">
-                            <svg viewBox="0 0 48 48" width="30" height="30" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <rect x="12" y="10" width="24" height="25" rx="6"></rect>
-                                <path d="M18 35l-4 6"></path>
-                                <path d="M30 35l4 6"></path>
-                                <path d="M19 21h.01"></path>
-                                <path d="M29 21h.01"></path>
-                                <path d="M19 28h10"></path>
-                                <path d="M24 10V5"></path>
-                            </svg>
-                        </div>
-                        <div class="agent-welcome-text">你好！我是 AI 助手。<br>有什么可以帮你的？</div>
-                    </div>
-                </div>
-
-                <!-- 输入区域 -->
-                <div class="agent-input-area">
-                    <div class="agent-input-wrapper">
-                        <textarea class="agent-input" id="agentInput" rows="1"
-                            placeholder="输入消息...（Enter 发送，Shift+Enter 换行）"></textarea>
-                        <button class="agent-send-btn" id="agentSendBtn" title="发送">
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-                                stroke-width="2">
-                                <line x1="22" y1="2" x2="11" y2="13"></line>
-                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                            </svg>
-                        </button>
-                    </div>
                 </div>
             </aside>
         </div>

@@ -649,7 +649,10 @@ function isSupportedSourceImage(filePath) {
 }
 
 function normalizeFsPath(filePath) {
-    return String(filePath || '').replace(/\//g, '\\').toLowerCase();
+    const raw = String(filePath || '');
+    if (!raw) return '';
+    const normalized = path.normalize(raw).normalize('NFC');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 async function createSourceThumbnails(sourceReferences = []) {

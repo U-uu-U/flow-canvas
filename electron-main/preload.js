@@ -5,6 +5,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('flowCanvas', {
+    platform: process.platform,
+
     // 数据存储
     store: {
         load: () => ipcRenderer.invoke('store:load'),
@@ -62,9 +64,6 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 网页图片摘取
     ai: {
         fetchModels: (config) => ipcRenderer.invoke('ai:fetchModels', config),
-        chat: (request) => ipcRenderer.invoke('ai:chat', request),
-        listSkills: () => ipcRenderer.invoke('ai:listSkills'),
-        getSkill: (skillId) => ipcRenderer.invoke('ai:getSkill', skillId),
     },
 
     image: {
@@ -76,6 +75,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 原生文件拖出到外部应用（支持单文件或多文件数组）
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
+        compressImageReferences: (body) => ipcRenderer.invoke('mcp:image:compress-references', body),
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
         resumeVideo: (body) => ipcRenderer.invoke('mcp:video:resume', body),

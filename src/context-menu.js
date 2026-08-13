@@ -97,7 +97,9 @@ export class ContextMenu {
                         const copiedCount = (res.copied || []).filter(entry => entry.copied !== false).length || res.copied?.length || paths.length;
                         this._showStatus(copiedCount > 1 ? `已复制 ${copiedCount} 个素材到系统文件夹` : '已复制到系统文件夹');
                     } else if (res?.clipboardReady) {
-                        this._showStatus('已放入系统剪贴板，请在目标文件夹按 Ctrl+V');
+                        this._showStatus(window.flowCanvas?.platform === 'darwin'
+                            ? '已放入系统剪贴板，请在目标文件夹按 Command+V'
+                            : '已放入系统剪贴板，请在目标文件夹按 Ctrl+V');
                     } else {
                         this._showStatus(`复制失败：${res?.error || '未找到系统文件夹'}`);
                     }

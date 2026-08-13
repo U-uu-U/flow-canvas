@@ -6,7 +6,7 @@
 
 1. 打开 `chrome://extensions`，启用“开发者模式”。
 2. 点击“加载已解压的扩展程序”，选择当前 `flow-canvas-sync` 文件夹。
-3. 复制扩展 ID，运行 `install.bat <扩展ID>`；双击脚本时也可以按提示输入。
+3. 复制扩展 ID。Windows 运行 `install.bat <扩展ID>`；macOS 运行 `bash install-macos.sh <扩展ID>`。
 4. 在扩展管理页重新加载插件。
 5. 保持 RavenHash 页面处于登录状态，打开插件弹窗确认“已连接 Flow Canvas 本地服务”。
 

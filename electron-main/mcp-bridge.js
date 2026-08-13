@@ -606,13 +606,25 @@ class FlowCanvasBridge {
         const references = sourceContext.references.slice(0, 9);
         if (references.length === 0) throw new Error('\u6ca1\u6709\u53ef\u538b\u7f29\u7684\u53c2\u8003\u56fe\u7247');
 
-        const requestedTargetDir = body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.();
+        const addToCanvas = body?.addToCanvas !== false;
+        const temporaryTargetDir = path.join(app.getPath('temp'), 'flow-canvas-reference-compression');
+        const requestedTargetDir = addToCanvas
+            ? (body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.())
+            : temporaryTargetDir;
         if (!requestedTargetDir) throw new Error('\u6ca1\u6709\u53ef\u7528\u7684\u538b\u7f29\u56fe\u7247\u4fdd\u5b58\u76ee\u5f55');
+        if (!addToCanvas) await fs.promises.mkdir(temporaryTargetDir, { recursive: true });
         const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
         const targetDir = targetInfo.targetDir;
+        const requestedBudgetBytes = Number(body?.uploadBudgetBytes);
+        const uploadBudgetBytes = Number.isFinite(requestedBudgetBytes)
+            ? Math.max(2 * 1024 * 1024, Math.min(VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES, Math.floor(requestedBudgetBytes)))
+            : VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES;
+        const minimumTargetBytes = uploadBudgetBytes <= 2 * 1024 * 1024
+            ? 384 * 1024
+            : 768 * 1024;
         const targetBytes = Math.max(
-            768 * 1024,
-            Math.min(VIDEO_REFERENCE_MAX_OUTPUT_BYTES, Math.floor(VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES / references.length))
+            minimumTargetBytes,
+            Math.min(VIDEO_REFERENCE_MAX_OUTPUT_BYTES, Math.floor(uploadBudgetBytes / references.length))
         );
         const outputs = [];
 
@@ -633,18 +645,20 @@ class FlowCanvasBridge {
                 || (data.items || []).find(item => normalizeFsPath(item.filePath) === normalizeFsPath(sourcePath));
             const sourceWidth = Number(sourceItem?.width);
             const sourceHeight = Number(sourceItem?.height);
-            const item = addBoardItem(data, filePath, {
-                x: Number.isFinite(sourceItem?.x)
-                    ? sourceItem.x + (Number.isFinite(sourceWidth) ? sourceWidth : 320) + 40
-                    : undefined,
-                y: Number.isFinite(sourceItem?.y) ? sourceItem.y : undefined,
-                width: Number.isFinite(sourceWidth) ? sourceWidth : undefined,
-                height: Number.isFinite(sourceHeight) ? sourceHeight : undefined
-            });
+            const item = addToCanvas
+                ? addBoardItem(data, filePath, {
+                    x: Number.isFinite(sourceItem?.x)
+                        ? sourceItem.x + (Number.isFinite(sourceWidth) ? sourceWidth : 320) + 40
+                        : undefined,
+                    y: Number.isFinite(sourceItem?.y) ? sourceItem.y : undefined,
+                    width: Number.isFinite(sourceWidth) ? sourceWidth : undefined,
+                    height: Number.isFinite(sourceHeight) ? sourceHeight : undefined
+                })
+                : null;
             outputs.push({
                 sourceItemId: reference.itemId || null,
                 sourceFilePath: sourcePath,
-                item: describeBoardItem(item),
+                item: item ? describeBoardItem(item) : null,
                 filePath,
                 originalBytes,
                 compressedBytes: compressed.buffer.length,
@@ -656,9 +670,11 @@ class FlowCanvasBridge {
         if (outputs.length === 0) {
             throw new Error('\u53c2\u8003\u56fe\u5df2\u7b26\u5408\u4e0a\u4f20\u5927\u5c0f\uff0c\u65e0\u9700\u538b\u7f29');
         }
-        this._saveAndNotify(data, 'mcp:image-compressed');
+        if (addToCanvas) this._saveAndNotify(data, 'mcp:image-compressed');
         return {
             outputs,
+            addToCanvas,
+            temporary: !addToCanvas,
             missingSourceReferences: sourceContext.missing,
             targetDir,
             requestedTargetDir,
@@ -1045,7 +1061,10 @@ function isSupportedSourceImage(filePath) {
 }
 
 function normalizeFsPath(filePath) {
-    return String(filePath || '').replace(/\//g, '\\').toLowerCase();
+    const raw = String(filePath || '');
+    if (!raw) return '';
+    const normalized = path.normalize(raw).normalize('NFC');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 function buildOpenAiImageEndpoint(endpoint, mode = 'generations') {
@@ -1178,6 +1197,12 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         }
         if (!res.ok) {
             const text = await res.text();
+            if (res.status === 413) {
+                return {
+                    success: false,
+                    error: '参考图片总大小超过 API 网关限制（HTTP 413）。请使用“批量转小”后重试。'
+                };
+            }
             return { success: false, error: `Image API failed: ${res.status} ${text.slice(0, 2000)}` };
         }
         const json = await res.json();
@@ -1304,7 +1329,12 @@ async function compressVideoReferenceImage(filePath, targetBytes) {
         { maxEdge: null, quality: 90 },
         { maxEdge: 3072, quality: 86 },
         { maxEdge: 2048, quality: 82 },
-        { maxEdge: 1536, quality: 78 }
+        { maxEdge: 1536, quality: 78 },
+        { maxEdge: 1280, quality: 74 },
+        { maxEdge: 1024, quality: 70 },
+        { maxEdge: 768, quality: 66 },
+        { maxEdge: 640, quality: 62 },
+        { maxEdge: 512, quality: 58 }
     ];
     let best = null;
 
@@ -1420,6 +1450,9 @@ function extensionForReferenceMimeType(mimeType) {
         'image/png': 'png',
         'image/jpeg': 'jpg',
         'image/webp': 'webp',
+        'video/mp4': 'mp4',
+        'video/webm': 'webm',
+        'video/quicktime': 'mov',
         'audio/mpeg': 'mp3',
         'audio/wav': 'wav',
         'audio/aac': 'aac',
@@ -1735,15 +1768,15 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         }
 
         const videoReferences = options.videoReferences || [];
-        if (isMiniMaxH3 && videoReferences.length > 0) {
-            return { success: false, error: 'MiniMax H3 不支持参考视频，请改用参考图片或参考音频' };
+        if (isMiniMaxH3 && videoReferences.length > 1) {
+            return { success: false, error: 'MiniMax H3 最多支持 1 个参考视频' };
         }
         const images = await collectVideoReferenceImages(
             options.sourceReferences || [],
             options.compressReferenceImages === true,
             isMiniMaxH3 ? 5 : 9
         );
-        const videos = isMiniMaxH3 ? [] : collectVideoReferenceVideos(videoReferences);
+        const videos = collectVideoReferenceVideos(videoReferences);
         const audioUrls = collectVideoReferenceAudio(
             options.audioReferences || [],
             isMiniMaxH3 ? 1 : 3,
@@ -1757,6 +1790,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 images.map(image => image.url),
                 '参考图片'
             );
+            const referenceVideoUrls = await uploadTemporaryReferences(videos.slice(0, 1), '参考视频');
             const referenceAudioUrls = await uploadTemporaryReferences(audioUrls, '参考音频');
             if (imageUrls.length === 1) {
                 body.first_image = imageUrls[0];
@@ -1766,6 +1800,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
             } else if (imageUrls.length > 2) {
                 body.reference_images = imageUrls;
             }
+            if (referenceVideoUrls.length > 0) body.reference_videos = referenceVideoUrls;
             if (referenceAudioUrls.length > 0) body.reference_audios = referenceAudioUrls.slice(0, 1);
         } else {
             if (images.length > 0) body.images = images;

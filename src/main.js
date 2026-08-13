@@ -18,6 +18,13 @@ let historyCommitTimer = null;
 let lastHistoryKey = '';
 let switchGroupRunId = 0;
 
+document.body.classList.add(`platform-${window.flowCanvas?.platform || 'web'}`);
+if (window.flowCanvas?.platform === 'darwin') {
+    document.querySelectorAll('.context-menu-shortcut').forEach(element => {
+        element.textContent = element.textContent.replace(/^Ctrl\+/, 'Command+');
+    });
+}
+
 async function bootstrap() {
     try {
         if (!window.flowCanvas?.store?.load) {
@@ -41,16 +48,18 @@ async function bootstrap() {
             getVideoProvider: () => agentSidebar?.getVideoProviderConfig?.() || null
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
-            getPlanningContext: () => planService.getAgentContext(canvasManager?.getSelectedFilePaths?.() || []),
             getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
             getSelectedCanvasEntries: () => canvasManager?.getSelectedCanvasEntries?.() || [],
             subscribeCanvasSelection: (handler) => canvasManager?.on?.('selectionChanged', handler),
+            subscribeInitialRenderComplete: (handler) => canvasManager?.on?.('initialRenderComplete', handler),
             subscribeMediaReferenceSelection: (handler) => canvasManager?.on?.('mediaReferenceSelectionChanged', handler),
             subscribeMediaReferencePickState: (handler) => canvasManager?.on?.('mediaReferencePickStateChanged', handler),
             beginMediaReferencePick: (type, entries, maxItems, allSelections) => canvasManager?.beginMediaReferencePick?.(type, entries, maxItems, allSelections),
             endMediaReferencePick: (options) => canvasManager?.endMediaReferencePick?.(options),
             updateMediaReferencePick: (type, entries) => canvasManager?.updateMediaReferencePick?.(type, entries),
             clearMediaReferenceSelections: () => canvasManager?.clearMediaReferenceSelections?.(),
+            resolveMediaReferenceEntries: (entries, type) => canvasManager?.resolveMediaReferenceEntries?.(entries, type) || [],
+            getActiveProjectId: () => storeData?.activeGroupId || null,
             beginImageGeneration: (settings) => canvasManager?.addImageGenerationPlaceholder?.(settings) || null,
             endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
             beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,
@@ -178,6 +187,7 @@ async function bootstrap() {
 
             storeData.items = [...items];
             canvasManager.storeData = storeData;
+            agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null);
 
             if (data.viewport) {
                 canvasManager.setViewport(data.viewport);
@@ -354,6 +364,7 @@ async function bootstrap() {
         }
 
         // 初始状态更新
+        agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null, { saveCurrent: false });
         syncStats();
         updateBodyState();
         resetHistory('initial');
@@ -424,6 +435,7 @@ function handleExternalStoreUpdate(payload) {
 
         canvasManager.clearAll({ preserveTransients: true });
         canvasManager.setViewport(storeData.viewport || { x: 0, y: 0, scale: 1 });
+        agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null);
         canvasManager.renderInitialItems();
         sidebarManager.renderGroups();
         sidebarManager.updateStats(storeData.items?.length || 0);
@@ -1027,10 +1039,13 @@ function isTemporaryBoardFile(filePath) {
 }
 
 function normalizeFsPath(filePath) {
-    return String(filePath || '')
-        .replace(/\//g, '\\')
-        .replace(/\\+$/g, '')
-        .toLowerCase();
+    const raw = String(filePath || '');
+    if (!raw) return '';
+    const normalized = raw
+        .normalize('NFC')
+        .replace(/\\/g, '/')
+        .replace(/\/+$/g, '') || '/';
+    return window.flowCanvas?.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 function getRemovedFromBoardOwner() {
@@ -1090,7 +1105,7 @@ function isPathInsideFolder(filePath, folderPath) {
     const normalizedPath = normalizeFsPath(filePath);
     const normalizedFolder = normalizeFsPath(folderPath);
     if (!normalizedPath || !normalizedFolder) return false;
-    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}\\`);
+    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
 }
 
 // 节流保存

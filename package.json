@@ -1,6 +1,6 @@
 {
     "name": "flow-canvas",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "本地素材管理、无限画布与 AI 图片/视频创作桌面应用",
     "main": "electron-main/main.js",
     "scripts": {
@@ -8,7 +8,8 @@
         "build": "vite build",
         "mcp": "node mcp/flow-canvas-mcp.mjs",
         "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",
-        "electron:build": "vite build && electron-builder"
+        "electron:build": "vite build && electron-builder",
+        "electron:build:mac": "vite build && electron-builder --mac"
     },
     "dependencies": {
         "chokidar": "^3.6.0",
@@ -52,6 +53,34 @@
                     ]
                 }
             ]
+        },
+        "mac": {
+            "category": "public.app-category.graphics-design",
+            "hardenedRuntime": true,
+            "gatekeeperAssess": false,
+            "entitlements": "build/entitlements.mac.plist",
+            "entitlementsInherit": "build/entitlements.mac.plist",
+            "target": [
+                {
+                    "target": "dmg",
+                    "arch": [
+                        "x64",
+                        "arm64"
+                    ]
+                },
+                {
+                    "target": "zip",
+                    "arch": [
+                        "x64",
+                        "arm64"
+                    ]
+                }
+            ],
+            "extendInfo": {
+                "NSDesktopFolderUsageDescription": "Flow Canvas needs access to folders you choose for managing local media.",
+                "NSDocumentsFolderUsageDescription": "Flow Canvas needs access to folders you choose for managing local media.",
+                "NSDownloadsFolderUsageDescription": "Flow Canvas needs access to downloads you choose to import."
+            }
         },
         "nsis": {
             "oneClick": false,

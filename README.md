@@ -1,8 +1,17 @@
 # Flow Canvas
 
-Flow Canvas 是一款面向 Windows 的本地素材管理与 AI 创作桌面应用。它把文件夹中的图片、视频和音频组织到无限画布上，并将多 API 模型、图片生成、视频生成、任务恢复和 MCP 自动化集中在同一个工作区中。
+Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作桌面应用。它把文件夹中的图片、视频和音频组织到无限画布上，并将多 API 模型、图片生成、视频生成、任务恢复和 MCP 自动化集中在同一个工作区中。
 
-当前稳定版本：`v1.0.0`
+当前稳定版本：`v1.1.0`
+
+## v1.1.0 更新内容
+
+- 统一图片、视频和音频参考素材的添加入口，实时显示分类数量，并修复视频素材无法选中、滚轮误选素材的问题。
+- 图片参考图支持生成前批量压缩，也可仅输出压缩文件而不放入画板；服务端返回 `413` 时提供明确提示。
+- 图片与视频创作参数按项目独立缓存，切换项目不再串用提示词、参考素材和生成设置。
+- 视频创作提示词区域支持拖动调整高度，素材入口移至底部，生成任务继续支持并行提交。
+- RavenHash 图片/聊天与视频 API 分别适配 `ai.ravenhash.org/v1` 和 `art.ravenhash.org/v1`，并自动迁移旧地址。
+- 增加 macOS Apple Silicon/Intel 构建流程，补充 Finder 文件操作、`Command` 快捷键和 Chrome Native Messaging 安装支持。
 
 ## 功能概览
 
@@ -13,7 +22,7 @@ Flow Canvas 是一款面向 Windows 的本地素材管理与 AI 创作桌面应�
 - 直接索引原始文件路径，无需复制整个素材库。
 - 支持图片、视频、音频及常见文档类型的识别和预览。
 - 支持断联素材的手动重接、自动修补和模糊匹配。
-- 支持把画板素材复制到映射的 Windows 资源管理器目录。
+- 支持把画板素材复制到 Windows 资源管理器或 macOS Finder。
 - 针对大型画板提供缩略图、视口裁剪和资源节省模式。
 
 ### 图片与视频创作
@@ -45,15 +54,17 @@ Flow Canvas 是一款面向 Windows 的本地素材管理与 AI 创作桌面应�
 
 ### 使用安装包
 
-从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.0.0.exe`，按提示完成安装。
+从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.1.0.exe`，按提示完成安装。
 
-也可以下载便携版 `Flow.Canvas.1.0.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
+也可以下载便携版 `Flow.Canvas.1.1.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
+
+macOS 测试版由 GitHub Actions 分别生成 Apple Silicon (`arm64`) 和 Intel (`x64`) 的 `dmg/zip`。未签名测试包首次运行时，需要在“系统设置 > 隐私与安全性”中确认打开；正式分发建议配置 Apple Developer 签名与公证。
 
 ### 从源码运行
 
 环境要求：
 
-- Windows 10 或 Windows 11
+- Windows 10/11，或 macOS 12 及以上版本
 - Node.js 18 或更高版本
 - npm 9 或更高版本
 
@@ -68,6 +79,12 @@ npm run electron:dev
 
 ```powershell
 .\start.bat
+```
+
+macOS 使用：
+
+```bash
+npm run electron:dev
 ```
 
 仅预览前端界面：
@@ -156,6 +173,12 @@ GET  /v1/video/generations/{task_id}
 4. 加载 `browser-extension/flow-canvas-sync/`。
 5. 按照[扩展说明](browser-extension/flow-canvas-sync/README.md)安装 Native Messaging 主机。
 
+macOS 安装 Native Messaging 主机时，在扩展目录执行：
+
+```bash
+bash install-macos.sh <扩展ID>
+```
+
 扩展仅注入以下站点：
 
 - `https://ai.ravenhash.org/*`
@@ -169,9 +192,15 @@ GET  /v1/video/generations/{task_id}
 %APPDATA%\flow-canvas\data\board.json
 ```
 
+macOS 默认路径：
+
+```text
+~/Library/Application Support/flow-canvas/data/board.json
+```
+
 同目录的 `backups/` 保存自动备份。画板数据包含文件路径、坐标、文件夹组和规划表，不包含原始素材文件本身。
 
-API 配置和任务记录目前保存在 Electron 本地存储中。`v1.0.0` 尚未接入 Windows Credential Manager，因此不要提交 `%APPDATA%\flow-canvas`、浏览器用户数据、包含密钥的截图或本地配置文件。仓库的 `.gitignore` 已排除常见凭据、用户数据、生成媒体和安装包。
+API 配置和任务记录目前保存在 Electron 本地存储中。当前版本尚未接入系统凭据库，因此不要提交 `%APPDATA%\flow-canvas`、浏览器用户数据、包含密钥的截图或本地配置文件。仓库的 `.gitignore` 已排除常见凭据、用户数据、生成媒体和安装包。
 
 ## 项目结构
 
@@ -214,11 +243,14 @@ npm run build
 # 构建 Windows 安装版和便携版
 npm run electron:build
 
+# 在 macOS 构建 Apple Silicon 和 Intel 安装包
+npm run electron:build:mac
+
 # 单独启动 MCP stdio 服务
 npm run mcp
 ```
 
-Windows 构建产物写入 `release/`。提交代码前至少执行：
+Windows 和 macOS 构建产物写入 `release/`。提交代码前至少执行：
 
 ```powershell
 node --check src/agent-sidebar.js
@@ -228,10 +260,11 @@ npm run build
 git diff --check
 ```
 
-## v1.0.0 支持范围
+## v1.1.0 支持范围
 
-- 桌面文件系统、剪贴板和资源管理器工作流目前只在 Windows 10/11 验证。
-- macOS 和 Linux 尚未完成桌面能力适配。
+- 桌面文件系统、剪贴板和资源管理器工作流已适配 Windows 10/11。
+- macOS 已加入 Apple Silicon/Intel 打包、Finder 拖放、文件剪贴板和 `Command` 快捷键适配，仍需在真实 Mac 上完成发布前回归测试。
+- Linux 尚未完成桌面能力适配。
 - API 参数兼容程度取决于供应商对 OpenAI 风格端点和任务查询协议的实现。
 - 安装包尚未进行代码签名，也没有内置自动更新。
 - API Key 当前为本地应用存储，尚未使用系统凭据库加密。

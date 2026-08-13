@@ -6,6 +6,9 @@ import Konva from 'konva';
 
 const IMAGE_DEFAULT_WIDTH = 300;
 const DOC_DEFAULT_SIZE = 150;
+const CANVAS_BOUNDARY_MIN_WIDTH = 1400;
+const CANVAS_BOUNDARY_MIN_HEIGHT = 1000;
+const CANVAS_BOUNDARY_PADDING = 260;
 const VIDEO_PLACEHOLDER_LONG_EDGE = 320;
 const VIDEO_PLACEHOLDER_DEFAULT_RATIO = 16 / 9;
 const PLAN_NODE_WIDTH = 1440;
@@ -88,6 +91,22 @@ export class CanvasManager {
         });
         if (!container.style.position) container.style.position = 'relative';
         container.style.cursor = 'default';
+
+        this.boundaryLayer = new Konva.Layer({ listening: false });
+        this.canvasBoundary = new Konva.Rect({
+            listening: false,
+            fill: 'rgba(24, 25, 31, 0.24)',
+            stroke: 'rgba(124, 132, 145, 0.36)',
+            strokeWidth: 1,
+            dash: [10, 8],
+            strokeScaleEnabled: false,
+            perfectDrawEnabled: false
+        });
+        this.boundaryLayer.add(this.canvasBoundary);
+        this.stage.add(this.boundaryLayer);
+        this._canvasBounds = null;
+        this._minimapDrawPending = false;
+        this._minimapTransform = null;
 
         this.layer = new Konva.Layer();
         this.stage.add(this.layer);
@@ -174,6 +193,7 @@ export class CanvasManager {
         this._isGeneratingPlanRow = false;
         this._dragConnectionRefreshTimer = null;
         this._lastDragConnectionRefreshAt = 0;
+        this._setupCanvasMinimap();
 
         if (storeData.viewport) {
             this.stage.position({ x: storeData.viewport.x, y: storeData.viewport.y });
@@ -206,6 +226,7 @@ export class CanvasManager {
                     this.syncGifs();
                     this.syncBackground();
                     this.syncPlanInlineEditors();
+                    this._scheduleMinimapDraw();
                     this._scheduleCullCheck(this._CULL_IDLE_MS);
                 });
             }
@@ -220,6 +241,7 @@ export class CanvasManager {
             this.stage.width(container.offsetWidth);
             this.stage.height(container.offsetHeight);
             this.syncPlanInlineEditors();
+            this._refreshCanvasBoundary();
         });
         ro.observe(container);
 
@@ -306,17 +328,302 @@ export class CanvasManager {
         gridEl.style.backgroundPosition = `${offsetX}px ${offsetY}px`;
     }
 
+    _setupCanvasMinimap() {
+        this.minimapPanel = document.getElementById('canvasMinimap');
+        this.minimapCanvas = document.getElementById('canvasMinimapMap');
+        this.minimapZoom = document.getElementById('canvasMinimapZoom');
+        this.minimapFitButton = document.getElementById('canvasMinimapFit');
+        if (!this.minimapCanvas) return;
+
+        this.minimapFitButton?.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.fitAll();
+        });
+
+        const finishDrag = (event) => {
+            if (!this._minimapDragging) return;
+            this._minimapDragging = false;
+            this._minimapDragOffset = null;
+            this.minimapCanvas.classList.remove('is-dragging');
+            try { this.minimapCanvas.releasePointerCapture(event.pointerId); } catch (_) { }
+            this.emit('change');
+        };
+
+        const navigate = (event, preserveOffset = true) => {
+            const transform = this._minimapTransform;
+            if (!transform) return;
+            const rect = this.minimapCanvas.getBoundingClientRect();
+            const mapX = event.clientX - rect.left;
+            const mapY = event.clientY - rect.top;
+            let worldX = (mapX - transform.offsetX) / transform.scale + transform.bounds.x;
+            let worldY = (mapY - transform.offsetY) / transform.scale + transform.bounds.y;
+            if (preserveOffset && this._minimapDragOffset) {
+                worldX -= this._minimapDragOffset.x;
+                worldY -= this._minimapDragOffset.y;
+            }
+            this._centerViewportAt(worldX, worldY);
+        };
+
+        this.minimapCanvas.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0 || !this._minimapTransform) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const rect = this.minimapCanvas.getBoundingClientRect();
+            const mapX = event.clientX - rect.left;
+            const mapY = event.clientY - rect.top;
+            const viewport = this._minimapViewportRect;
+            if (viewport && mapX >= viewport.x && mapX <= viewport.x + viewport.width
+                && mapY >= viewport.y && mapY <= viewport.y + viewport.height) {
+                const transform = this._minimapTransform;
+                const worldX = (mapX - transform.offsetX) / transform.scale + transform.bounds.x;
+                const worldY = (mapY - transform.offsetY) / transform.scale + transform.bounds.y;
+                const center = this._getViewportCenter();
+                this._minimapDragOffset = { x: worldX - center.x, y: worldY - center.y };
+            } else {
+                this._minimapDragOffset = null;
+                navigate(event, false);
+            }
+            this._minimapDragging = true;
+            this.minimapCanvas.classList.add('is-dragging');
+            this.minimapCanvas.setPointerCapture(event.pointerId);
+        });
+
+        this.minimapCanvas.addEventListener('pointermove', (event) => {
+            if (!this._minimapDragging) return;
+            event.preventDefault();
+            navigate(event, true);
+        });
+        this.minimapCanvas.addEventListener('pointerup', finishDrag);
+        this.minimapCanvas.addEventListener('pointercancel', finishDrag);
+
+        this.minimapCanvas.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                this.fitAll();
+                return;
+            }
+            const directions = {
+                ArrowLeft: [-1, 0],
+                ArrowRight: [1, 0],
+                ArrowUp: [0, -1],
+                ArrowDown: [0, 1]
+            };
+            const direction = directions[event.key];
+            if (!direction) return;
+            event.preventDefault();
+            const center = this._getViewportCenter();
+            const stepX = this.stage.width() / this.stage.scaleX() * 0.12;
+            const stepY = this.stage.height() / this.stage.scaleY() * 0.12;
+            this._centerViewportAt(center.x + direction[0] * stepX, center.y + direction[1] * stepY);
+            this.emit('change');
+        });
+    }
+
+    _getEntryCanvasRect(entry) {
+        const group = entry?.group;
+        if (!group || group.isDestroyed?.()) return null;
+        const node = group.findOne?.('.displayNode')
+            || group.findOne?.('.fallbackIcon')
+            || group.findOne?.('.fallbackBg')
+            || group.findOne?.('.planHitArea');
+        let relative = null;
+        try {
+            relative = node?.getClientRect?.({ relativeTo: group, skipShadow: true, skipStroke: true });
+        } catch (_) { }
+        const width = Math.max(1, Number(relative?.width)
+            || Number(entry.data?.node?.width)
+            || Number(entry.data?.width)
+            || DOC_DEFAULT_SIZE);
+        const height = Math.max(1, Number(relative?.height)
+            || Number(entry.data?.node?.height)
+            || Number(entry.data?.height)
+            || DOC_DEFAULT_SIZE);
+        const x = Number(group.x()) + (Number(relative?.x) || 0);
+        const y = Number(group.y()) + (Number(relative?.y) || 0);
+        if (![x, y, width, height].every(Number.isFinite)) return null;
+        return { x, y, width, height };
+    }
+
+    _collectCanvasOverviewEntries() {
+        const entries = [];
+        this.items.forEach(entry => {
+            const rect = this._getEntryCanvasRect(entry);
+            if (rect) entries.push({ ...rect, kind: this._getFileType(entry.data.filePath) });
+        });
+        this.plans.forEach(entry => {
+            const rect = this._getEntryCanvasRect(entry);
+            if (rect) entries.push({ ...rect, kind: 'plan' });
+        });
+        this.generationPlaceholders.forEach(entry => {
+            const rect = entry?.placement;
+            if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return;
+            entries.push({ ...rect, kind: 'pending' });
+        });
+        return entries;
+    }
+
+    _refreshCanvasBoundary(options = {}) {
+        const entries = this._collectCanvasOverviewEntries();
+        let contentBounds = null;
+        entries.forEach(entry => {
+            if (!contentBounds) {
+                contentBounds = {
+                    minX: entry.x,
+                    minY: entry.y,
+                    maxX: entry.x + entry.width,
+                    maxY: entry.y + entry.height
+                };
+                return;
+            }
+            contentBounds.minX = Math.min(contentBounds.minX, entry.x);
+            contentBounds.minY = Math.min(contentBounds.minY, entry.y);
+            contentBounds.maxX = Math.max(contentBounds.maxX, entry.x + entry.width);
+            contentBounds.maxY = Math.max(contentBounds.maxY, entry.y + entry.height);
+        });
+
+        if (options.reset || !this._canvasBounds) {
+            const center = contentBounds
+                ? { x: (contentBounds.minX + contentBounds.maxX) / 2, y: (contentBounds.minY + contentBounds.maxY) / 2 }
+                : this._getViewportCenter();
+            const contentWidth = contentBounds ? contentBounds.maxX - contentBounds.minX + CANVAS_BOUNDARY_PADDING * 2 : 0;
+            const contentHeight = contentBounds ? contentBounds.maxY - contentBounds.minY + CANVAS_BOUNDARY_PADDING * 2 : 0;
+            const width = Math.max(CANVAS_BOUNDARY_MIN_WIDTH, contentWidth);
+            const height = Math.max(CANVAS_BOUNDARY_MIN_HEIGHT, contentHeight);
+            this._canvasBounds = { x: center.x - width / 2, y: center.y - height / 2, width, height };
+        } else if (contentBounds) {
+            const current = this._canvasBounds;
+            const minX = Math.min(current.x, contentBounds.minX - CANVAS_BOUNDARY_PADDING);
+            const minY = Math.min(current.y, contentBounds.minY - CANVAS_BOUNDARY_PADDING);
+            const maxX = Math.max(current.x + current.width, contentBounds.maxX + CANVAS_BOUNDARY_PADDING);
+            const maxY = Math.max(current.y + current.height, contentBounds.maxY + CANVAS_BOUNDARY_PADDING);
+            this._canvasBounds = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+        }
+
+        this.canvasBoundary?.setAttrs(this._canvasBounds);
+        this.boundaryLayer?.batchDraw();
+        if (this.minimapPanel) this.minimapPanel.hidden = entries.length === 0;
+        this._scheduleMinimapDraw();
+    }
+
+    _scheduleMinimapDraw() {
+        if (!this.minimapCanvas || this._minimapDrawPending) return;
+        this._minimapDrawPending = true;
+        requestAnimationFrame(() => {
+            this._minimapDrawPending = false;
+            this._drawCanvasMinimap();
+        });
+    }
+
+    _drawCanvasMinimap() {
+        const canvas = this.minimapCanvas;
+        const bounds = this._canvasBounds;
+        if (!canvas || !bounds || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const pixelWidth = Math.round(width * dpr);
+        const pixelHeight = Math.round(height * dpr);
+        if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+            canvas.width = pixelWidth;
+            canvas.height = pixelHeight;
+        }
+        const context = canvas.getContext('2d');
+        if (!context) return;
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.clearRect(0, 0, width, height);
+
+        const inset = 8;
+        const mapScale = Math.max(0.0001, Math.min(
+            (width - inset * 2) / bounds.width,
+            (height - inset * 2) / bounds.height
+        ));
+        const mapWidth = bounds.width * mapScale;
+        const mapHeight = bounds.height * mapScale;
+        const offsetX = (width - mapWidth) / 2;
+        const offsetY = (height - mapHeight) / 2;
+        this._minimapTransform = { bounds: { ...bounds }, scale: mapScale, offsetX, offsetY };
+
+        context.fillStyle = 'rgba(7, 8, 11, 0.72)';
+        context.fillRect(offsetX, offsetY, mapWidth, mapHeight);
+        context.strokeStyle = 'rgba(145, 151, 162, 0.34)';
+        context.lineWidth = 1;
+        context.setLineDash([4, 3]);
+        context.strokeRect(offsetX + 0.5, offsetY + 0.5, Math.max(0, mapWidth - 1), Math.max(0, mapHeight - 1));
+        context.setLineDash([]);
+
+        const colors = {
+            image: '#4f83cf',
+            video: '#c98955',
+            audio: '#4d9d7b',
+            document: '#8d929c',
+            other: '#707783',
+            plan: '#c0c4cb',
+            pending: '#69707b'
+        };
+        context.save();
+        context.beginPath();
+        context.rect(offsetX, offsetY, mapWidth, mapHeight);
+        context.clip();
+        this._collectCanvasOverviewEntries().forEach(entry => {
+            const x = offsetX + (entry.x - bounds.x) * mapScale;
+            const y = offsetY + (entry.y - bounds.y) * mapScale;
+            const itemWidth = Math.max(2, entry.width * mapScale);
+            const itemHeight = Math.max(2, entry.height * mapScale);
+            context.globalAlpha = entry.kind === 'pending' ? 0.5 : 0.86;
+            context.fillStyle = colors[entry.kind] || colors.other;
+            context.fillRect(x, y, itemWidth, itemHeight);
+        });
+        context.restore();
+        context.globalAlpha = 1;
+
+        const stageScale = Math.max(0.0001, this.stage.scaleX());
+        const viewportWorld = {
+            x: -this.stage.x() / stageScale,
+            y: -this.stage.y() / stageScale,
+            width: this.stage.width() / stageScale,
+            height: this.stage.height() / stageScale
+        };
+        const viewport = {
+            x: offsetX + (viewportWorld.x - bounds.x) * mapScale,
+            y: offsetY + (viewportWorld.y - bounds.y) * mapScale,
+            width: Math.max(4, viewportWorld.width * mapScale),
+            height: Math.max(4, viewportWorld.height * mapScale)
+        };
+        this._minimapViewportRect = viewport;
+        context.fillStyle = 'rgba(58, 123, 213, 0.13)';
+        context.strokeStyle = '#5d92dc';
+        context.lineWidth = 1.5;
+        context.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
+        context.strokeRect(viewport.x + 0.75, viewport.y + 0.75, Math.max(0, viewport.width - 1.5), Math.max(0, viewport.height - 1.5));
+
+        if (this.minimapZoom) this.minimapZoom.textContent = `${Math.round(stageScale * 100)}%`;
+    }
+
+    _centerViewportAt(worldX, worldY) {
+        if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return;
+        const scale = this.stage.scaleX();
+        this.stage.position({
+            x: this.stage.width() / 2 - worldX * scale,
+            y: this.stage.height() / 2 - worldY * scale
+        });
+        this.stage.batchDraw();
+    }
+
     on(event, cb) {
         if (!this.listeners[event]) this.listeners[event] = [];
         this.listeners[event].push(cb);
     }
 
     emit(event, data) {
+        if (event === 'change') this._refreshCanvasBoundary();
         if (this.listeners[event]) this.listeners[event].forEach(cb => cb(data));
     }
 
     beginMediaReferencePick(type, entries = [], maxItems = 1, allSelections = {}) {
-        const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : 'image';
+        const normalizedType = type === 'mixed'
+            ? 'mixed'
+            : (['image', 'video', 'audio'].includes(type) ? type : 'image');
         if (this._activePlanReferencePick) this._cancelPlanReferencePick('', { refresh: false });
         this.endMediaReferencePick({ silent: true });
         ['image', 'video', 'audio'].forEach(mediaType => {
@@ -324,6 +631,17 @@ export class CanvasManager {
                 .map(entry => this._normalizeMediaReferenceEntry(entry))
                 .filter(entry => entry && entry.mediaType === mediaType);
         });
+        if (normalizedType === 'mixed') {
+            const limits = Object.fromEntries(['image', 'video', 'audio'].map(mediaType => [
+                mediaType,
+                Math.max(0, Number(maxItems?.[mediaType]) || 0)
+            ]));
+            this._activeMediaReferencePick = { type: 'mixed', limits };
+            this._renderMediaReferencePickHighlights();
+            this._showCanvasStatus('依次点击画布中的图片、视频或音频素材；再次点击可取消选择', 4200);
+            this.emit('mediaReferencePickStateChanged', { active: true, type: 'mixed' });
+            return true;
+        }
         const normalizedEntries = (Array.isArray(entries) ? entries : [])
             .map(entry => this._normalizeMediaReferenceEntry(entry))
             .filter(entry => entry && entry.mediaType === normalizedType)
@@ -345,7 +663,9 @@ export class CanvasManager {
         const pick = this._activeMediaReferencePick;
         if (!pick && !options.clearHighlights) return false;
         const type = pick?.type || null;
-        if (pick) this._mediaReferenceSelections[pick.type] = pick.entries.map(entry => ({ ...entry }));
+        if (pick && pick.type !== 'mixed') {
+            this._mediaReferenceSelections[pick.type] = pick.entries.map(entry => ({ ...entry }));
+        }
         this._activeMediaReferencePick = null;
         if (options.clearHighlights) {
             this._mediaReferenceSelections = { image: [], video: [], audio: [] };
@@ -380,6 +700,26 @@ export class CanvasManager {
         this._renderMediaReferencePickHighlights();
     }
 
+    resolveMediaReferenceEntries(entries = [], type = null) {
+        const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : null;
+        const byPath = new Map();
+        this.items.forEach(item => {
+            const filePath = String(item?.data?.filePath || '').trim();
+            if (filePath) byPath.set(filePath.replaceAll('/', '\\').toLowerCase(), item);
+        });
+        return (Array.isArray(entries) ? entries : []).map(entry => {
+            const requestedId = String(entry?.id || entry?.itemId || '').trim();
+            const requestedPath = String(entry?.filePath || '').trim();
+            const item = (requestedId && this.items.get(requestedId))
+                || (requestedPath && byPath.get(requestedPath.replaceAll('/', '\\').toLowerCase()));
+            if (!item?.data?.id || !item.data.filePath) return null;
+            return this._normalizeMediaReferenceEntry({
+                id: item.data.id,
+                filePath: item.data.filePath
+            });
+        }).filter(entry => entry && (!normalizedType || entry.mediaType === normalizedType));
+    }
+
     _normalizeMediaReferenceEntry(entry) {
         const id = String(entry?.id || entry?.itemId || '').trim();
         const item = id ? this.items.get(id) : null;
@@ -393,31 +733,62 @@ export class CanvasManager {
         };
     }
 
+    _findMediaReferenceItemFromNode(node) {
+        let current = node;
+        while (current && current !== this.stage) {
+            const id = String(current.attrs?.id || '').trim();
+            if (id && this.items.has(id)) return this.items.get(id);
+            current = current.getParent?.();
+        }
+        return null;
+    }
+
+    _pickMediaReferenceFromControl(item, event) {
+        if (event?.evt?.button != null && event.evt.button !== 0) return false;
+        if (!this._activeMediaReferencePick || !item?.data) return false;
+        event.cancelBubble = true;
+        event.evt?.preventDefault?.();
+        event.evt?.stopPropagation?.();
+        item.group?.stopDrag?.();
+        this._lastMediaReferencePointerPick = { id: item.data.id, at: Date.now() };
+        this._toggleMediaReferencePick(item);
+        return true;
+    }
+
     _toggleMediaReferencePick(item) {
         const pick = this._activeMediaReferencePick;
         if (!pick || !item?.data) return;
         const entry = this._normalizeMediaReferenceEntry({ id: item.data.id, filePath: item.data.filePath });
-        const typeLabel = { image: '图片', video: '视频', audio: '音频' }[pick.type];
-        if (!entry || entry.mediaType !== pick.type) {
-            this._showCanvasStatus(`这里只能选择${typeLabel}素材`);
+        const targetType = pick.type === 'mixed' ? entry?.mediaType : pick.type;
+        const typeLabel = { image: '图片', video: '视频', audio: '音频' }[targetType] || '媒体';
+        if (!entry || !['image', 'video', 'audio'].includes(targetType) || (pick.type !== 'mixed' && entry.mediaType !== pick.type)) {
+            this._showCanvasStatus(pick.type === 'mixed' ? '这里只能选择图片、视频或音频素材' : `这里只能选择${typeLabel}素材`);
             return;
         }
-        const existingIndex = pick.entries.findIndex(candidate => candidate.id === entry.id);
+        const entries = pick.type === 'mixed'
+            ? this._mediaReferenceSelections[targetType]
+            : pick.entries;
+        const maxItems = pick.type === 'mixed' ? pick.limits[targetType] : pick.maxItems;
+        if (maxItems <= 0) {
+            this._showCanvasStatus(`当前模型不支持${typeLabel}参考素材`);
+            return;
+        }
+        const existingIndex = entries.findIndex(candidate => candidate.id === entry.id);
         if (existingIndex >= 0) {
-            pick.entries.splice(existingIndex, 1);
-        } else if (pick.entries.length >= pick.maxItems) {
-            this._showCanvasStatus(`${typeLabel}最多选择 ${pick.maxItems} 个`);
+            entries.splice(existingIndex, 1);
+        } else if (entries.length >= maxItems) {
+            this._showCanvasStatus(`${typeLabel}最多选择 ${maxItems} 个`);
             return;
         } else {
-            pick.entries.push(entry);
+            entries.push(entry);
         }
-        this._mediaReferenceSelections[pick.type] = pick.entries.map(candidate => ({ ...candidate }));
+        this._mediaReferenceSelections[targetType] = entries.map(candidate => ({ ...candidate }));
         this._renderMediaReferencePickHighlights();
         this.emit('mediaReferenceSelectionChanged', {
-            type: pick.type,
-            entries: pick.entries.map(candidate => ({ ...candidate }))
+            type: targetType,
+            entries: entries.map(candidate => ({ ...candidate }))
         });
-        if (existingIndex < 0 && pick.entries.length >= pick.maxItems) {
+        if (pick.type !== 'mixed' && existingIndex < 0 && entries.length >= maxItems) {
             this.endMediaReferencePick({ silent: true });
         }
     }
@@ -543,6 +914,7 @@ export class CanvasManager {
         this.generationPlaceholders.set(id, { group, animation, placement });
         animation.start();
         this.transientLayer.batchDraw();
+        this._refreshCanvasBoundary();
         return placement;
     }
 
@@ -587,6 +959,7 @@ export class CanvasManager {
         document.body.style.cursor = 'default';
         this.stage.draggable(true);
         this.transientLayer.batchDraw();
+        this._refreshCanvasBoundary();
         return true;
     }
 
@@ -741,7 +1114,7 @@ export class CanvasManager {
             this.selectionRect.visible(false);
 
             const box = this.selectionRect.getClientRect();
-            const ctrlKey = Boolean(event?.ctrlKey);
+            const ctrlKey = Boolean(event?.ctrlKey || event?.metaKey);
             const shiftKey = Boolean(event?.shiftKey);
             if (box.width === 0 && box.height === 0) {
                 if (!ctrlKey && !shiftKey) {
@@ -801,15 +1174,13 @@ export class CanvasManager {
                 return;
             }
             if (this._activeMediaReferencePick && e.evt.button === 0) {
-                const group = e.target?.name?.() === 'nodeGroup'
-                    ? e.target
-                    : e.target?.findAncestor?.('Group');
-                if (group && this.items.has(group.attrs.id)) {
+                const item = this._findMediaReferenceItemFromNode(e.target);
+                if (item) {
                     e.evt.preventDefault();
                     e.cancelBubble = true;
-                    group?.stopDrag?.();
-                    this._lastMediaReferencePointerPick = { id: group.attrs.id, at: Date.now() };
-                    this._toggleMediaReferencePick(this.items.get(group.attrs.id));
+                    item.group?.stopDrag?.();
+                    this._lastMediaReferencePointerPick = { id: item.data.id, at: Date.now() };
+                    this._toggleMediaReferencePick(item);
                     return;
                 }
                 if (e.target === this.stage || e.target === this.selectionRect) {
@@ -845,6 +1216,16 @@ export class CanvasManager {
                             setCanvasDragEnabled(false);
                             group.stopDrag();
                             document.body.style.cursor = 'copy';
+
+                            if (window.flowCanvas?.platform === 'darwin' && window.flowCanvas?.drag?.startExportCopy) {
+                                this._showCanvasStatus(filePaths.length > 1
+                                    ? `拖到 Finder：复制 ${filePaths.length} 个素材副本`
+                                    : '拖到 Finder：复制素材副本', 3200);
+                                window.flowCanvas.drag.startExportCopy(filePaths);
+                                setCanvasDragEnabled(true);
+                                document.body.style.cursor = 'default';
+                                return;
+                            }
                             this._showCanvasStatus(filePaths.length > 1
                                 ? `拖到系统文件夹松手：复制 ${filePaths.length} 个素材副本`
                                 : '拖到系统文件夹松手：复制素材副本', 4200);
@@ -871,7 +1252,7 @@ export class CanvasManager {
                         return;
                     }
 
-                    if (!e.evt.ctrlKey && !e.evt.shiftKey && !this.selectedItems.has(group.attrs.id)) {
+                    if (!(e.evt.ctrlKey || e.evt.metaKey) && !e.evt.shiftKey && !this.selectedItems.has(group.attrs.id)) {
                         this.clearSelection();
                         this.selectItem(group.attrs.id, true);
                     }
@@ -974,6 +1355,7 @@ export class CanvasManager {
         });
 
         this.stage.on('dragmove', (e) => {
+            this._scheduleMinimapDraw();
             if (e.target.name() === 'nodeGroup') {
                 const group = e.target;
                 if (!this.selectedItems.has(group.attrs.id)) return;
@@ -1027,7 +1409,7 @@ export class CanvasManager {
                 }
 
                 // ── Ctrl+拖拽：在原位留下副本，拖走原件 ──
-                if (e.evt && e.evt.ctrlKey && !this._isAltDragModifier(e.evt)) {
+                if (e.evt && (e.evt.ctrlKey || e.evt.metaKey) && !this._isAltDragModifier(e.evt)) {
                     const clonedDataList = [];
                     let cloneIdx = 0;
                     this.selectedItems.forEach(id => {
@@ -1075,14 +1457,15 @@ export class CanvasManager {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
 
             const key = e.key.toLowerCase();
+            const commandKey = e.ctrlKey || e.metaKey;
 
-            if (e.ctrlKey && !e.altKey && key === 'z') {
+            if (commandKey && !e.altKey && key === 'z') {
                 e.preventDefault();
                 document.dispatchEvent(new CustomEvent(e.shiftKey ? 'history-redo' : 'history-undo'));
-            } else if (e.ctrlKey && !e.shiftKey && !e.altKey && key === 'y') {
+            } else if (commandKey && !e.shiftKey && !e.altKey && key === 'y') {
                 e.preventDefault();
                 document.dispatchEvent(new CustomEvent('history-redo'));
-            } else if (e.ctrlKey && !e.shiftKey && !e.altKey && key === 'c') {
+            } else if (commandKey && !e.shiftKey && !e.altKey && key === 'c') {
                 if (this.selectedItems.size > 0) {
                     e.preventDefault();
                     this.copySelectionToClipboard();
@@ -1106,10 +1489,10 @@ export class CanvasManager {
             } else if (e.key === 'Escape') {
                 this.clearSelection();
                 this.contextMenu.hide();
-            } else if (key === 'a' && e.ctrlKey) {
+            } else if (key === 'a' && commandKey) {
                 e.preventDefault();
                 this.selectAll();
-            } else if (key === 'v' && e.ctrlKey) {
+            } else if (key === 'v' && commandKey) {
                 // Ctrl+V 粘贴网页图片
                 e.preventDefault();
                 this._handlePaste();
@@ -1387,7 +1770,9 @@ export class CanvasManager {
             }
 
             if (result?.clipboardReady) {
-                this._showCanvasStatus('已放入系统剪贴板，请在目标文件夹按 Ctrl+V', 5200);
+                this._showCanvasStatus(window.flowCanvas?.platform === 'darwin'
+                    ? '已放入系统剪贴板，请在目标文件夹按 Command+V'
+                    : '已放入系统剪贴板，请在目标文件夹按 Ctrl+V', 5200);
                 return;
             }
 
@@ -1761,6 +2146,8 @@ export class CanvasManager {
         this._removeAllPlanInlineEditors();
         this.selectedItems.clear();
         this.layer.batchDraw();
+        this._canvasBounds = null;
+        this._refreshCanvasBoundary({ reset: true });
     }
 
     // ── 设置视口位置和缩放 ──
@@ -1772,6 +2159,7 @@ export class CanvasManager {
             this.syncGifs();
             this.syncBackground();
             this.syncPlanInlineEditors();
+            this._scheduleMinimapDraw();
         }
     }
 
@@ -1793,11 +2181,13 @@ export class CanvasManager {
             }
 
             this.layer.batchDraw();
+            this._refreshCanvasBoundary();
 
             if (index < items.length) {
                 requestAnimationFrame(renderBatch);
             } else {
                 console.log('[Canvas] renderInitialItems 完成: this.items.size =', this.items.size);
+                this.emit('initialRenderComplete', { itemCount: this.items.size });
                 requestAnimationFrame(() => this._loadAllContent());
             }
         };
@@ -1841,6 +2231,7 @@ export class CanvasManager {
         this.layer.batchDraw();
         this.syncPlanInlineEditors();
         this.setFilter(Array.isArray(this.currentFilter) ? this.currentFilter : [this.currentFilter]);
+        this._refreshCanvasBoundary();
     }
 
     _getFileType(filePath) {
@@ -2079,7 +2470,7 @@ export class CanvasManager {
         });
 
         group.on('click tap', (e) => {
-            if (e.evt.button === 2) return;
+            if (e.evt.button != null && e.evt.button !== 0) return;
             if (this._activeMediaReferencePick) {
                 e.cancelBubble = true;
                 e.evt.preventDefault();
@@ -2095,7 +2486,7 @@ export class CanvasManager {
                 if (item) this._finishPlanReferencePick(item);
                 return;
             }
-            if (e.evt.ctrlKey || e.evt.shiftKey) {
+            if (e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey) {
                 if (this.selectedItems.has(data.id)) {
                     const previousSelection = new Set(this.selectedItems);
                     this.selectedItems.delete(data.id);
@@ -2256,7 +2647,7 @@ export class CanvasManager {
         });
         group.on('click', (e) => {
             if (e.evt.button === 2) return;
-            if (e.evt.ctrlKey || e.evt.shiftKey) {
+            if (e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey) {
                 if (this.selectedItems.has(plan.id)) {
                     const previousSelection = new Set(this.selectedItems);
                     this.selectedItems.delete(plan.id);
@@ -5875,6 +6266,8 @@ export class CanvasManager {
             fill: 'transparent'
         });
         hotspot.on('mousedown', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            if (this._pickMediaReferenceFromControl(item, event)) return;
             event.cancelBubble = true;
             event.evt.stopPropagation();
             this._promoteVideoForPlayback(item);
@@ -6232,6 +6625,8 @@ export class CanvasManager {
                 }).catch(() => { });
             };
             playPauseHotspot.on('mousedown', (e) => {
+                if (e.evt?.button != null && e.evt.button !== 0) return;
+                if (this._pickMediaReferenceFromControl(item, e)) return;
                 e.cancelBubble = true;
                 e.evt.stopPropagation();
                 if (video.paused) {
@@ -6246,6 +6641,8 @@ export class CanvasManager {
 
             // 进度跳转逻辑
             progressHotspot.on('mousedown', (e) => {
+                if (e.evt?.button != null && e.evt.button !== 0) return;
+                if (this._pickMediaReferenceFromControl(item, e)) return;
                 e.cancelBubble = true;
                 e.evt.stopPropagation();
                 const ptrX = group.getRelativePointerPosition().x;
@@ -6304,6 +6701,7 @@ export class CanvasManager {
 
         this._createCard(data);
         this._scheduleCullCheck(); // 新卡片创建后补加载内容
+        this._refreshCanvasBoundary();
         return data;
     }
 
@@ -6336,6 +6734,7 @@ export class CanvasManager {
             this._unloadContent(item);
             item.group.destroy();
             this.items.delete(id);
+            this._refreshCanvasBoundary();
         }
     }
 
@@ -6449,6 +6848,7 @@ export class CanvasManager {
         this._updateSelectionVisuals();
         this.syncGifs();
         this.syncPlanInlineEditors();
+        this._scheduleMinimapDraw();
     }
 
     /**
@@ -6723,7 +7123,13 @@ export class CanvasManager {
 }
 
 function normalizePathForCompare(filePath) {
-    return String(filePath || '').replace(/\//g, '\\').toLowerCase();
+    const raw = String(filePath || '');
+    if (!raw) return '';
+    const normalized = raw
+        .normalize('NFC')
+        .replace(/\\/g, '/')
+        .replace(/\/+$/g, '') || '/';
+    return window.flowCanvas?.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 function escapeHtml(value) {

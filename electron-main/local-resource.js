@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { Readable } = require('stream');
+const { ReadableStream } = require('stream/web');
 
 const MIME_TYPES = {
     '.aac': 'audio/aac',
@@ -66,6 +66,38 @@ function baseHeaders(filePath, size) {
     };
 }
 
+function createFileWebStream(filePath, options = {}) {
+    const fileStream = fs.createReadStream(filePath, options);
+    const iterator = fileStream[Symbol.asyncIterator]();
+    let closed = false;
+
+    return new ReadableStream({
+        async pull(controller) {
+            if (closed) return;
+            try {
+                const { value, done } = await iterator.next();
+                if (closed) return;
+                if (done) {
+                    closed = true;
+                    controller.close();
+                    return;
+                }
+                controller.enqueue(value);
+            } catch (error) {
+                if (closed || error?.code === 'ERR_INVALID_STATE') return;
+                closed = true;
+                controller.error(error);
+            }
+        },
+        async cancel() {
+            if (closed) return;
+            closed = true;
+            fileStream.destroy();
+            try { await iterator.return?.(); } catch (_) { }
+        }
+    });
+}
+
 async function handleLocalResourceRequest(request) {
     let filePath;
     try {
@@ -101,13 +133,12 @@ async function handleLocalResourceRequest(request) {
             'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`
         };
         if (request?.method === 'HEAD') return new Response(null, { status: 206, headers });
-        const stream = fs.createReadStream(filePath, { start: range.start, end: range.end });
-        return new Response(Readable.toWeb(stream), { status: 206, headers });
+        return new Response(createFileWebStream(filePath, { start: range.start, end: range.end }), { status: 206, headers });
     }
 
     const headers = baseHeaders(filePath, stat.size);
     if (request?.method === 'HEAD') return new Response(null, { status: 200, headers });
-    return new Response(Readable.toWeb(fs.createReadStream(filePath)), { status: 200, headers });
+    return new Response(createFileWebStream(filePath), { status: 200, headers });
 }
 
 module.exports = {

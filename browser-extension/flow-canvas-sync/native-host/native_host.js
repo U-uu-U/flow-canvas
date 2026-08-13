@@ -17,7 +17,9 @@ function dataDirCandidates() {
   return [
     process.env.FLOW_CANVAS_DATA_DIR,
     process.env.APPDATA && path.join(process.env.APPDATA, 'flow-canvas', 'data'),
-    process.env.APPDATA && path.join(process.env.APPDATA, 'Flow Canvas', 'data')
+    process.env.APPDATA && path.join(process.env.APPDATA, 'Flow Canvas', 'data'),
+    process.env.HOME && path.join(process.env.HOME, 'Library', 'Application Support', 'flow-canvas', 'data'),
+    process.env.HOME && path.join(process.env.HOME, 'Library', 'Application Support', 'Flow Canvas', 'data')
   ].filter(Boolean);
 }
 
@@ -160,7 +162,11 @@ async function handle(message) {
       return { success: true, target };
     }
     case 'open_in_explorer':
-      execFile('explorer.exe', ['/select,', message.path], { windowsHide: true });
+      if (process.platform === 'darwin') {
+        execFile('/usr/bin/open', ['-R', message.path]);
+      } else {
+        execFile('explorer.exe', ['/select,', message.path], { windowsHide: true });
+      }
       return { success: true };
     default:
       return { success: false, error: `未知操作: ${message?.action || '(empty)'}` };

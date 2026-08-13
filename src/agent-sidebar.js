@@ -3,10 +3,17 @@
 // ============================================================
 
 const DEFAULT_TEMPLATES = {
-    'ravenhash-chat': { name: 'RavenHash Chat', type: 'openai', endpoint: 'https://ai.ravenhash.org', model: '' },
-    ravenhash: { name: 'RavenHash Image', type: 'openai', endpoint: 'https://ai.ravenhash.org', model: 'gpt-image-2' },
-    'ravenhash-video': { name: 'RavenHash Video', type: 'openai', endpoint: 'https://art.ravenhash.org', model: 'doubao-seedance-2-0' }
+    ravenhash: { name: 'RavenHash Image', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: 'gpt-image-2' },
+    'ravenhash-video': { name: 'RavenHash Video', type: 'openai', endpoint: 'https://art.ravenhash.org/v1', model: 'doubao-seedance-2-0' }
 };
+
+function normalizeRavenHashEndpoint(endpoint) {
+    const value = String(endpoint || '').trim().replace(/\/+$/, '');
+    if (/^https:\/\/(?:ai|art)\.ravenhash\.org$/i.test(value)) {
+        return `${value}/v1`;
+    }
+    return value;
+}
 
 const VIDEO_MODEL_PROFILES = [
     {
@@ -44,7 +51,7 @@ const VIDEO_MODEL_PROFILES = [
         supportsCameraFixed: false,
         supportsGeneratedAudio: false,
         supportsWatermark: false,
-        referenceLimits: { image: 5, video: 0, audio: 1 },
+        referenceLimits: { image: 5, video: 1, audio: 1 },
         defaultRatio: '16:9',
         defaultResolution: '2k',
         defaultDuration: 5
@@ -117,6 +124,12 @@ const RAVENHASH_IMAGE_SIZES = [
 const VIDEO_REFERENCE_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
 const VIDEO_REFERENCE_LABELS = Object.freeze({ image: '图片', video: '视频', audio: '音频' });
 const VIDEO_REFERENCE_LARGE_TOTAL_BYTES = 10 * 1024 * 1024;
+const IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES = 6 * 1024 * 1024;
+const IMAGE_REFERENCE_MANUAL_BUDGET_BYTES = 2 * 1024 * 1024;
+const IMAGE_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-image-prompt-height';
+const VIDEO_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-video-prompt-height';
+const PROJECT_COMPOSER_CACHE_STORAGE_KEY = 'flow-canvas-project-composer-cache-v1';
+const PROJECT_COMPOSER_DEFAULT_KEY = '__no_project__';
 const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
 const GENERATION_TASK_LIMIT = 100;
 const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
@@ -124,31 +137,25 @@ const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
 export class AgentSidebar {
     constructor(options = {}) {
         this.options = options;
-        // 全局配置：系统提示词，选中的 provider ID 等
+        // 全局配置：图片和视频 provider 选择
         this.globalConfig = {
-            systemPrompt: '你是一个有用的 AI 助手，正在帮助用户管理和分析他们白板上的内容。',
-            chatProviderId: null,
             imageProviderId: null,
-            videoProviderId: null,
-            activeProviderId: null
+            videoProviderId: null
         };
         // 存储所有的 provider { id, name, type, endpoint, apiKey, model }
         this.providers = [];
 
-        this.messages = []; // { role: 'user'|'assistant', content: string }
-        this.isStreaming = false;
         this.editingProviderId = null;
-        this.availableSkills = [];
         this.imageGenerationMode = 'text';
         this.imageReferenceSelections = [];
         this.videoReferenceSelections = { image: [], video: [], audio: [] };
         this.activeReferenceWorkspace = null;
         this.activeVideoReferenceType = null;
+        this.activeProjectCacheKey = this._projectCacheKey(this.options.getActiveProjectId?.());
+        this.projectComposerSaveTimer = null;
+        this.restoringProjectComposer = false;
 
         // DOM 引用
-        this.messagesEl = document.getElementById('agentMessages');
-        this.inputEl = document.getElementById('agentInput');
-        this.sendBtn = document.getElementById('agentSendBtn');
         this.settingsPanel = document.getElementById('agentSettings');
 
         // Settings elements
@@ -157,16 +164,8 @@ export class AgentSidebar {
         this.apiForm = document.getElementById('agentApiForm');
         this.apiFormCloseBtn = document.getElementById('agentApiFormClose');
         this.apiFormTitle = document.getElementById('agentApiFormTitle');
-        this.modelSelectEl = document.getElementById('agentModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
-        this.systemPromptEl = document.getElementById('agentSystemPrompt');
-        this.fetchSkillsBtn = document.getElementById('agentFetchSkillsBtn');
-        this.skillSelect = document.getElementById('agentSkillSelect');
-        this.skillDescription = document.getElementById('agentSkillDescription');
-        this.useSkillBtn = document.getElementById('agentUseSkillBtn');
-        this.removeSkillBtn = document.getElementById('agentRemoveSkillBtn');
-        this.promptSkillStatusEl = document.getElementById('agentPromptSkillStatus');
         this.modePicker = document.getElementById('creationModePicker');
         this.modeTitle = document.getElementById('creationModeTitle');
         this.taskHistoryBtn = document.getElementById('agentTaskHistoryBtn');
@@ -191,6 +190,7 @@ export class AgentSidebar {
         this.videoWorkspace = document.getElementById('videoWorkspace');
         this.videoPromptDock = document.getElementById('videoPromptDock');
         this.videoPromptInput = document.getElementById('videoPromptInput');
+        this.videoPromptResizeHandle = document.getElementById('videoPromptResizeHandle');
         this.videoRatioField = document.getElementById('videoRatioField');
         this.videoRatioGrid = document.querySelector('.creation-ratio-grid');
         this.videoResolutionField = document.getElementById('videoResolutionField');
@@ -204,9 +204,7 @@ export class AgentSidebar {
         this.videoWebSearchField = document.getElementById('videoWebSearchField');
         this.videoWebSearch = document.getElementById('videoWebSearch');
         this.videoWatermark = document.getElementById('videoWatermark');
-        this.videoAddImageBtn = document.getElementById('videoAddImageBtn');
-        this.videoAddVideoBtn = document.getElementById('videoAddVideoBtn');
-        this.videoAddAudioBtn = document.getElementById('videoAddAudioBtn');
+        this.videoAddMediaBtn = document.getElementById('videoAddMediaBtn');
         this.videoClearSourcesBtn = document.getElementById('videoClearSourcesBtn');
         this.videoWorkspaceStatus = document.getElementById('videoWorkspaceStatus');
         this.videoGenerateBtn = document.getElementById('videoGenerateBtn');
@@ -215,11 +213,13 @@ export class AgentSidebar {
         this.videoPromptModelChip = document.getElementById('videoPromptModelChip');
         this.imageWorkspace = document.getElementById('imageWorkspace');
         this.imagePromptInput = document.getElementById('imagePromptInput');
+        this.imagePromptResizeHandle = document.getElementById('imagePromptResizeHandle');
         this.imageGenerationModeControl = document.getElementById('imageGenerationModeControl');
         this.imageReferencePanel = document.getElementById('imageReferencePanel');
         this.imageReferenceCount = document.getElementById('imageReferenceCount');
         this.imageReferenceList = document.getElementById('imageReferenceList');
         this.imageAddReferenceBtn = document.getElementById('imageAddReferenceBtn');
+        this.imageCompressReferencesBtn = document.getElementById('imageCompressReferencesBtn');
         this.imageClearReferencesBtn = document.getElementById('imageClearReferencesBtn');
         this.imageSizeSelect = document.getElementById('imageSizeSelect');
         this.imageQualitySelect = document.getElementById('imageQualitySelect');
@@ -239,6 +239,7 @@ export class AgentSidebar {
         this.formType = document.getElementById('agentFormType');
         this.formEndpoint = document.getElementById('agentFormEndpoint');
         this.formKey = document.getElementById('agentFormKey');
+        this.getApiBtn = document.getElementById('agentGetApiBtn');
         this.formModel = document.getElementById('agentFormModel');
         this.fetchModelsBtn = document.getElementById('agentFetchModelsBtn');
         this.fetchedModelSelect = document.getElementById('agentFetchedModelSelect');
@@ -267,6 +268,9 @@ export class AgentSidebar {
         this.options.subscribeCanvasSelection?.((entries) => {
             this.lastCanvasSelection = Array.isArray(entries) ? entries : [];
         });
+        this.options.subscribeInitialRenderComplete?.(() => {
+            this._restoreProjectComposerReferences(this.activeProjectCacheKey);
+        });
         this.options.subscribeMediaReferenceSelection?.((payload) => {
             const type = payload?.type;
             if (this.activeReferenceWorkspace === 'image' && type === 'image') {
@@ -275,9 +279,11 @@ export class AgentSidebar {
                 return;
             }
             if (this.activeReferenceWorkspace !== 'video') return;
-            if (!VIDEO_REFERENCE_LIMITS[type]) return;
+            const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
+            const limits = this._getVideoReferenceLimits(profile);
+            if (!limits[type]) return;
             this.videoReferenceSelections[type] = (Array.isArray(payload.entries) ? payload.entries : [])
-                .slice(0, VIDEO_REFERENCE_LIMITS[type]);
+                .slice(0, limits[type]);
             this._renderVideoSourcePreview();
         });
         this.options.subscribeMediaReferencePickState?.((payload) => {
@@ -287,6 +293,162 @@ export class AgentSidebar {
             this._renderVideoReferencePickState();
             this._renderImageReferences();
         });
+    }
+
+    _projectCacheKey(projectId) {
+        const value = String(projectId || '').trim();
+        return value || PROJECT_COMPOSER_DEFAULT_KEY;
+    }
+
+    _loadProjectComposerCache() {
+        try {
+            const value = JSON.parse(localStorage.getItem(PROJECT_COMPOSER_CACHE_STORAGE_KEY) || '{}');
+            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    _serializeReferenceEntries(entries = []) {
+        return (Array.isArray(entries) ? entries : []).map(entry => ({
+            id: entry?.id || entry?.itemId || null,
+            filePath: entry?.filePath || null
+        })).filter(entry => entry.id || entry.filePath);
+    }
+
+    _saveProjectComposer(key = this.activeProjectCacheKey) {
+        if (this.restoringProjectComposer || !key) return;
+        const cache = this._loadProjectComposerCache();
+        cache[key] = {
+            imagePrompt: this.imagePromptInput?.value || '',
+            videoPrompt: this.videoPromptInput?.value || '',
+            imageGenerationMode: this.imageGenerationMode,
+            imageSettings: {
+                size: this.imageSizeSelect?.value || '',
+                quality: this.imageQualitySelect?.value || ''
+            },
+            videoSettings: {
+                ratio: this.videoRatioSelect?.value || '',
+                resolution: this.videoResolutionSelect?.value || '',
+                duration: this.videoDurationSelect?.value || '',
+                cameraFixed: Boolean(this.videoCameraFixed?.checked),
+                generateAudio: Boolean(this.videoGenerateAudio?.checked),
+                webSearch: Boolean(this.videoWebSearch?.checked),
+                watermark: Boolean(this.videoWatermark?.checked)
+            },
+            imageReferences: this._serializeReferenceEntries(this.imageReferenceSelections),
+            videoReferences: Object.fromEntries(['image', 'video', 'audio'].map(type => [
+                type,
+                this._serializeReferenceEntries(this.videoReferenceSelections[type])
+            ])),
+            updatedAt: new Date().toISOString()
+        };
+        try {
+            localStorage.setItem(PROJECT_COMPOSER_CACHE_STORAGE_KEY, JSON.stringify(cache));
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to save project composer cache:', error);
+        }
+    }
+
+    _scheduleProjectComposerSave() {
+        if (this.restoringProjectComposer) return;
+        clearTimeout(this.projectComposerSaveTimer);
+        this.projectComposerSaveTimer = setTimeout(() => {
+            this.projectComposerSaveTimer = null;
+            this._saveProjectComposer();
+        }, 180);
+    }
+
+    _restoreProjectComposerReferences(key = this.activeProjectCacheKey) {
+        if (key !== this.activeProjectCacheKey) return;
+        const state = this._loadProjectComposerCache()[key];
+        if (!state) return;
+        this.restoringProjectComposer = true;
+        try {
+            this.imageReferenceSelections = this.options.resolveMediaReferenceEntries?.(
+                state.imageReferences,
+                'image'
+            ) || [];
+            this.videoReferenceSelections = Object.fromEntries(['image', 'video', 'audio'].map(type => [
+                type,
+                this.options.resolveMediaReferenceEntries?.(state.videoReferences?.[type], type) || []
+            ]));
+            this.options.clearMediaReferenceSelections?.();
+            this._renderImageReferences();
+            this._renderVideoSourcePreview();
+        } finally {
+            this.restoringProjectComposer = false;
+        }
+    }
+
+    _restoreProjectComposerControls(state) {
+        const setSelectValue = (select, value) => {
+            if (!select || value == null) return;
+            if (Array.from(select.options || []).some(option => option.value === String(value))) {
+                select.value = String(value);
+            }
+        };
+        setSelectValue(this.imageSizeSelect, state?.imageSettings?.size);
+        setSelectValue(this.imageQualitySelect, state?.imageSettings?.quality);
+        setSelectValue(this.videoResolutionSelect, state?.videoSettings?.resolution);
+
+        const ratio = String(state?.videoSettings?.ratio || '');
+        if (ratio && this.videoRatioGrid?.querySelector(`[data-ratio="${CSS.escape(ratio)}"]`)) {
+            this.videoRatioSelect.value = ratio;
+            this.videoRatioGrid.querySelectorAll('[data-ratio]').forEach(button => {
+                button.classList.toggle('active', button.dataset.ratio === ratio);
+            });
+        }
+
+        const duration = String(state?.videoSettings?.duration || '');
+        if (duration) {
+            this._setVideoDurationValue(duration);
+            const durationInput = this.videoDurationControl?.querySelector('input[type="range"], select');
+            if (durationInput && Array.from(durationInput.options || []).every(option => option.value !== duration)) {
+                if (durationInput.type === 'range') durationInput.value = duration;
+            } else if (durationInput) {
+                durationInput.value = duration;
+            }
+            const output = this.videoDurationControl?.querySelector('output');
+            if (output) output.textContent = `${duration} 秒`;
+        }
+
+        [
+            [this.videoCameraFixed, state?.videoSettings?.cameraFixed],
+            [this.videoGenerateAudio, state?.videoSettings?.generateAudio],
+            [this.videoWebSearch, state?.videoSettings?.webSearch],
+            [this.videoWatermark, state?.videoSettings?.watermark]
+        ].forEach(([input, checked]) => {
+            if (input && checked != null && !input.closest('.creation-switch-control')?.hidden) {
+                input.checked = Boolean(checked);
+            }
+        });
+    }
+
+    switchProjectContext(projectId, { saveCurrent = true } = {}) {
+        const nextKey = this._projectCacheKey(projectId);
+        clearTimeout(this.projectComposerSaveTimer);
+        this.projectComposerSaveTimer = null;
+        if (saveCurrent) this._saveProjectComposer(this.activeProjectCacheKey);
+        this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
+        this.activeProjectCacheKey = nextKey;
+
+        const state = this._loadProjectComposerCache()[nextKey] || null;
+        this.restoringProjectComposer = true;
+        try {
+            if (this.imagePromptInput) this.imagePromptInput.value = state?.imagePrompt || '';
+            if (this.videoPromptInput) this.videoPromptInput.value = state?.videoPrompt || '';
+            this.imageGenerationMode = state?.imageGenerationMode === 'reference' ? 'reference' : 'text';
+            this.imageReferenceSelections = [];
+            this.videoReferenceSelections = { image: [], video: [], audio: [] };
+            this.options.clearMediaReferenceSelections?.();
+            this._renderImageReferences();
+            this._renderVideoSourcePreview();
+            this._restoreProjectComposerControls(state);
+        } finally {
+            this.restoringProjectComposer = false;
+        }
+        this._restoreProjectComposerReferences(nextKey);
     }
 
     _bindEvents() {
@@ -334,9 +496,22 @@ export class AgentSidebar {
             if (retryButton) this._retryGenerationTask(retryButton.dataset.retryTask);
         });
         this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
-        this.videoAddImageBtn?.addEventListener('click', () => this._toggleVideoReferencePick('image'));
-        this.videoAddVideoBtn?.addEventListener('click', () => this._toggleVideoReferencePick('video'));
-        this.videoAddAudioBtn?.addEventListener('click', () => this._toggleVideoReferencePick('audio'));
+        [this.videoPromptInput, this.imagePromptInput].forEach(input => {
+            input?.addEventListener('input', () => this._scheduleProjectComposerSave());
+        });
+        [
+            this.imageSizeSelect,
+            this.imageQualitySelect,
+            this.videoResolutionSelect,
+            this.videoCameraFixed,
+            this.videoGenerateAudio,
+            this.videoWebSearch,
+            this.videoWatermark
+        ].forEach(control => control?.addEventListener('change', () => this._scheduleProjectComposerSave()));
+        this.videoRatioGrid?.addEventListener('click', () => this._scheduleProjectComposerSave());
+        this.videoDurationControl?.addEventListener('input', () => this._scheduleProjectComposerSave());
+        this.videoDurationControl?.addEventListener('change', () => this._scheduleProjectComposerSave());
+        this.videoAddMediaBtn?.addEventListener('click', () => this._toggleVideoReferencePick());
         this.videoClearSourcesBtn?.addEventListener('click', () => this._clearVideoReferences());
         this.agentSidebar?.addEventListener('pointerdown', (event) => {
             if (!this.activeReferenceWorkspace || event.target.closest('.creation-source-add')) return;
@@ -347,12 +522,15 @@ export class AgentSidebar {
             if (button) this._setImageGenerationMode(button.dataset.imageGenerationMode);
         });
         this.imageAddReferenceBtn?.addEventListener('click', () => this._toggleImageReferencePick());
+        this.imageCompressReferencesBtn?.addEventListener('click', () => this._compressSelectedImageReferences());
         this.imageClearReferencesBtn?.addEventListener('click', () => this._clearImageReferences());
         this.imageReferenceList?.addEventListener('click', (event) => {
             const button = event.target.closest('[data-remove-image-reference]');
             if (button) this._removeImageReference(button.dataset.removeImageReference);
         });
         this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
+        this._bindImagePromptResize();
+        this._bindVideoPromptResize();
         document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
         this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
         this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
@@ -364,11 +542,6 @@ export class AgentSidebar {
 
         // 退出当前模式并回到普通画板。
         document.getElementById('creationModeCloseBtn')?.addEventListener('click', exitCreationMode);
-
-        // 清空按钮
-        document.getElementById('agentClearBtn')?.addEventListener('click', () => this.clearMessages());
-
-        document.getElementById('agentPlanBtn')?.addEventListener('click', () => this._assistPlanning());
 
         // 设置模式只从右上角齿轮进入。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
@@ -386,18 +559,17 @@ export class AgentSidebar {
 
         // 各种表单动作
         this.addApiBtn?.addEventListener('click', () => this._showForm());
-        document.querySelectorAll('[data-ravenhash-site]').forEach(button => {
-            button.addEventListener('click', async () => {
-                const site = button.dataset.ravenhashSite;
-                button.disabled = true;
-                try {
-                    await window.flowCanvas?.shell?.openRavenHash?.(site);
-                } catch (err) {
-                    console.error('[AgentSidebar] Failed to open RavenHash:', err);
-                } finally {
-                    button.disabled = false;
-                }
-            });
+        this.getApiBtn?.addEventListener('click', async () => {
+            const endpoint = String(this.formEndpoint?.value || '').toLowerCase();
+            const site = endpoint.includes('art.ravenhash.org') ? 'art' : 'ai';
+            this.getApiBtn.disabled = true;
+            try {
+                await window.flowCanvas?.shell?.openRavenHash?.(site);
+            } catch (err) {
+                console.error('[AgentSidebar] Failed to open RavenHash:', err);
+            } finally {
+                this.getApiBtn.disabled = false;
+            }
         });
         this.apiFormCloseBtn?.addEventListener('click', () => this._hideForm());
         this.formSaveBtn?.addEventListener('click', () => this._saveForm());
@@ -414,26 +586,7 @@ export class AgentSidebar {
             el?.addEventListener('change', () => this._resetFetchedModels());
         });
 
-        // 系统提示词实时保存
-        this.systemPromptEl?.addEventListener('input', () => {
-            this.globalConfig.systemPrompt = this.systemPromptEl.value;
-            this._saveConfig();
-            this._renderSystemPromptSkillState({ preserveMessage: true });
-        });
-
-        this.fetchSkillsBtn?.addEventListener('click', () => this._fetchAvailableSkills());
-        this.skillSelect?.addEventListener('change', () => this._renderSelectedSkillDetails());
-        this.useSkillBtn?.addEventListener('click', () => this._applySelectedSkill());
-        this.removeSkillBtn?.addEventListener('click', () => this._removeActiveSkill());
-
         // 顶部下拉框切换
-        this.modelSelectEl?.addEventListener('change', (e) => {
-            const id = e.target.value;
-            if (id) {
-                this._setChatProvider(id);
-            }
-        });
-
         this.imageModelSelectEl?.addEventListener('change', (e) => {
             const id = e.target.value;
             if (id) {
@@ -448,22 +601,6 @@ export class AgentSidebar {
             }
         });
 
-        // 发送消息
-        this.sendBtn?.addEventListener('click', () => this._send());
-
-        // Enter 发送，Shift+Enter 换行
-        this.inputEl?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                this._send();
-            }
-        });
-
-        // 自动调整输入框高度
-        this.inputEl?.addEventListener('input', () => {
-            this.inputEl.style.height = 'auto';
-            this.inputEl.style.height = Math.min(this.inputEl.scrollHeight, 120) + 'px';
-        });
     }
 
     _showModePicker() {
@@ -622,22 +759,23 @@ export class AgentSidebar {
 
     _renderVideoSourcePreview() {
         this._renderVideoReferencePickState();
+        this._scheduleProjectComposerSave();
     }
 
-    _toggleVideoReferencePick(type) {
-        if (this.activeVideoReferenceType === type) {
+    _toggleVideoReferencePick() {
+        if (this.activeVideoReferenceType === 'mixed') {
             this.options.endMediaReferencePick?.();
             return;
         }
         const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
         const limits = this._getVideoReferenceLimits(profile);
-        if ((limits[type] || 0) <= 0) return;
+        if (!Object.values(limits).some(limit => limit > 0)) return;
         this.options.endMediaReferencePick?.({ silent: true });
         this.activeReferenceWorkspace = 'video';
         this.options.beginMediaReferencePick?.(
-            type,
-            this.videoReferenceSelections[type],
-            limits[type],
+            'mixed',
+            [],
+            limits,
             this.videoReferenceSelections
         );
     }
@@ -656,22 +794,15 @@ export class AgentSidebar {
     }
 
     _renderVideoReferencePickState() {
-        const activeType = this.activeVideoReferenceType;
-        this.videoAddImageBtn?.classList.toggle('active', activeType === 'image');
-        this.videoAddVideoBtn?.classList.toggle('active', activeType === 'video');
-        this.videoAddAudioBtn?.classList.toggle('active', activeType === 'audio');
-        if (this.videoAddImageBtn) {
-            this.videoAddImageBtn.querySelector('span').textContent = activeType === 'image' ? '选择图片中' : '添加图片';
-            this.videoAddImageBtn.setAttribute('aria-pressed', String(activeType === 'image'));
-        }
-        if (this.videoAddVideoBtn) {
-            this.videoAddVideoBtn.querySelector('span').textContent = activeType === 'video' ? '选择视频中' : '添加视频';
-            this.videoAddVideoBtn.setAttribute('aria-pressed', String(activeType === 'video'));
-        }
-        if (this.videoAddAudioBtn) {
-            this.videoAddAudioBtn.querySelector('span').textContent = activeType === 'audio' ? '选择音频中' : '添加音频';
-            this.videoAddAudioBtn.setAttribute('aria-pressed', String(activeType === 'audio'));
-        }
+        if (!this.videoAddMediaBtn) return;
+        const active = this.activeVideoReferenceType === 'mixed';
+        const counts = ['image', 'video', 'audio'].map(type => this.videoReferenceSelections[type]?.length || 0);
+        const hasSelection = counts.some(Boolean);
+        this.videoAddMediaBtn.classList.toggle('active', active);
+        this.videoAddMediaBtn.setAttribute('aria-pressed', String(active));
+        this.videoAddMediaBtn.querySelector('span').textContent = active || hasSelection
+            ? `图片${counts[0]} / 视频${counts[1]} / 音频${counts[2]}`
+            : '添加素材';
     }
 
     _setImageGenerationMode(mode) {
@@ -713,9 +844,171 @@ export class AgentSidebar {
         }
         this.options.clearMediaReferenceSelections?.();
         this._renderImageReferences();
+        this._scheduleProjectComposerSave();
+    }
+
+    _bindImagePromptResize() {
+        const input = this.imagePromptInput;
+        const handle = this.imagePromptResizeHandle;
+        if (!input || !handle) return;
+
+        const defaultHeight = 116;
+        const minHeight = 116;
+        const maxHeight = () => Math.max(240, Math.min(560, window.innerHeight - 260));
+        const clampHeight = value => Math.round(Math.max(minHeight, Math.min(maxHeight(), Number(value) || defaultHeight)));
+        const applyHeight = (value, persist = false) => {
+            const height = clampHeight(value);
+            input.style.height = `${height}px`;
+            handle.setAttribute('aria-valuemin', String(minHeight));
+            handle.setAttribute('aria-valuemax', String(maxHeight()));
+            handle.setAttribute('aria-valuenow', String(height));
+            if (persist) {
+                try {
+                    localStorage.setItem(IMAGE_PROMPT_HEIGHT_STORAGE_KEY, String(height));
+                } catch (_) {
+                    // Local storage may be unavailable in browser-only previews.
+                }
+            }
+            return height;
+        };
+
+        try {
+            const savedHeight = Number(localStorage.getItem(IMAGE_PROMPT_HEIGHT_STORAGE_KEY));
+            if (Number.isFinite(savedHeight)) applyHeight(savedHeight);
+            else applyHeight(input.getBoundingClientRect().height || defaultHeight);
+        } catch (_) {
+            applyHeight(defaultHeight);
+        }
+
+        let dragState = null;
+        const finishDrag = event => {
+            if (!dragState || (event?.pointerId != null && event.pointerId !== dragState.pointerId)) return;
+            const pointerId = dragState.pointerId;
+            dragState = null;
+            document.body.classList.remove('image-prompt-resizing');
+            handle.removeAttribute('aria-grabbed');
+            applyHeight(input.getBoundingClientRect().height, true);
+            if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+        };
+
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            dragState = {
+                pointerId: event.pointerId,
+                startY: event.clientY,
+                startHeight: input.getBoundingClientRect().height
+            };
+            handle.setPointerCapture?.(event.pointerId);
+            handle.setAttribute('aria-grabbed', 'true');
+            document.body.classList.add('image-prompt-resizing');
+        });
+        handle.addEventListener('pointermove', event => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+            event.preventDefault();
+            applyHeight(dragState.startHeight + event.clientY - dragState.startY);
+        });
+        handle.addEventListener('pointerup', finishDrag);
+        handle.addEventListener('pointercancel', finishDrag);
+        handle.addEventListener('lostpointercapture', finishDrag);
+        handle.addEventListener('dblclick', event => {
+            event.preventDefault();
+            applyHeight(defaultHeight, true);
+        });
+        handle.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
+            event.preventDefault();
+            const currentHeight = input.getBoundingClientRect().height;
+            const nextHeight = event.key === 'Home'
+                ? defaultHeight
+                : currentHeight + (event.key === 'ArrowDown' ? 16 : -16);
+            applyHeight(nextHeight, true);
+        });
+    }
+
+    _bindVideoPromptResize() {
+        const input = this.videoPromptInput;
+        const handle = this.videoPromptResizeHandle;
+        if (!input || !handle) return;
+
+        const defaultHeight = 92;
+        const minHeight = 62;
+        const maxHeight = () => Math.max(180, Math.min(520, window.innerHeight - 220));
+        const clampHeight = value => Math.round(Math.max(minHeight, Math.min(maxHeight(), Number(value) || defaultHeight)));
+        const applyHeight = (value, persist = false) => {
+            const height = clampHeight(value);
+            input.style.height = `${height}px`;
+            handle.setAttribute('aria-valuemin', String(minHeight));
+            handle.setAttribute('aria-valuemax', String(maxHeight()));
+            handle.setAttribute('aria-valuenow', String(height));
+            if (persist) {
+                try {
+                    localStorage.setItem(VIDEO_PROMPT_HEIGHT_STORAGE_KEY, String(height));
+                } catch (_) {
+                    // Local storage may be unavailable in browser-only previews.
+                }
+            }
+            return height;
+        };
+
+        try {
+            const savedHeight = Number(localStorage.getItem(VIDEO_PROMPT_HEIGHT_STORAGE_KEY));
+            if (Number.isFinite(savedHeight) && savedHeight > 0) applyHeight(savedHeight);
+            else applyHeight(input.getBoundingClientRect().height || defaultHeight);
+        } catch (_) {
+            applyHeight(defaultHeight);
+        }
+
+        let dragState = null;
+        const finishDrag = event => {
+            if (!dragState || (event?.pointerId != null && event.pointerId !== dragState.pointerId)) return;
+            const pointerId = dragState.pointerId;
+            dragState = null;
+            document.body.classList.remove('video-prompt-resizing');
+            handle.removeAttribute('aria-grabbed');
+            applyHeight(input.getBoundingClientRect().height, true);
+            if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
+        };
+
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            dragState = {
+                pointerId: event.pointerId,
+                startY: event.clientY,
+                startHeight: input.getBoundingClientRect().height
+            };
+            handle.setPointerCapture?.(event.pointerId);
+            handle.setAttribute('aria-grabbed', 'true');
+            document.body.classList.add('video-prompt-resizing');
+        });
+        handle.addEventListener('pointermove', event => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+            event.preventDefault();
+            applyHeight(dragState.startHeight - (event.clientY - dragState.startY));
+        });
+        handle.addEventListener('pointerup', finishDrag);
+        handle.addEventListener('pointercancel', finishDrag);
+        handle.addEventListener('lostpointercapture', finishDrag);
+        handle.addEventListener('dblclick', event => {
+            event.preventDefault();
+            applyHeight(defaultHeight, true);
+        });
+        handle.addEventListener('keydown', event => {
+            if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
+            event.preventDefault();
+            const currentHeight = input.getBoundingClientRect().height;
+            const nextHeight = event.key === 'Home'
+                ? defaultHeight
+                : currentHeight + (event.key === 'ArrowUp' ? 16 : -16);
+            applyHeight(nextHeight, true);
+        });
     }
 
     _renderImageReferences() {
+        this._scheduleProjectComposerSave();
         const isReferenceMode = this.imageGenerationMode === 'reference';
         this.imageGenerationModeControl?.querySelectorAll('[data-image-generation-mode]').forEach(button => {
             const active = button.dataset.imageGenerationMode === this.imageGenerationMode;
@@ -724,6 +1017,7 @@ export class AgentSidebar {
         });
         if (this.imageReferencePanel) this.imageReferencePanel.hidden = !isReferenceMode;
         if (this.imageReferenceCount) this.imageReferenceCount.textContent = `已选 ${this.imageReferenceSelections.length} 张`;
+        if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.hidden = this.imageReferenceSelections.length === 0;
         if (this.imageClearReferencesBtn) this.imageClearReferencesBtn.hidden = this.imageReferenceSelections.length === 0;
         const selecting = this.activeReferenceWorkspace === 'image';
         this.imageAddReferenceBtn?.classList.toggle('active', selecting);
@@ -903,16 +1197,10 @@ export class AgentSidebar {
 
     _applyVideoModelControls(profile) {
         const limits = this._getVideoReferenceLimits(profile);
-        if (this.activeVideoReferenceType && limits[this.activeVideoReferenceType] <= 0) {
+        if (this.activeVideoReferenceType === 'mixed' && !Object.values(limits).some(limit => limit > 0)) {
             this.options.endMediaReferencePick?.();
         }
-        const referenceButtons = {
-            image: this.videoAddImageBtn,
-            video: this.videoAddVideoBtn,
-            audio: this.videoAddAudioBtn
-        };
-        Object.entries(referenceButtons).forEach(([type, button]) => {
-            if (button) button.hidden = limits[type] <= 0;
+        ['image', 'video', 'audio'].forEach(type => {
             const entries = this.videoReferenceSelections[type] || [];
             const trimmed = entries.slice(0, Math.max(0, limits[type]));
             if (trimmed.length !== entries.length) {
@@ -920,6 +1208,9 @@ export class AgentSidebar {
                 this.options.updateMediaReferencePick?.(type, trimmed);
             }
         });
+        if (this.videoAddMediaBtn) {
+            this.videoAddMediaBtn.hidden = !Object.values(limits).some(limit => limit > 0);
+        }
 
         const toggleControls = [
             [this.videoCameraFixed, profile?.supportsCameraFixed !== false],
@@ -1545,10 +1836,26 @@ export class AgentSidebar {
             return;
         }
 
+        let retryImageReferences = task.kind === 'image'
+            ? task.sourcePaths.map(filePath => ({ filePath }))
+            : [];
+        if (retryImageReferences.length > 0) {
+            try {
+                const prepared = await this._prepareImageReferencesForGeneration(retryImageReferences);
+                if (!prepared) return;
+                retryImageReferences = prepared.references;
+            } catch (error) {
+                this._recordGenerationError(task.id, error);
+                return;
+            }
+        }
         this._updateGenerationTask(task.id, {
             status: 'running',
             error: null,
-            attempts: (task.attempts || 1) + 1
+            attempts: (task.attempts || 1) + 1,
+            ...(task.kind === 'image' ? {
+                sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
+            } : {})
         });
         let placeholder = null;
         let result = null;
@@ -1563,7 +1870,7 @@ export class AgentSidebar {
                     size: task.params?.size || undefined,
                     quality: task.params?.quality || 'high',
                     responseFormat: 'url',
-                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
+                    sourceReferences: retryImageReferences,
                     x: placeholder?.x,
                     y: placeholder?.y,
                     addToCanvas: true
@@ -1620,7 +1927,7 @@ export class AgentSidebar {
         }
     }
 
-    async _inspectLargeVideoReferenceImages(references) {
+    async _inspectLargeReferenceImages(references, thresholdBytes = VIDEO_REFERENCE_LARGE_TOTAL_BYTES) {
         if (!window.flowCanvas?.file?.inspect || references.length === 0) return null;
         const entries = (await Promise.all(references.map(async reference => {
             try {
@@ -1636,7 +1943,7 @@ export class AgentSidebar {
             }
         }))).filter(Boolean);
         const totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
-        if (totalBytes <= VIDEO_REFERENCE_LARGE_TOTAL_BYTES) return null;
+        if (totalBytes <= thresholdBytes) return null;
         return {
             entries,
             totalBytes,
@@ -1650,11 +1957,18 @@ export class AgentSidebar {
         return `${(value / (1024 * 1024)).toFixed(2)} MB`;
     }
 
-    _showVideoReferenceCompressionDialog(summary) {
+    _showReferenceCompressionDialog(summary, mode = 'video', { manual = false } = {}) {
+        const isImageMode = mode === 'image';
+        const note = isImageMode
+            ? '批量转小会生成压缩副本并替换当前参考选择，原图不会被修改。你可以选择是否把副本放入画板。'
+            : '压缩会生成新图片并放到画板上，原图不会被修改。压缩完成后不会自动生成视频。';
+        const confirmLabel = isImageMode
+            ? (manual ? '转小并放入画板' : '转小到画板并继续')
+            : '压缩到画板';
         return new Promise(resolve => {
             document.querySelector('.video-compression-dialog-overlay')?.remove();
             const overlay = document.createElement('div');
-            overlay.className = 'video-compression-dialog-overlay';
+            overlay.className = `video-compression-dialog-overlay${isImageMode ? ' image-reference-compression' : ''}`;
             overlay.innerHTML = `
                 <div class="video-compression-dialog" role="dialog" aria-modal="true" aria-labelledby="videoCompressionDialogTitle">
                     <div class="video-compression-dialog-header">
@@ -1665,11 +1979,12 @@ export class AgentSidebar {
                         <button class="video-compression-dialog-close" type="button" aria-label="\u5173\u95ed">\u00d7</button>
                     </div>
                     <div class="video-compression-file-list"></div>
-                    <p class="video-compression-dialog-note">\u538b\u7f29\u4f1a\u751f\u6210\u65b0\u56fe\u7247\u5e76\u653e\u5230\u753b\u677f\u4e0a\uff0c\u539f\u56fe\u4e0d\u4f1a\u88ab\u4fee\u6539\u3002\u538b\u7f29\u5b8c\u6210\u540e\u4e0d\u4f1a\u81ea\u52a8\u751f\u6210\u89c6\u9891\u3002</p>
+                    <p class="video-compression-dialog-note">${note}</p>
                     <div class="video-compression-dialog-actions">
                         <button class="video-compression-cancel" type="button">\u53d6\u6d88</button>
-                        <button class="video-compression-original" type="button">\u4f7f\u7528\u539f\u56fe\u7ee7\u7eed\u751f\u6210</button>
-                        <button class="video-compression-confirm" type="button">\u538b\u7f29\u5230\u753b\u677f</button>
+                        ${isImageMode ? '<button class="video-compression-temporary" type="button">转小但不放画板</button>' : ''}
+                        ${manual ? '' : '<button class="video-compression-original" type="button">使用原图继续生成</button>'}
+                        <button class="video-compression-confirm" type="button">${confirmLabel}</button>
                     </div>
                 </div>
             `;
@@ -1697,6 +2012,7 @@ export class AgentSidebar {
             overlay.querySelector('.video-compression-dialog-close')?.addEventListener('click', () => finish('cancel'));
             overlay.querySelector('.video-compression-cancel')?.addEventListener('click', () => finish('cancel'));
             overlay.querySelector('.video-compression-original')?.addEventListener('click', () => finish('original'));
+            overlay.querySelector('.video-compression-temporary')?.addEventListener('click', () => finish('compress-temporary'));
             overlay.querySelector('.video-compression-confirm')?.addEventListener('click', () => finish('compress'));
             overlay.addEventListener('click', event => {
                 if (event.target === overlay) finish('cancel');
@@ -1737,9 +2053,9 @@ export class AgentSidebar {
             filePath: entry.filePath
         }));
         if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
-        const compressionSummary = await this._inspectLargeVideoReferenceImages(imageReferences);
+        const compressionSummary = await this._inspectLargeReferenceImages(imageReferences);
         if (compressionSummary) {
-            const compressionChoice = await this._showVideoReferenceCompressionDialog(compressionSummary);
+            const compressionChoice = await this._showReferenceCompressionDialog(compressionSummary, 'video');
             if (compressionChoice === 'cancel') {
                 if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
                 this._setWorkspaceMessage(this.videoGenerateMessage, '', '');
@@ -1863,6 +2179,117 @@ export class AgentSidebar {
         }
     }
 
+    _referencePathKey(filePath) {
+        return String(filePath || '').replaceAll('/', '\\').toLowerCase();
+    }
+
+    _applyCompressedImageReferences(outputs = []) {
+        const replacements = new Map();
+        outputs.forEach(output => {
+            if (output?.sourceItemId) replacements.set(`id:${output.sourceItemId}`, output);
+            if (output?.sourceFilePath) replacements.set(`path:${this._referencePathKey(output.sourceFilePath)}`, output);
+        });
+        this.imageReferenceSelections = this.imageReferenceSelections.map(entry => {
+            const replacement = replacements.get(`id:${entry.itemId || entry.id}`)
+                || replacements.get(`path:${this._referencePathKey(entry.filePath)}`);
+            if (!replacement?.filePath) return entry;
+            const replacementItemId = replacement.item?.id || entry.itemId || entry.id;
+            return {
+                ...entry,
+                id: replacementItemId,
+                itemId: replacementItemId,
+                filePath: replacement.filePath,
+                mediaType: 'image',
+                temporary: !replacement.item
+            };
+        });
+        this.options.updateMediaReferencePick?.('image', this.imageReferenceSelections);
+        this._renderImageReferences();
+    }
+
+    async _compressImageReferences(references, {
+        updateSelection = false,
+        uploadBudgetBytes = IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES,
+        addToCanvas = true
+    } = {}) {
+        if (!window.flowCanvas?.mcp?.compressImageReferences) {
+            throw new Error('批量转小接口不可用，请完全退出并重新启动 Flow Canvas');
+        }
+        const result = await window.flowCanvas.mcp.compressImageReferences({
+            sourceReferences: references,
+            uploadBudgetBytes,
+            addToCanvas
+        });
+        if (result?.success === false) {
+            throw new Error(result.error || '参考图批量转小失败');
+        }
+        const outputs = result?.outputs || [];
+        const replacements = new Map(outputs.map(output => [
+            this._referencePathKey(output.sourceFilePath),
+            output
+        ]));
+        const nextReferences = references.map(reference => {
+            const replacement = replacements.get(this._referencePathKey(reference.filePath));
+            return replacement?.filePath
+                ? {
+                    itemId: replacement.item?.id || reference.itemId,
+                    filePath: replacement.filePath,
+                    temporary: !replacement.item
+                }
+                : reference;
+        });
+        if (updateSelection) this._applyCompressedImageReferences(outputs);
+        return { references: nextReferences, outputs, addToCanvas };
+    }
+
+    async _prepareImageReferencesForGeneration(references, { updateSelection = false } = {}) {
+        const summary = await this._inspectLargeReferenceImages(
+            references,
+            IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES
+        );
+        if (!summary) return { references, outputs: [] };
+        const choice = await this._showReferenceCompressionDialog(summary, 'image');
+        if (choice === 'cancel') return null;
+        if (choice === 'original') return { references, outputs: [] };
+        return this._compressImageReferences(references, {
+            updateSelection,
+            addToCanvas: choice !== 'compress-temporary'
+        });
+    }
+
+    async _compressSelectedImageReferences() {
+        const references = this.imageReferenceSelections
+            .filter(entry => entry?.filePath)
+            .map(entry => ({ itemId: entry.itemId || entry.id, filePath: entry.filePath }));
+        if (references.length === 0 || this.imageCompressReferencesBtn?.disabled) return;
+        const summary = await this._inspectLargeReferenceImages(references, 0);
+        if (!summary) return;
+        const choice = await this._showReferenceCompressionDialog(summary, 'image', { manual: true });
+        if (choice === 'cancel') return;
+        const addToCanvas = choice !== 'compress-temporary';
+        if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.disabled = true;
+        this._setWorkspaceMessage(this.imageGenerateMessage, '', '正在批量转小参考图...');
+        try {
+            const result = await this._compressImageReferences(references, {
+                updateSelection: true,
+                uploadBudgetBytes: IMAGE_REFERENCE_MANUAL_BUDGET_BYTES,
+                addToCanvas
+            });
+            const count = result.outputs.length;
+            this._setWorkspaceMessage(
+                this.imageGenerateMessage,
+                'success',
+                addToCanvas
+                    ? `已生成 ${count} 张较小副本并放入画板，原图保持不变`
+                    : `已生成 ${count} 张临时较小副本，未添加到画板`
+            );
+        } catch (error) {
+            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
+        } finally {
+            if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.disabled = false;
+        }
+    }
+
     async _generateImageFromWorkspace() {
         const provider = this._getImageProvider();
         const prompt = this.imagePromptInput?.value?.trim() || '';
@@ -1881,13 +2308,42 @@ export class AgentSidebar {
 
         const size = this.imageSizeSelect?.value || undefined;
         const quality = this.imageQualitySelect?.value || 'high';
-        const sourcePaths = this.imageGenerationMode === 'reference'
-            ? this.imageReferenceSelections.map(entry => entry.filePath).filter(Boolean)
+        let sourceReferences = this.imageGenerationMode === 'reference'
+            ? this.imageReferenceSelections
+                .filter(entry => entry?.filePath)
+                .map(entry => ({ itemId: entry.itemId || entry.id, filePath: entry.filePath }))
             : [];
-        if (this.imageGenerationMode === 'reference' && sourcePaths.length === 0) {
+        if (this.imageGenerationMode === 'reference' && sourceReferences.length === 0) {
             this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u4ece\u753b\u5e03\u4e2d\u9009\u62e9\u81f3\u5c11\u4e00\u5f20\u53c2\u8003\u56fe');
             return;
         }
+        if (sourceReferences.length > 0) {
+            if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = true;
+            this._setWorkspaceMessage(this.imageGenerateMessage, '', '正在检查参考图大小...');
+            try {
+                const prepared = await this._prepareImageReferencesForGeneration(sourceReferences, {
+                    updateSelection: true
+                });
+                if (!prepared) {
+                    this._setWorkspaceMessage(this.imageGenerateMessage, '', '');
+                    return;
+                }
+                sourceReferences = prepared.references;
+                if (prepared.outputs.length > 0) {
+                    this._setWorkspaceMessage(
+                        this.imageGenerateMessage,
+                        'success',
+                        `已批量转小 ${prepared.outputs.length} 张参考图，正在继续生成...`
+                    );
+                }
+            } catch (error) {
+                this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
+                return;
+            } finally {
+                if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = false;
+            }
+        }
+        const sourcePaths = sourceReferences.map(reference => reference.filePath).filter(Boolean);
         const generationTask = this._createGenerationTask('image', provider, prompt, {
             size: size || null,
             quality
@@ -1905,7 +2361,7 @@ export class AgentSidebar {
                 size,
                 quality,
                 responseFormat: 'url',
-                sourceReferences: sourcePaths.map(filePath => ({ filePath })),
+                sourceReferences,
                 x: placeholder?.x,
                 y: placeholder?.y,
                 addToCanvas: true
@@ -1970,17 +2426,10 @@ export class AgentSidebar {
         }
 
         this._ensureProviderRoles();
-
-        // 回填系统提示词
-        if (this.systemPromptEl) {
-            this.systemPromptEl.value = this.globalConfig.systemPrompt;
-        }
-        this._renderSystemPromptSkillState();
     }
 
     _saveConfig() {
         try {
-            this.globalConfig.activeProviderId = this.globalConfig.chatProviderId || this.globalConfig.activeProviderId;
             localStorage.setItem('flow-canvas-agent-providers', JSON.stringify(this.providers));
             localStorage.setItem('flow-canvas-agent-global', JSON.stringify(this.globalConfig));
         } catch (e) {
@@ -1996,6 +2445,11 @@ export class AgentSidebar {
     _isVideoProvider(provider) {
         const marker = `${provider?.model || ''} ${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
         return /(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|minimax[^a-z0-9]*h3|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker);
+    }
+
+    _isAnthropicProvider(provider) {
+        return provider?.type === 'anthropic' ||
+            String(provider?.endpoint || '').includes('api.anthropic.com/v1/messages');
     }
 
     _findProvider(id) {
@@ -2024,51 +2478,25 @@ export class AgentSidebar {
         return (selected?.sourceProviderId || selected?.id) === providerId;
     }
 
-    _getDefaultChatProviderId() {
-        return this._providerVariants().find(provider => !this._isImageProvider(provider) && !this._isVideoProvider(provider))?.id || null;
-    }
-
     _getDefaultImageProviderId() {
         return this._providerVariants().find(provider => this._isImageProvider(provider) && !this._isVideoProvider(provider))?.id || null;
     }
 
     _ensureProviderRoles() {
         if (this.providers.length === 0) {
-            this.globalConfig.chatProviderId = null;
             this.globalConfig.imageProviderId = null;
             this.globalConfig.videoProviderId = null;
-            this.globalConfig.activeProviderId = null;
             return;
         }
 
-        const legacyId = this.globalConfig.activeProviderId;
-        const legacyProvider = this._findProvider(legacyId);
-        const currentChatProvider = this._findProvider(this.globalConfig.chatProviderId);
         const currentImageProvider = this._findProvider(this.globalConfig.imageProviderId);
         const currentVideoProvider = this._findProvider(this.globalConfig.videoProviderId);
-        if (!currentChatProvider || this._isImageProvider(currentChatProvider) || this._isVideoProvider(currentChatProvider)) {
-            this.globalConfig.chatProviderId = legacyProvider && !this._isImageProvider(legacyProvider) && !this._isVideoProvider(legacyProvider)
-                ? legacyProvider.id
-                : this._getDefaultChatProviderId();
-        }
         if (!currentImageProvider || !this._isImageProvider(currentImageProvider) || this._isVideoProvider(currentImageProvider)) {
-            this.globalConfig.imageProviderId = legacyProvider && this._isImageProvider(legacyProvider) && !this._isVideoProvider(legacyProvider)
-                ? legacyProvider.id
-                : this._getDefaultImageProviderId();
+            this.globalConfig.imageProviderId = this._getDefaultImageProviderId();
         }
         if (!currentVideoProvider || !this._isVideoProvider(currentVideoProvider)) {
             this.globalConfig.videoProviderId = null;
         }
-        this.globalConfig.activeProviderId = this.globalConfig.chatProviderId;
-    }
-
-    _setChatProvider(id) {
-        if (!this._findProvider(id)) return;
-        this.globalConfig.chatProviderId = id;
-        this.globalConfig.activeProviderId = id;
-        this._saveConfig();
-        this._renderProviderList();
-        this._renderModelSelect();
     }
 
     _setImageProvider(id) {
@@ -2089,37 +2517,12 @@ export class AgentSidebar {
         if (this.currentMode === 'video') this._renderVideoStage();
     }
 
-    _getChatProvider() {
-        return this._findProvider(this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
-    }
-
     _getImageProvider() {
         return this._findProvider(this.globalConfig.imageProviderId);
     }
 
     _getVideoProvider() {
         return this._findProvider(this.globalConfig.videoProviderId);
-    }
-
-    _getProviderFallbackChain(kind) {
-        const selectedId = kind === 'image'
-            ? this.globalConfig.imageProviderId
-            : kind === 'video'
-                ? this.globalConfig.videoProviderId
-                : (this.globalConfig.chatProviderId || this.globalConfig.activeProviderId);
-        const isMatchingKind = provider => {
-            if (kind === 'image') return this._isImageProvider(provider) && !this._isVideoProvider(provider);
-            if (kind === 'video') return this._isVideoProvider(provider);
-            return !this._isImageProvider(provider) && !this._isVideoProvider(provider);
-        };
-
-        const selected = this._findProvider(selectedId);
-        const candidates = [
-            selected && isMatchingKind(selected) ? selected : null,
-            ...this._providerVariants().filter(provider => provider?.id !== selectedId && isMatchingKind(provider))
-        ].filter(provider => provider?.apiKey && provider?.endpoint && provider?.model);
-
-        return candidates.slice(0, 2);
     }
 
     _providerLabel(provider) {
@@ -2137,223 +2540,6 @@ export class AgentSidebar {
         return provider ? { ...provider } : null;
     }
 
-    _setSystemPrompt(value) {
-        this.globalConfig.systemPrompt = value;
-        if (this.systemPromptEl) {
-            this.systemPromptEl.value = value;
-        }
-        this._saveConfig();
-        this._renderSystemPromptSkillState();
-    }
-
-    _escapeRegExp(value) {
-        return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    _getSkillStartMarker(skillId) {
-        return `[Flow Canvas Skill: ${skillId}]`;
-    }
-
-    _getSkillEndMarker(skillId) {
-        return `[/Flow Canvas Skill: ${skillId}]`;
-    }
-
-    _getSystemPromptSkillBlock(skill) {
-        const lines = [
-            this._getSkillStartMarker(skill.id),
-            `Skill Name: ${skill.name || skill.id}`,
-            `Skill Source: ${skill.sourceLabel || skill.source || 'Local Skill'}`,
-            skill.relativePath ? `Skill Path: ${skill.relativePath}` : '',
-            skill.description ? `Skill Description: ${skill.description}` : '',
-            '',
-            'Use the following local skill instructions when they are relevant to the user request.',
-            'If Flow Canvas cannot access a tool mentioned by the skill, explain the intended workflow instead of pretending the tool was used.',
-            '',
-            '--- SKILL.md ---',
-            skill.content || skill.description || '',
-            '--- END SKILL.md ---',
-            this._getSkillEndMarker(skill.id)
-        ].filter(line => line !== null && line !== undefined).join('\n');
-
-        return lines.replace(/\n{3,}/g, '\n\n');
-    }
-
-    _removeSystemPromptSkillBlocks(prompt) {
-        const pattern = /\n*\[Flow Canvas Skill: [^\]\r\n]+\][\s\S]*?\[\/Flow Canvas Skill: [^\]\r\n]+\]\n*/g;
-        return String(prompt || '').replace(pattern, '\n\n').replace(/\n{3,}/g, '\n\n').trim();
-    }
-
-    _getActiveSkillBlocks() {
-        const prompt = String(this.globalConfig.systemPrompt || '');
-        const blocks = [];
-        const pattern = /\[Flow Canvas Skill: ([^\]\r\n]+)\]([\s\S]*?)\[\/Flow Canvas Skill: \1\]/g;
-        let match;
-
-        while ((match = pattern.exec(prompt)) !== null) {
-            const id = match[1];
-            const knownSkill = this.availableSkills.find(skill => skill.id === id);
-            const nameMatch = match[2].match(/Skill Name:\s*(.+)/);
-            blocks.push({
-                id,
-                name: knownSkill?.name || nameMatch?.[1]?.trim() || id
-            });
-        }
-
-        return blocks;
-    }
-
-    _setSkillStatus(type, message) {
-        if (!this.promptSkillStatusEl) return;
-        this.promptSkillStatusEl.className = 'agent-prompt-skill-status';
-        if (type) this.promptSkillStatusEl.classList.add(type);
-        this.promptSkillStatusEl.textContent = message || '';
-    }
-
-    _renderSkillOptions() {
-        if (!this.skillSelect) return;
-
-        this.skillSelect.innerHTML = '';
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = '选择拉取到的技能';
-        this.skillSelect.appendChild(placeholder);
-
-        this.availableSkills.forEach(skill => {
-            const option = document.createElement('option');
-            option.value = skill.id;
-            option.textContent = `${skill.name || skill.id} · ${skill.sourceLabel || skill.source || 'Local'}`;
-            this.skillSelect.appendChild(option);
-        });
-
-        this.skillSelect.hidden = this.availableSkills.length === 0;
-    }
-
-    _renderSelectedSkillDetails() {
-        const skill = this.availableSkills.find(item => item.id === this.skillSelect?.value);
-        if (this.skillDescription) {
-            if (skill) {
-                const parts = [
-                    skill.description || '该技能没有提供简介。',
-                    `${skill.sourceLabel || skill.source || 'Local'} / ${skill.relativePath || skill.id}`
-                ];
-                this.skillDescription.textContent = parts.join('\n');
-            } else {
-                this.skillDescription.textContent = this.availableSkills.length
-                    ? '请选择一个技能后再使用。'
-                    : '';
-            }
-        }
-
-        if (this.useSkillBtn) {
-            this.useSkillBtn.disabled = !skill;
-        }
-    }
-
-    async _fetchAvailableSkills() {
-        if (!window.flowCanvas?.ai?.listSkills) {
-            this._setSkillStatus('error', '当前运行环境不支持拉取技能列表，请重启应用后再试');
-            return;
-        }
-
-        const previousText = this.fetchSkillsBtn?.textContent;
-        if (this.fetchSkillsBtn) {
-            this.fetchSkillsBtn.disabled = true;
-            this.fetchSkillsBtn.textContent = '拉取中...';
-        }
-        if (this.useSkillBtn) this.useSkillBtn.disabled = true;
-        if (this.skillDescription) this.skillDescription.textContent = '';
-        this._setSkillStatus('loading', '正在拉取本地技能列表...');
-
-        try {
-            const result = await window.flowCanvas.ai.listSkills();
-            if (!result?.success) {
-                throw new Error(result?.error || '技能列表接口没有返回可用结果');
-            }
-
-            this.availableSkills = Array.isArray(result.skills) ? result.skills : [];
-            this._renderSkillOptions();
-            this._renderSelectedSkillDetails();
-
-            if (this.availableSkills.length === 0) {
-                this._setSkillStatus('error', '没有拉取到可用技能');
-                return;
-            }
-
-            this._setSkillStatus('success', `已拉取 ${this.availableSkills.length} 个技能，请选择后使用`);
-        } catch (err) {
-            this.availableSkills = [];
-            this._renderSkillOptions();
-            this._renderSelectedSkillDetails();
-            this._setSkillStatus('error', `拉取失败：${err.message || err}`);
-        } finally {
-            if (this.fetchSkillsBtn) {
-                this.fetchSkillsBtn.disabled = false;
-                this.fetchSkillsBtn.textContent = previousText || '拉取技能列表';
-            }
-            this._renderSystemPromptSkillState();
-        }
-    }
-
-    async _applySelectedSkill() {
-        const skillId = this.skillSelect?.value;
-        if (!skillId) {
-            this._setSkillStatus('error', '请先选择一个技能');
-            return;
-        }
-        if (!window.flowCanvas?.ai?.getSkill) {
-            this._setSkillStatus('error', '当前运行环境不支持读取技能内容，请重启应用后再试');
-            return;
-        }
-
-        const previousText = this.useSkillBtn?.textContent;
-        if (this.useSkillBtn) {
-            this.useSkillBtn.disabled = true;
-            this.useSkillBtn.textContent = '读取中...';
-        }
-        this._setSkillStatus('loading', '正在读取技能内容...');
-
-        try {
-            const result = await window.flowCanvas.ai.getSkill(skillId);
-            if (!result?.success || !result.skill) {
-                throw new Error(result?.error || '没有读取到该技能内容');
-            }
-
-            const promptWithoutOldSkill = this._removeSystemPromptSkillBlocks(this.globalConfig.systemPrompt);
-            const nextPrompt = [promptWithoutOldSkill, this._getSystemPromptSkillBlock(result.skill)]
-                .filter(Boolean)
-                .join('\n\n');
-            this._setSystemPrompt(nextPrompt);
-            this._setSkillStatus('success', `已注入：${result.skill.name || result.skill.id}`);
-        } catch (err) {
-            this._setSkillStatus('error', `使用失败：${err.message || err}`);
-        } finally {
-            if (this.useSkillBtn) {
-                this.useSkillBtn.disabled = !this.skillSelect?.value;
-                this.useSkillBtn.textContent = previousText || '使用选中技能';
-            }
-        }
-    }
-
-    _removeActiveSkill() {
-        const nextPrompt = this._removeSystemPromptSkillBlocks(this.globalConfig.systemPrompt);
-        this._setSystemPrompt(nextPrompt);
-    }
-
-    _renderSystemPromptSkillState({ preserveMessage = false } = {}) {
-        const activeSkills = this._getActiveSkillBlocks();
-        if (this.removeSkillBtn) {
-            this.removeSkillBtn.disabled = activeSkills.length === 0;
-        }
-
-        if (preserveMessage) return;
-
-        if (activeSkills.length > 0) {
-            this._setSkillStatus('', `已注入：${activeSkills.map(skill => skill.name).join('、')}`);
-        } else if (this.promptSkillStatusEl && !this.promptSkillStatusEl.classList.contains('loading')) {
-            this._setSkillStatus('', '未注入技能片段');
-        }
-    }
-
     // ── 表单及 UI 管理 ──
     _showForm(provider = null) {
         if (!this.apiForm) return;
@@ -2368,7 +2554,7 @@ export class AgentSidebar {
             this.apiFormTitle.textContent = '编辑 API';
             this.formName.value = provider.name;
             this.formType.value = this._isAnthropicProvider(provider) ? 'anthropic' : provider.type;
-            this.formEndpoint.value = provider.endpoint;
+            this.formEndpoint.value = normalizeRavenHashEndpoint(provider.endpoint);
             this.formKey.value = provider.apiKey;
             const models = this._providerModels(provider);
             this.formModel.value = models[0] || '';
@@ -2484,8 +2670,10 @@ export class AgentSidebar {
 
     async _fetchModelsForForm() {
         const type = this.formType?.value?.trim() || 'openai';
-        const endpoint = this.formEndpoint?.value?.trim() || '';
+        const endpoint = normalizeRavenHashEndpoint(this.formEndpoint?.value);
         const apiKey = this.formKey?.value?.trim() || '';
+
+        if (this.formEndpoint && endpoint) this.formEndpoint.value = endpoint;
 
         if (!endpoint && type !== 'google' && type !== 'anthropic') {
             this._setModelFetchStatus('error', '请先填写 API 端点');
@@ -2537,7 +2725,7 @@ export class AgentSidebar {
     _saveForm() {
         const name = this.formName.value.trim();
         const type = this.formType.value.trim();
-        const endpoint = this.formEndpoint.value.trim();
+        const endpoint = normalizeRavenHashEndpoint(this.formEndpoint.value);
         const apiKey = this.formKey.value.trim();
         const models = [...new Set([
             this.formModel.value.trim(),
@@ -2564,8 +2752,6 @@ export class AgentSidebar {
             this.providers.push(newProvider);
             if (this._isImageProvider(newProvider) && !this._isVideoProvider(newProvider)) {
                 this.globalConfig.imageProviderId = newProvider.id;
-            } else if (!this._isVideoProvider(newProvider) && !this._findProvider(this.globalConfig.chatProviderId)) {
-                this.globalConfig.chatProviderId = newProvider.id;
             }
         }
 
@@ -2592,8 +2778,6 @@ export class AgentSidebar {
             this._setVideoProvider(id);
         } else if (this._isImageProvider(provider)) {
             this._setImageProvider(id);
-        } else {
-            this._setChatProvider(id);
         }
     }
 
@@ -2603,10 +2787,9 @@ export class AgentSidebar {
 
         this.providers.forEach(p => {
             const card = document.createElement('div');
-            const isChat = this._selectionUsesProvider(this.globalConfig.chatProviderId, p.id);
             const isImage = this._selectionUsesProvider(this.globalConfig.imageProviderId, p.id);
             const isVideo = this._selectionUsesProvider(this.globalConfig.videoProviderId, p.id);
-            card.className = `agent-provider-card ${isChat || isImage || isVideo ? 'active' : ''}`;
+            card.className = `agent-provider-card ${isImage || isVideo ? 'active' : ''}`;
 
             const info = document.createElement('div');
             info.className = 'agent-provider-info';
@@ -2623,12 +2806,6 @@ export class AgentSidebar {
             metaEl.title = providerModels.join('\n');
             const roleEl = document.createElement('div');
             roleEl.className = 'agent-provider-roles';
-            if (isChat) {
-                const badge = document.createElement('span');
-                badge.className = 'agent-provider-role chat';
-                badge.textContent = '对话';
-                roleEl.appendChild(badge);
-            }
             if (isImage) {
                 const badge = document.createElement('span');
                 badge.className = 'agent-provider-role image';
@@ -2684,7 +2861,6 @@ export class AgentSidebar {
 
     _renderModelSelect() {
         const selects = [
-            { el: this.modelSelectEl, role: 'chat', selectedId: this.globalConfig.chatProviderId },
             { el: this.imageModelSelectEl, role: 'image', selectedId: this.globalConfig.imageProviderId },
             { el: this.videoModelSelectEl, role: 'video', selectedId: this.globalConfig.videoProviderId }
         ].filter(item => item.el);
@@ -2708,16 +2884,14 @@ export class AgentSidebar {
         selects.forEach(({ el, role, selectedId }) => {
             const opt = document.createElement('option');
             opt.value = "";
-            opt.textContent = role === 'image' ? "-- 选择生图 API --" : "-- 选择对话 API --";
+            opt.textContent = role === 'image' ? "-- 选择生图 API --" : "-- 选择视频 API --";
             el.appendChild(opt);
             if (role === 'video') opt.textContent = '-- \u9009\u62e9\u89c6\u9891 API --';
 
             this._providerVariants().forEach(p => {
                 const matchesRole = role === 'video'
                     ? this._isVideoProvider(p)
-                    : role === 'image'
-                        ? this._isImageProvider(p) && !this._isVideoProvider(p)
-                        : !this._isImageProvider(p) && !this._isVideoProvider(p);
+                    : this._isImageProvider(p) && !this._isVideoProvider(p);
                 if (!matchesRole) return;
                 const option = document.createElement('option');
                 option.value = p.id;
@@ -2733,699 +2907,4 @@ export class AgentSidebar {
         if (this.currentMode === 'video') this._renderVideoStage();
     }
 
-    // ── 消息渲染 ──
-    _addMessage(role, content) {
-        if (!this.messagesEl) return null;
-        // 隐藏欢迎消息
-        const welcome = this.messagesEl.querySelector('.agent-welcome');
-        if (welcome) welcome.style.display = 'none';
-
-        const div = document.createElement('div');
-        div.className = `agent-msg ${role}`;
-        div.textContent = content;
-        this.messagesEl.appendChild(div);
-        this._scrollToBottom();
-        return div;
-    }
-
-    _addTypingIndicator() {
-        if (!this.messagesEl) return null;
-        const div = document.createElement('div');
-        div.className = 'agent-msg assistant agent-typing';
-        div.innerHTML = '<span class="agent-loading-ring" aria-hidden="true"></span><span class="agent-typing-line"></span>';
-        this.messagesEl.appendChild(div);
-        this._scrollToBottom();
-        return div;
-    }
-
-    _addErrorMessage(text) {
-        if (!this.messagesEl) {
-            console.error('[Agent]', text);
-            return;
-        }
-        const div = document.createElement('div');
-        div.className = 'agent-msg error';
-        div.textContent = text;
-        this.messagesEl.appendChild(div);
-        this._scrollToBottom();
-    }
-
-    _scrollToBottom() {
-        requestAnimationFrame(() => {
-            if (this.messagesEl) {
-                this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-            }
-        });
-    }
-
-    // ── 获取活跃的 API 配置 ──
-    _getActiveProvider() {
-        return this._getChatProvider();
-    }
-
-    _isNativeGeminiProvider(provider) {
-        return provider?.type === 'google' && String(provider.endpoint || '').includes('generateContent');
-    }
-
-    _isAnthropicProvider(provider) {
-        return provider?.type === 'anthropic' ||
-            String(provider?.endpoint || '').includes('api.anthropic.com/v1/messages');
-    }
-
-    _buildOpenAiChatEndpoint(endpoint) {
-        const value = String(endpoint || '').trim();
-        if (!value) return value;
-
-        try {
-            const url = new URL(value);
-            let pathName = url.pathname.replace(/\/+$/, '');
-            if (!pathName || pathName === '/') {
-                pathName = '/v1/chat/completions';
-            } else if (/\/v1$/i.test(pathName)) {
-                pathName += '/chat/completions';
-            } else if (/\/models$/i.test(pathName)) {
-                pathName = pathName.replace(/\/models$/i, '/chat/completions');
-            }
-            url.pathname = pathName;
-            return url.toString();
-        } catch (err) {
-            return value;
-        }
-    }
-
-    _compactPlanningContext(context) {
-        if (!context || typeof context !== 'object') return null;
-
-        return {
-            schema: context.schema || 'flow-canvas.agent-planning-context.v1',
-            activeGroup: context.activeGroup || null,
-            plans: Array.isArray(context.plans)
-                ? context.plans.map(plan => ({
-                    id: plan.id,
-                    title: plan.title,
-                    rowCount: plan.rowCount ?? plan.rows?.length ?? 0,
-                    columns: Array.isArray(plan.columns) ? plan.columns : [],
-                    rows: Array.isArray(plan.rows) ? plan.rows : []
-                }))
-                : [],
-            selectedFiles: Array.isArray(context.selectedFiles) ? context.selectedFiles : []
-        };
-    }
-
-    _getBoardContextPrompt() {
-        const getContext = this.options.getPlanningContext;
-        if (typeof getContext !== 'function') return '';
-
-        let context = null;
-        try {
-            context = this._compactPlanningContext(getContext());
-        } catch (err) {
-            console.warn('[Agent] Failed to read board context:', err);
-            return '';
-        }
-
-        if (!context) return '';
-
-        let payload = '';
-        try {
-            payload = JSON.stringify(context, null, 2);
-        } catch (err) {
-            console.warn('[Agent] Failed to serialize board context:', err);
-            return '';
-        }
-
-        const maxChars = 24000;
-        const truncated = payload.length > maxChars;
-        if (truncated) payload = payload.slice(0, maxChars);
-
-        return [
-            'Flow Canvas live board context is auto-injected below.',
-            'Use it as the current source of truth for the user board, planning matrices, rows, columns, row references, and selected files.',
-            'If the `plans` array contains rows, do not say you cannot see the planning table. Answer from this structured context.',
-            truncated ? 'The context was truncated because it was too large; say what may be missing if needed.' : '',
-            '',
-            '```json',
-            payload,
-            '```'
-        ].filter(Boolean).join('\n');
-    }
-
-    _buildSystemPrompt() {
-        return [
-            String(this.globalConfig.systemPrompt || '').trim(),
-            this._getBoardContextPrompt()
-        ].filter(Boolean).join('\n\n');
-    }
-
-    _buildRequestPayload(provider) {
-        const systemPrompt = this._buildSystemPrompt();
-
-        if (this._isNativeGeminiProvider(provider)) {
-            const endpoint = String(provider.endpoint || '');
-            const usesQueryKey = endpoint.includes('?key=');
-            return {
-                targetUrl: usesQueryKey ? `${endpoint}${provider.apiKey}` : endpoint,
-                headers: usesQueryKey
-                    ? { 'Content-Type': 'application/json' }
-                    : { 'Content-Type': 'application/json', 'x-goog-api-key': provider.apiKey },
-                body: {
-                    system_instruction: {
-                        parts: [{ text: systemPrompt }]
-                    },
-                    contents: this.messages.map(message => ({
-                        role: message.role === 'assistant' ? 'model' : 'user',
-                        parts: [{ text: message.content }]
-                    }))
-                },
-                responseMode: 'geminiJson'
-            };
-        }
-
-        if (this._isAnthropicProvider(provider)) {
-            return {
-                targetUrl: provider.endpoint,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': provider.apiKey,
-                    'anthropic-version': '2023-06-01',
-                    'anthropic-dangerous-direct-browser-access': 'true'
-                },
-                body: {
-                    model: provider.model,
-                    max_tokens: 2048,
-                    ...(systemPrompt ? { system: systemPrompt } : {}),
-                    messages: this.messages.map(message => ({
-                        role: message.role,
-                        content: message.content
-                    }))
-                },
-                responseMode: 'anthropicJson'
-            };
-        }
-
-        return {
-            targetUrl: this._buildOpenAiChatEndpoint(provider.endpoint),
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${provider.apiKey}`
-            },
-            body: {
-                model: provider.model,
-                messages: [
-                    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-                    ...this.messages
-                ],
-                stream: false
-            },
-            responseMode: 'openaiJson'
-        };
-    }
-
-    _extractGeminiText(payload) {
-        const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
-        const parts = candidates[0]?.content?.parts;
-        if (Array.isArray(parts)) {
-            const text = parts
-                .map(part => typeof part?.text === 'string' ? part.text : '')
-                .join('');
-            if (text) return text;
-        }
-
-        const blockReason = payload?.promptFeedback?.blockReason;
-        return blockReason ? `Gemini 返回被拦截: ${blockReason}` : '';
-    }
-
-    _extractAnthropicText(payload) {
-        const blocks = Array.isArray(payload?.content) ? payload.content : [];
-        return blocks
-            .map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '')
-            .join('');
-    }
-
-    _extractOpenAiText(payload) {
-        const choices = Array.isArray(payload?.choices) ? payload.choices : [];
-        const firstChoice = choices[0] || {};
-        const content = firstChoice.message?.content;
-
-        if (typeof content === 'string') return content;
-        if (Array.isArray(content)) {
-            return content
-                .map(part => {
-                    if (typeof part === 'string') return part;
-                    if (typeof part?.text === 'string') return part.text;
-                    if (typeof part?.content === 'string') return part.content;
-                    return '';
-                })
-                .join('');
-        }
-
-        if (typeof firstChoice.text === 'string') return firstChoice.text;
-        if (typeof payload?.output_text === 'string') return payload.output_text;
-
-        const output = Array.isArray(payload?.output) ? payload.output : [];
-        return output
-            .flatMap(item => Array.isArray(item?.content) ? item.content : [])
-            .map(part => typeof part?.text === 'string' ? part.text : '')
-            .join('');
-    }
-
-    _extractOpenAiSseText(text) {
-        return String(text || '')
-            .split('\n')
-            .map(line => line.trim())
-            .filter(line => line.startsWith('data:'))
-            .map(line => line.slice(5).trim())
-            .filter(data => data && data !== '[DONE]')
-            .map(data => {
-                try {
-                    const json = JSON.parse(data);
-                    return json.choices?.[0]?.delta?.content || json.choices?.[0]?.message?.content || '';
-                } catch (err) {
-                    return '';
-                }
-            })
-            .join('');
-    }
-
-    _extractChatResultText(responseMode, payload, text) {
-        if (responseMode === 'geminiJson') return this._extractGeminiText(payload);
-        if (responseMode === 'anthropicJson') return this._extractAnthropicText(payload);
-        if (responseMode === 'openaiSse') return this._extractOpenAiSseText(text);
-        if (responseMode === 'openaiJson') {
-            return this._extractOpenAiText(payload) || (!payload ? String(text || '') : '');
-        }
-        return this._extractOpenAiText(payload)
-            || this._extractGeminiText(payload)
-            || this._extractAnthropicText(payload)
-            || String(text || '');
-    }
-
-    _emptyChatResponseMessage(responseMode) {
-        if (responseMode === 'geminiJson') return 'Gemini 没有返回可显示的文本内容。';
-        if (responseMode === 'anthropicJson') return 'Claude 没有返回可显示的文本内容。';
-        return '模型没有返回可显示的文本内容。';
-    }
-
-    async _requestChatCompletion(request) {
-        const aiChat = window.flowCanvas?.ai?.chat;
-        if (typeof aiChat === 'function') {
-            try {
-                const result = await aiChat(request);
-                if (!result?.success) {
-                    throw new Error(result?.error || 'API 请求失败');
-                }
-                return {
-                    responseMode: result.responseMode || request.responseMode,
-                    payload: result.payload,
-                    text: result.text || ''
-                };
-            } catch (err) {
-                const message = err?.message || String(err);
-                if (/No handler registered.*ai:chat/i.test(message)) {
-                    throw new Error('FlowCanvas 主进程还没有加载聊天代理，请完全退出并重新启动应用后再试（只刷新窗口不够）。');
-                }
-                throw err;
-            }
-        }
-
-        const response = await fetch(request.targetUrl, {
-            method: 'POST',
-            headers: request.headers,
-            body: JSON.stringify(request.body)
-        });
-        const text = await response.text();
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`);
-        }
-
-        let payload = null;
-        try {
-            payload = JSON.parse(text);
-        } catch (err) {
-            // Keep plain text responses available for compatible providers.
-        }
-
-        return {
-            responseMode: request.responseMode,
-            payload,
-            text
-        };
-    }
-
-    _assistPlanning() {
-        const provider = this._getActiveProvider();
-        if (!provider || !provider.apiKey) {
-            this.open();
-            this._addErrorMessage('请先在设置中添加并选择有效的 API，再使用辅助规划');
-            this.settingsPanel?.classList.add('show');
-            return;
-        }
-
-        const context = this.options.getPlanningContext?.();
-        const payload = JSON.stringify(context || {}, null, 2);
-        const prompt = [
-            '请基于下面的 Flow Canvas 当前文件夹组、已有规划表和选中的素材，补全或优化规划矩阵。',
-            '要求：保持它是通用规划，不要限定为 PPT；输出可以直接复制进表格的行内容。',
-            '如果已有规划表为空，请给出 3-6 行建议；如果已有内容不完整，请优先补缺。',
-            '最后单独输出一个 JSON 数组，数组每项使用这些键：stage, title, role, content, assets, output, status, notes。',
-            '',
-            '上下文：',
-            payload
-        ].join('\n');
-
-        this.open();
-        if (this.inputEl) {
-            this.inputEl.value = prompt;
-            this.inputEl.style.height = 'auto';
-            this.inputEl.style.height = Math.min(this.inputEl.scrollHeight, 120) + 'px';
-            this.inputEl.focus();
-            this._send();
-        }
-    }
-
-    _attachPlanApplyAction(messageEl, content) {
-        if (!this.options.applyPlanSuggestion || !messageEl) return;
-        const rows = this._extractPlanRows(content);
-        if (!rows || rows.length === 0) return;
-
-        const actions = document.createElement('div');
-        actions.className = 'agent-msg-actions';
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'agent-apply-plan-btn';
-        button.textContent = '应用到规划表';
-        button.addEventListener('click', () => {
-            const ok = this.options.applyPlanSuggestion(rows);
-            button.textContent = ok ? '已应用' : '应用失败';
-            button.disabled = true;
-        });
-        actions.appendChild(button);
-        messageEl.appendChild(actions);
-    }
-
-    _extractPlanRows(content) {
-        const text = String(content || '');
-        const candidates = [];
-        const fenceMatches = text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi);
-        for (const match of fenceMatches) candidates.push(match[1]);
-        candidates.push(text);
-
-        for (const candidate of candidates) {
-            const start = candidate.indexOf('[');
-            const end = candidate.lastIndexOf(']');
-            if (start === -1 || end === -1 || end <= start) continue;
-            try {
-                const parsed = JSON.parse(candidate.slice(start, end + 1));
-                if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-            } catch (err) {
-                // Ignore non-JSON prose.
-            }
-        }
-        return null;
-    }
-
-    _isImageGenerationRequest(text) {
-        const value = String(text || '').trim();
-        if (!value) return false;
-
-        const isTroubleshootingQuestion = /(怎么|为什么|为何|哪里|用不了|不能用|失效|报错|错误|看看|检查|排查|修|坏了|debug)/i.test(value);
-        const hasDirectAction = /(直接|现在|马上|立刻|按|用|帮我|给我|开始).{0,18}(生图|出图|生成|画|image\s*2|image2|gpt-image)/i.test(value);
-        if (isTroubleshootingQuestion && !hasDirectAction) return false;
-
-        return /(生图|出图|生成.{0,12}(图片|图像|图|海报|主视觉|插画|封面|头像)|画一?张|用\s*(image\s*2|image2|gpt-image)[^\n]*(生图|生成|出图)|generate.{0,20}image)/i.test(value);
-    }
-
-    _isVideoGenerationRequest(text) {
-        const value = String(text || '').trim();
-        if (!value) return false;
-        const isTroubleshootingQuestion = /(\u600e\u4e48|\u4e3a\u4ec0\u4e48|\u4e3a\u4f55|\u62a5\u9519|\u9519\u8bef|\u68c0\u67e5|\u6392\u67e5|\u4e0d\u80fd\u7528|\u5931\u6548|debug)/i.test(value);
-        const hasDirectAction = /(\u76f4\u63a5|\u73b0\u5728|\u9a6c\u4e0a|\u7acb\u523b|\u7528|\u5e2e\u6211|\u7ed9\u6211|\u5f00\u59cb).{0,18}(\u751f\u6210|\u505a|\u5236\u4f5c|\u89c6\u9891|\u77ed\u7247|seedance)/i.test(value);
-        if (isTroubleshootingQuestion && !hasDirectAction) return false;
-        return /(\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa).{0,10}(\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)|(\u89c6\u9891|\u77ed\u7247).{0,8}(\u751f\u6210|\u51fa\u56fe)|seedance\s*2(?:\.0)?|generate.{0,20}video/i.test(value);
-    }
-
-    _stripVideoCommandText(text) {
-        return String(text || '')
-            .replace(/^\s*(\u8bf7|\u9ebb\u70e6|\u5e2e\u6211|\u7ed9\u6211|\u4f60)?\s*(\u76f4\u63a5|\u73b0\u5728|\u9a6c\u4e0a|\u7acb\u523b)?\s*/i, '')
-            .replace(/^(?:\u7528\s*)?(?:seedance\s*2(?:\.0)?\s*)?/i, '')
-            .replace(/^(?:\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa)\s*(?:\u4e00\u6bb5|\u4e00\u4e2a)?\s*(?:\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)?\s*[:\uff1a\uff0c,.\s]*/i, '')
-            .trim();
-    }
-
-    _resolveVideoGenerationPrompt(text) {
-        const explicitMatch = String(text || '').match(/(?:\u751f\u6210|\u505a|\u5236\u4f5c|\u51fa)\s*(?:\u4e00\u6bb5|\u4e00\u4e2a)?\s*(?:\u89c6\u9891|\u77ed\u7247|\u5f71\u7247)\s*[:\uff1a]\s*([\s\S]+)/i);
-        const explicitPrompt = explicitMatch?.[1]?.trim();
-        if (explicitPrompt && explicitPrompt.length >= 8) return explicitPrompt;
-
-        const stripped = this._stripVideoCommandText(text);
-        if (stripped.length >= 12 || /[\uff0c\u3002,.、\n]/.test(stripped)) return stripped;
-
-        const lastAssistant = [...this.messages].reverse().find(message => message.role === 'assistant')?.content || '';
-        const fencedPrompt = this._extractPromptFromFencedBlocks(lastAssistant);
-        return fencedPrompt || stripped || String(text || '').trim();
-    }
-
-    _extractPromptFromFencedBlocks(content) {
-        const blocks = [...String(content || '').matchAll(/```(?:text|prompt|markdown|md)?\s*([\s\S]*?)```/gi)]
-            .map(match => match[1].trim())
-            .filter(Boolean);
-        if (blocks.length === 0) return '';
-
-        const positiveBlock = blocks.find(block => !/^(负向|负面|negative|avoid|不要|反向)\s*[:：]/i.test(block));
-        return positiveBlock || blocks[0];
-    }
-
-    _stripImageCommandText(text) {
-        return String(text || '')
-            .replace(/^(请|麻烦|帮我|给我|你)?\s*(直接|现在|马上|立刻)?\s*(用\s*(image\s*2|image2|gpt-image(?:-\d+(?:\.\d+)?)?)\s*)?/i, '')
-            .replace(/^(按|根据|照着)?\s*(上面|上一个|刚才|这个|这版|这条|该)\s*(提示词|prompt|内容)?\s*/i, '')
-            .replace(/^(生图|出图|生成(?:一张)?(?:图片|图像|图)?|画一?张)\s*[:：，,。 ]*/i, '')
-            .trim();
-    }
-
-    _resolveImageGenerationPrompt(text) {
-        const explicitMatch = String(text || '').match(/(?:生图|出图|生成(?:一张)?(?:图片|图像|图)?|画一?张)\s*[:：]\s*([\s\S]+)/i);
-        const explicitPrompt = explicitMatch?.[1]?.trim();
-        if (explicitPrompt && explicitPrompt.length >= 12) return explicitPrompt;
-
-        const stripped = this._stripImageCommandText(text);
-        if (stripped.length >= 24 || /[，。,.、\n]/.test(stripped)) return stripped;
-
-        const lastAssistant = [...this.messages].reverse().find(message => message.role === 'assistant')?.content || '';
-        const fencedPrompt = this._extractPromptFromFencedBlocks(lastAssistant);
-        if (fencedPrompt) return fencedPrompt;
-
-        return stripped || String(text || '').trim();
-    }
-
-    async _generateImageFromChat(text, imageProvider = this._getImageProvider()) {
-        if (!imageProvider?.apiKey || !imageProvider?.model || !imageProvider?.endpoint) {
-            throw new Error('请先在设置中选择可用的生图 API');
-        }
-        if (!window.flowCanvas?.mcp?.generateImage) {
-            throw new Error('本地生图接口不可用，请完全退出并重新启动应用后再试');
-        }
-
-        const prompt = this._resolveImageGenerationPrompt(text);
-        if (!prompt) throw new Error('没有找到可用于生图的提示词');
-
-        const result = await window.flowCanvas.mcp.generateImage({
-            provider: 'openai',
-            providerConfig: imageProvider,
-            prompt,
-            title: 'Agent chat image',
-            size: this.imageSizeSelect?.value || undefined,
-            quality: this.imageQualitySelect?.value || 'high',
-            responseFormat: 'url',
-            sourceReferences: this._selectedImagePaths().map(filePath => ({ filePath })),
-            addToCanvas: true
-        });
-
-        if (!result?.success && result?.error) throw new Error(result.error);
-        const lines = [
-            `已用 ${this._providerLabel(imageProvider)} 生成图片，并添加到白板。`,
-            result?.actualSize ? `实际尺寸：${result.actualSize}${result.sizeMatchesRequest === false ? `（请求 ${result.requestedSize}）` : ''}` : '',
-            result?.filePath ? `文件：${result.filePath}` : '',
-            result?.targetDirFallback ? `保存目录回退：${result.targetDirFallback}` : ''
-        ].filter(Boolean);
-        return lines.join('\n');
-    }
-
-    async _generateVideoFromChat(text, videoProvider = this._getVideoProvider()) {
-        if (!videoProvider?.apiKey || !videoProvider?.model || !videoProvider?.endpoint) {
-            throw new Error('\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u9009\u62e9\u53ef\u7528\u7684\u89c6\u9891 API');
-        }
-        if (!window.flowCanvas?.mcp?.generateVideo) {
-            throw new Error('\u672c\u5730\u89c6\u9891\u63a5\u53e3\u4e0d\u53ef\u7528\uff0c\u8bf7\u91cd\u542f\u5e94\u7528\u540e\u518d\u8bd5');
-        }
-
-        const prompt = this._resolveVideoGenerationPrompt(text);
-        if (!prompt) throw new Error('\u6ca1\u6709\u627e\u5230\u53ef\u7528\u4e8e\u89c6\u9891\u751f\u6210\u7684\u63d0\u793a\u8bcd');
-        const selectedPaths = this.options.getSelectedFilePaths?.() || [];
-        const profile = this._getVideoModelProfile(videoProvider) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const placeholder = this.options.beginVideoGeneration?.({ ratio: '16:9' }) || null;
-        let result = null;
-        try {
-            result = await window.flowCanvas.mcp.generateVideo({
-                provider: 'openai-video',
-                providerConfig: videoProvider,
-                prompt,
-                sourceReferences: selectedPaths.map(filePath => ({ filePath })),
-                resolution: profile.defaultResolution || undefined,
-                ratio: '16:9',
-                duration: profile.defaultDuration ?? undefined,
-                x: placeholder?.x,
-                y: placeholder?.y,
-                addToCanvas: true
-            });
-
-            if (!result?.success && result?.error) throw new Error(result.error);
-            return [
-                '\u5df2\u7528 ' + this._providerLabel(videoProvider) + ' \u751f\u6210\u89c6\u9891\uff0c\u5e76\u6dfb\u52a0\u5230\u767d\u677f\u3002',
-                result?.filePath ? '\u6587\u4ef6\uff1a' + result.filePath : '',
-                result?.taskId ? '\u4efb\u52a1\uff1a' + result.taskId : '',
-                result?.targetDirFallback ? '\u4fdd\u5b58\u76ee\u5f55\u56de\u9000\uff1a' + result.targetDirFallback : ''
-            ].filter(Boolean).join('\n');
-        } finally {
-            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
-        }
-    }
-
-    async _tryProviderChain(providers, action) {
-        const errors = [];
-        for (let index = 0; index < providers.length; index += 1) {
-            const provider = providers[index];
-            try {
-                const content = await action(provider, index);
-                return {
-                    provider,
-                    switched: index > 0,
-                    previousErrors: errors,
-                    content
-                };
-            } catch (err) {
-                const message = err?.message || String(err);
-                errors.push(`${this._providerLabel(provider)}：${message}`);
-                console.warn('[Agent] provider request failed:', provider?.name || provider?.id, err);
-            }
-        }
-
-        throw new Error(errors.length ? errors.join('\n') : '没有可用 API');
-    }
-
-    // ── 发送消息 ──
-    async _send() {
-        if (!this.inputEl || !this.sendBtn) return;
-        const text = this.inputEl.value.trim();
-        if (!text || this.isStreaming) return;
-
-        const wantsVideoGeneration = this._isVideoGenerationRequest(text);
-        const wantsImageGeneration = !wantsVideoGeneration && this._isImageGenerationRequest(text);
-        const generationKind = wantsVideoGeneration ? 'video' : wantsImageGeneration ? 'image' : 'chat';
-        const providerChain = this._getProviderFallbackChain(generationKind);
-
-        // 检查 API 配置
-        if (providerChain.length === 0) {
-            if (wantsVideoGeneration) {
-                this._addErrorMessage('\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u6dfb\u52a0\u5e76\u9009\u62e9\u6709\u6548\u7684\u89c6\u9891 API');
-                this.settingsPanel.classList.add('show');
-                return;
-            }
-            this._addErrorMessage(wantsImageGeneration ? '请先在设置中添加并选择有效的生图 API' : '请先在设置中添加并选择有效的对话 API');
-            this.settingsPanel.classList.add('show');
-            return;
-        }
-
-        // 显示用户消息
-        this._addMessage('user', text);
-        this.messages.push({ role: 'user', content: text });
-
-        // 清空输入框
-        this.inputEl.value = '';
-        this.inputEl.style.height = 'auto';
-
-        // 开始请求
-        this.isStreaming = true;
-        this.sendBtn.disabled = true;
-
-        const typingEl = this._addTypingIndicator();
-
-        try {
-            let fullContent = '';
-            let msgEl = null;
-
-            if (wantsVideoGeneration) {
-                const result = await this._tryProviderChain(providerChain, provider => this._generateVideoFromChat(text, provider));
-                fullContent = [
-                    result.switched ? '\u7b2c\u4e00\u6761 API \u8bf7\u6c42\u5931\u8d25\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230\u5907\u7528 API\uff1a' + this._providerLabel(result.provider) : '',
-                    result.content
-                ].filter(Boolean).join('\n');
-                typingEl?.remove();
-                msgEl = this._addMessage('assistant', fullContent);
-            } else if (wantsImageGeneration) {
-                const result = await this._tryProviderChain(providerChain, provider => this._generateImageFromChat(text, provider));
-                fullContent = [
-                    result.switched ? `第一条 API 请求失败，已自动切换到备用 API：${this._providerLabel(result.provider)}` : '',
-                    result.content
-                ].filter(Boolean).join('\n');
-                typingEl?.remove();
-                msgEl = this._addMessage('assistant', fullContent);
-            } else {
-                const result = await this._tryProviderChain(providerChain, async provider => {
-                    const request = this._buildRequestPayload(provider);
-                    const response = await this._requestChatCompletion(request);
-                    const resultMode = response.responseMode || request.responseMode;
-                    const content = this._extractChatResultText(resultMode, response.payload, response.text).trim()
-                        || this._emptyChatResponseMessage(resultMode);
-                    return { content, resultMode };
-                });
-
-                typingEl?.remove();
-                msgEl = this._addMessage('assistant', '');
-                fullContent = [
-                    result.switched ? `第一条 API 请求失败，已自动切换到备用 API：${this._providerLabel(result.provider)}\n` : '',
-                    result.content.content
-                ].filter(Boolean).join('');
-                if (msgEl) msgEl.textContent = fullContent;
-            }
-
-            this.messages.push({ role: 'assistant', content: fullContent });
-            this._attachPlanApplyAction(msgEl, fullContent);
-            this._scrollToBottom();
-
-        } catch (err) {
-            typingEl?.remove();
-            this._addErrorMessage(`请求失败: ${err.message}`);
-            console.error('[Agent] API 请求失败:', err);
-        } finally {
-            this.isStreaming = false;
-            if (this.sendBtn) this.sendBtn.disabled = false;
-            this.inputEl?.focus();
-        }
-    }
-
-    // 清空对话
-    clearMessages() {
-        this.messages = [];
-        if (this.messagesEl) {
-            this.messagesEl.innerHTML = `
-                <div class="agent-welcome">
-                    <div class="agent-welcome-icon" aria-hidden="true">
-                        <svg viewBox="0 0 48 48" width="30" height="30" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <rect x="12" y="10" width="24" height="25" rx="6"></rect>
-                            <path d="M18 35l-4 6"></path>
-                            <path d="M30 35l4 6"></path>
-                            <path d="M19 21h.01"></path>
-                            <path d="M29 21h.01"></path>
-                            <path d="M19 28h10"></path>
-                            <path d="M24 10V5"></path>
-                        </svg>
-                    </div>
-                    <div class="agent-welcome-text">你好！我是 AI 助手。<br>有什么可以帮你的？</div>
-                </div>
-            `;
-        }
-    }
 }

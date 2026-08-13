@@ -87,10 +87,11 @@ export class SidebarManager {
     }
 
     _normalizePath(filePath) {
-        return String(filePath || '')
+        const normalized = String(filePath || '')
+            .normalize('NFC')
             .replace(/\\/g, '/')
-            .replace(/\/+$/g, '')
-            .toLowerCase();
+            .replace(/\/+$/g, '');
+        return window.flowCanvas?.platform === 'win32' ? normalized.toLowerCase() : normalized;
     }
 
     _escapeHtml(value) {

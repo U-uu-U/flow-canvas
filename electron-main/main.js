@@ -13,6 +13,9 @@ const BrowserSyncService = require('./browser-sync');
 const { handleLocalResourceRequest } = require('./local-resource');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
+const IS_MAC = process.platform === 'darwin';
+const IS_WINDOWS = process.platform === 'win32';
+
 // Some OpenAI-compatible relays close long-running HTTP/2 streams after completing the job.
 // Keep Electron's proxy-aware network stack, but force HTTP/1.1 for reliable response delivery.
 app.commandLine.appendSwitch('disable-http2');
@@ -33,7 +36,16 @@ const isDev = !app.isPackaged;
 
 installSafeConsole();
 
-Menu.setApplicationMenu(null);
+if (IS_MAC) {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        { role: 'editMenu' },
+        { role: 'viewMenu' },
+        { role: 'windowMenu' }
+    ]));
+} else {
+    Menu.setApplicationMenu(null);
+}
 
 function installSafeConsole() {
     let stdoutBroken = false;
@@ -95,13 +107,17 @@ function createWindow() {
         minWidth: 800,
         minHeight: 600,
         backgroundColor: '#0f0f14',
-        frame: false,
-        titleBarStyle: 'hidden',
-        titleBarOverlay: {
-            color: '#0f0f14',
-            symbolColor: '#8a8f98',
-            height: 38
-        },
+        frame: IS_MAC,
+        titleBarStyle: IS_MAC ? 'hiddenInset' : 'hidden',
+        ...(IS_MAC
+            ? { trafficLightPosition: { x: 14, y: 11 } }
+            : {
+                titleBarOverlay: {
+                    color: '#0f0f14',
+                    symbolColor: '#8a8f98',
+                    height: 38
+                }
+            }),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -515,186 +531,6 @@ async function fetchModelList(config = {}) {
     }
 }
 
-function normalizeChatHeaders(headers = {}) {
-    const normalized = {};
-    if (!headers || typeof headers !== 'object') return normalized;
-
-    for (const [key, value] of Object.entries(headers)) {
-        const name = String(key || '').trim();
-        if (!name || /[\r\n]/.test(name)) continue;
-        if (value == null) continue;
-        normalized[name] = String(value);
-    }
-
-    const lowerNames = new Set(Object.keys(normalized).map(name => name.toLowerCase()));
-    if (!lowerNames.has('content-type')) normalized['Content-Type'] = 'application/json';
-    if (!lowerNames.has('accept')) normalized.Accept = 'application/json';
-    return normalized;
-}
-
-async function proxyAiChat(request = {}) {
-    const targetUrl = String(request.targetUrl || '').trim();
-    if (!targetUrl) {
-        return { success: false, error: '缺少 API 端点' };
-    }
-
-    let url;
-    try {
-        url = new URL(targetUrl);
-    } catch (err) {
-        return { success: false, error: 'API 端点不是有效 URL' };
-    }
-
-    if (!/^https?:$/i.test(url.protocol)) {
-        return { success: false, error: 'API 端点只支持 HTTP/HTTPS' };
-    }
-
-    try {
-        const rawBody = typeof request.body === 'string'
-            ? request.body
-            : JSON.stringify(request.body || {});
-        const response = await net.fetch(url.toString(), {
-            method: 'POST',
-            headers: normalizeChatHeaders(request.headers),
-            body: rawBody,
-            redirect: 'follow'
-        });
-        const text = await response.text();
-
-        if (!response.ok) {
-            return {
-                success: false,
-                status: response.status,
-                error: `HTTP ${response.status}: ${(text || response.statusText || '').slice(0, 1000)}`
-            };
-        }
-
-        let payload = null;
-        try {
-            payload = JSON.parse(text);
-        } catch (err) {
-            // Some compatible APIs may return plain text. Keep it available to the renderer.
-        }
-
-        return {
-            success: true,
-            responseMode: request.responseMode || 'text',
-            payload,
-            text
-        };
-    } catch (err) {
-        return { success: false, error: err.message || String(err) };
-    }
-}
-
-function getSkillRoots() {
-    const homeDir = app.getPath('home') || process.env.USERPROFILE || process.env.HOME || '';
-    return [
-        { key: 'codex', label: 'Codex', dir: path.join(homeDir, '.codex', 'skills') },
-        { key: 'cc-switch', label: 'CC Switch', dir: path.join(homeDir, '.cc-switch', 'skills') }
-    ];
-}
-
-function findSkillMarkdownFiles(rootDir) {
-    const fsLocal = require('fs');
-    const found = [];
-    const stack = [rootDir];
-
-    while (stack.length > 0) {
-        const dir = stack.pop();
-        let entries = [];
-        try {
-            entries = fsLocal.readdirSync(dir, { withFileTypes: true });
-        } catch (err) {
-            continue;
-        }
-
-        entries.forEach(entry => {
-            const fullPath = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                stack.push(fullPath);
-            } else if (entry.isFile() && entry.name.toLowerCase() === 'skill.md') {
-                found.push(fullPath);
-            }
-        });
-    }
-
-    return found;
-}
-
-function parseSkillMarkdown(filePath) {
-    const fsLocal = require('fs');
-    const content = fsLocal.readFileSync(filePath, 'utf8');
-    const frontmatter = content.match(/^---\s*([\s\S]*?)\s*---/);
-    const meta = {};
-
-    if (frontmatter) {
-        frontmatter[1].split(/\r?\n/).forEach(line => {
-            const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-            if (!match) return;
-            meta[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
-        });
-    }
-
-    return {
-        name: meta.name || path.basename(path.dirname(filePath)),
-        description: meta.description || '',
-        content
-    };
-}
-
-function listLocalSkills() {
-    const fsLocal = require('fs');
-    const skills = [];
-
-    getSkillRoots().forEach(root => {
-        if (!fsLocal.existsSync(root.dir)) return;
-        findSkillMarkdownFiles(root.dir).forEach(filePath => {
-            try {
-                const parsed = parseSkillMarkdown(filePath);
-                const relativePath = path.relative(root.dir, path.dirname(filePath)).replace(/\\/g, '/');
-                const isSystem = relativePath.split('/')[0] === '.system';
-                skills.push({
-                    id: `${root.key}:${relativePath}`,
-                    name: parsed.name,
-                    description: parsed.description,
-                    source: root.key,
-                    sourceLabel: isSystem ? `${root.label} System` : root.label,
-                    relativePath,
-                    filePath
-                });
-            } catch (err) {
-                console.warn('[Skills] Failed to parse skill:', filePath, err?.message);
-            }
-        });
-    });
-
-    return skills.sort((a, b) => {
-        const bySource = a.sourceLabel.localeCompare(b.sourceLabel, 'en', { sensitivity: 'base' });
-        if (bySource !== 0) return bySource;
-        return a.name.localeCompare(b.name, 'en', { sensitivity: 'base' });
-    });
-}
-
-function getLocalSkill(skillId) {
-    const skill = listLocalSkills().find(item => item.id === skillId);
-    if (!skill) {
-        return { success: false, error: '未找到该技能，请先重新拉取技能列表' };
-    }
-
-    try {
-        const parsed = parseSkillMarkdown(skill.filePath);
-        return {
-            success: true,
-            skill: {
-                ...skill,
-                content: parsed.content
-            }
-        };
-    } catch (err) {
-        return { success: false, error: err.message || String(err) };
-    }
-}
 
 // ── IPC 处理 ────────────────────────────────────────────
 
@@ -732,19 +568,6 @@ ipcMain.handle('folder:select', async () => {
 
 ipcMain.handle('ai:fetchModels', async (_, config) => {
     return await fetchModelList(config);
-});
-
-ipcMain.handle('ai:chat', async (_, request) => {
-    return await proxyAiChat(request);
-});
-
-ipcMain.handle('ai:listSkills', async () => {
-    const skills = listLocalSkills().map(({ filePath, ...skill }) => skill);
-    return { success: true, skills };
-});
-
-ipcMain.handle('ai:getSkill', async (_, skillId) => {
-    return getLocalSkill(skillId);
 });
 
 ipcMain.handle('folder:watch', (_, folderPath) => {
@@ -848,6 +671,7 @@ function psQuoted(value) {
 }
 
 function writeTextWithPowerShell(text) {
+    if (!IS_WINDOWS) return Promise.resolve(false);
     const fs = require('fs');
     const os = require('os');
     const { execFile } = require('child_process');
@@ -895,12 +719,43 @@ async function writePlainTextToClipboard(text) {
         console.warn('[Clipboard] Electron text write failed:', err?.message);
     }
 
-    const ok = await writeTextWithPowerShell(value);
+    const ok = IS_WINDOWS && await writeTextWithPowerShell(value);
     if (ok) {
         return { success: true, type: 'text', method: 'powershell', verified: true };
     }
 
     return { success: false, error: 'Clipboard text write failed' };
+}
+
+function appleScriptString(value) {
+    return `"${String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/[\r\n]+/g, ' ')}"`;
+}
+
+function writeFileListToMacClipboard(filePaths) {
+    const { execFile } = require('child_process');
+    const script = `set the clipboard to {${filePaths
+        .map(filePath => `POSIX file ${appleScriptString(filePath)}`)
+        .join(', ')}}`;
+
+    return new Promise((resolve) => {
+        execFile('/usr/bin/osascript', ['-e', script], { timeout: 8000 }, (error) => {
+            if (error) {
+                resolve({ success: false, error: error.message });
+                return;
+            }
+            const totalBytes = filePaths.reduce((sum, filePath) => sum + fs.statSync(filePath).size, 0);
+            resolve({
+                success: true,
+                type: 'file',
+                method: 'macos-pasteboard',
+                count: filePaths.length,
+                sizeMB: (totalBytes / 1024 / 1024).toFixed(1)
+            });
+        });
+    });
 }
 
 async function writeFileDropListToClipboard(filePathOrPaths) {
@@ -919,6 +774,14 @@ async function writeFileDropListToClipboard(filePathOrPaths) {
 
     if (existingPaths.length === 0) {
         return writePlainTextToClipboard(paths.join('\r\n'));
+    }
+
+    if (IS_MAC) {
+        return writeFileListToMacClipboard(existingPaths);
+    }
+
+    if (!IS_WINDOWS) {
+        return writePlainTextToClipboard(existingPaths.join('\n'));
     }
 
     const scriptPath = path.join(os.tmpdir(), `flow_clipboard_${process.pid}_${Date.now()}.ps1`);
@@ -1285,6 +1148,20 @@ ipcMain.handle('mcp:image:generate', async (_, body) => {
     }
 });
 
+ipcMain.handle('mcp:image:compress-references', async (_, body) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...(await flowCanvasBridge.compressVideoReferenceImagesFromRenderer({
+            ...(body || {}),
+            uploadBudgetBytes: Number(body?.uploadBudgetBytes) || 6 * 1024 * 1024
+        })) };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
 ipcMain.handle('mcp:video:compress-references', async (_, body) => {
     try {
         if (!flowCanvasBridge) {
@@ -1463,6 +1340,17 @@ async function copyFilesToCurrentExplorer(filePaths, options = {}) {
         const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean).map(p => String(p));
         if (paths.length === 0) {
             return { success: false, error: 'No files selected', copied: [] };
+        }
+
+        if (IS_MAC) {
+            const clipboardResult = await writeFileDropListToClipboard(paths);
+            return {
+                success: false,
+                error: clipboardResult?.error || null,
+                copied: [],
+                clipboardReady: clipboardResult?.success === true,
+                explorerMethod: 'finder-clipboard'
+            };
         }
 
         if (options?.waitForMouseUp) {
