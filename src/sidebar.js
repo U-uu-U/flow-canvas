@@ -10,6 +10,7 @@ export class SidebarManager {
         this.listeners = {};
         this.pendingMove = null;
         this._watcherSyncRunId = 0;
+        this.groupTaskStates = new Map();
 
         // 数据迁移：如果旧数据有 watchFolders 但没有 folderGroups，自动创建默认组
         if (!this.storeData.folderGroups) {
@@ -84,6 +85,53 @@ export class SidebarManager {
     getActiveWatchFolders() {
         const group = this.getActiveGroup();
         return group ? group.folders : [];
+    }
+
+    setGenerationTaskStates(tasks = []) {
+        const groupedTasks = new Map();
+        (Array.isArray(tasks) ? tasks : []).forEach(task => {
+            const projectId = String(task?.projectId || '').trim();
+            if (!projectId) return;
+            if (!groupedTasks.has(projectId)) groupedTasks.set(projectId, []);
+            groupedTasks.get(projectId).push(task);
+        });
+
+        this.groupTaskStates = new Map();
+        groupedTasks.forEach((projectTasks, projectId) => {
+            if (projectTasks.some(task => task?.status === 'running')) {
+                this.groupTaskStates.set(projectId, 'running');
+                return;
+            }
+            const latest = [...projectTasks].sort((left, right) => {
+                const leftTime = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
+                const rightTime = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
+                return rightTime - leftTime;
+            })[0];
+            if (latest?.status === 'success') this.groupTaskStates.set(projectId, 'success');
+            else if (['failed', 'disconnected'].includes(latest?.status)) this.groupTaskStates.set(projectId, 'failed');
+        });
+
+        this._applyGroupTaskStates();
+    }
+
+    _applyGroupTaskStates() {
+        this.dom?.folderGroupList?.querySelectorAll('.folder-group-item').forEach(groupItem => {
+            const projectId = String(groupItem.dataset.groupId || '');
+            const state = this.groupTaskStates.get(projectId) || '';
+            groupItem.classList.toggle('task-state-running', state === 'running');
+            groupItem.classList.toggle('task-state-success', state === 'success');
+            groupItem.classList.toggle('task-state-failed', state === 'failed');
+            const statusDot = groupItem.querySelector('.group-task-status');
+            if (statusDot) {
+                statusDot.title = state === 'running'
+                    ? '有任务正在运行'
+                    : state === 'success'
+                        ? '最近任务已完成'
+                        : state === 'failed'
+                            ? '最近任务失败或断连'
+                            : '';
+            }
+        });
     }
 
     _normalizePath(filePath) {
@@ -800,6 +848,7 @@ export class SidebarManager {
             return `
             <div class="folder-group-item ${isActive ? 'active' : ''}" data-group-id="${safeGroupId}">
                 <div class="group-header" title="左键选中激活，双击重命名">
+                    <i class="group-task-status" aria-hidden="true"></i>
                     <svg class="flow-icon flow-icon-sm group-icon-svg" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
                     <span class="group-name">${safeGroupName}</span>
                     <span class="group-folder-count">${folders.length}</span>
@@ -818,6 +867,7 @@ export class SidebarManager {
             </div>`;
         }).join('');
 
+        this._applyGroupTaskStates();
         this._bindGSAPHover();
     }
 

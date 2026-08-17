@@ -392,6 +392,11 @@ function initServices() {
         },
         notifyTaskCompleted: (event) => {
             browserSyncService?.markTaskCompleted(event.remoteTaskId, event.filePath);
+        },
+        notifyVideoProgress: (event) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('generation:video-progress', event);
+            }
         }
     });
     flowCanvasBridge.start(mcpConfig);

@@ -7,6 +7,8 @@
     --accent: #777c85;
     --accent-hover: #8f949d;
     --hover-bg: rgba(255, 255, 255, 0.05);
+    --scrollbar-thumb: rgba(119, 124, 133, 0.72);
+    --scrollbar-thumb-hover: var(--accent-hover);
 
     --titlebar-h: 38px;
     --sidebar-w: 240px;
@@ -412,6 +414,41 @@ body.sidebar-closed .sidebar::after {
     gap: 8px;
     padding: 8px 10px;
     cursor: pointer;
+}
+
+.group-task-status {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    border-radius: 50%;
+    opacity: 0;
+    background: transparent;
+    box-shadow: 0 0 0 transparent;
+    transition: opacity 0.2s, background-color 0.2s, box-shadow 0.2s;
+}
+
+.folder-group-item.task-state-running .group-task-status {
+    opacity: 1;
+    background: #d7dbe0;
+    box-shadow: 0 0 7px rgba(215, 219, 224, 0.55);
+    animation: folder-task-breathe 1.35s ease-in-out infinite;
+}
+
+.folder-group-item.task-state-success .group-task-status {
+    opacity: 1;
+    background: #9bd9ae;
+    box-shadow: 0 0 6px rgba(155, 217, 174, 0.38);
+}
+
+.folder-group-item.task-state-failed .group-task-status {
+    opacity: 1;
+    background: #e49a9f;
+    box-shadow: 0 0 6px rgba(228, 154, 159, 0.32);
+}
+
+@keyframes folder-task-breathe {
+    0%, 100% { opacity: 0.45; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1); }
 }
 
 .group-icon-svg {
@@ -5020,13 +5057,81 @@ body.video-mode .plan-inline-editor {
     pointer-events: none;
 }
 
-.creation-workspace {
-    scrollbar-width: none;
+/* Keep scrolling visible but quiet across the compact side-panel surfaces. */
+.folder-list,
+.folder-group-list,
+.agent-settings,
+.agent-messages,
+.creation-workspace,
+.video-model-list,
+.plan-editor-table-wrap,
+.agent-task-history-list,
+.video-compression-dialog,
+.video-compression-file-list,
+textarea {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
-.creation-workspace::-webkit-scrollbar {
-    width: 0;
-    height: 0;
+.folder-list::-webkit-scrollbar,
+.folder-group-list::-webkit-scrollbar,
+.agent-settings::-webkit-scrollbar,
+.agent-messages::-webkit-scrollbar,
+.creation-workspace::-webkit-scrollbar,
+.video-model-list::-webkit-scrollbar,
+.plan-editor-table-wrap::-webkit-scrollbar,
+.agent-task-history-list::-webkit-scrollbar,
+.video-compression-dialog::-webkit-scrollbar,
+.video-compression-file-list::-webkit-scrollbar,
+textarea::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.folder-list::-webkit-scrollbar-track,
+.folder-group-list::-webkit-scrollbar-track,
+.agent-settings::-webkit-scrollbar-track,
+.agent-messages::-webkit-scrollbar-track,
+.creation-workspace::-webkit-scrollbar-track,
+.video-model-list::-webkit-scrollbar-track,
+.plan-editor-table-wrap::-webkit-scrollbar-track,
+.agent-task-history-list::-webkit-scrollbar-track,
+.video-compression-dialog::-webkit-scrollbar-track,
+.video-compression-file-list::-webkit-scrollbar-track,
+textarea::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.folder-list::-webkit-scrollbar-thumb,
+.folder-group-list::-webkit-scrollbar-thumb,
+.agent-settings::-webkit-scrollbar-thumb,
+.agent-messages::-webkit-scrollbar-thumb,
+.creation-workspace::-webkit-scrollbar-thumb,
+.video-model-list::-webkit-scrollbar-thumb,
+.plan-editor-table-wrap::-webkit-scrollbar-thumb,
+.agent-task-history-list::-webkit-scrollbar-thumb,
+.video-compression-dialog::-webkit-scrollbar-thumb,
+.video-compression-file-list::-webkit-scrollbar-thumb,
+textarea::-webkit-scrollbar-thumb {
+    min-height: 28px;
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--scrollbar-thumb);
+    background-clip: padding-box;
+}
+
+.folder-list::-webkit-scrollbar-thumb:hover,
+.folder-group-list::-webkit-scrollbar-thumb:hover,
+.agent-settings::-webkit-scrollbar-thumb:hover,
+.agent-messages::-webkit-scrollbar-thumb:hover,
+.creation-workspace::-webkit-scrollbar-thumb:hover,
+.video-model-list::-webkit-scrollbar-thumb:hover,
+.plan-editor-table-wrap::-webkit-scrollbar-thumb:hover,
+.agent-task-history-list::-webkit-scrollbar-thumb:hover,
+.video-compression-dialog::-webkit-scrollbar-thumb:hover,
+.video-compression-file-list::-webkit-scrollbar-thumb:hover,
+textarea::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
 }
 
 @media (max-width: 1100px) {

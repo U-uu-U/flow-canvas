@@ -11,10 +11,33 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg']);
 const VIDEO_REFERENCE_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
 const VIDEO_REFERENCE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
-const TEMP_REFERENCE_UPLOAD_ENDPOINT = 'https://litterbox.catbox.moe/resources/internals/api.php';
 const TEMP_REFERENCE_CACHE_TTL_MS = 50 * 60 * 1000;
-const TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS = 3;
+const TEMP_REFERENCE_UPLOAD_ATTEMPTS_PER_PROVIDER = 2;
+const TEMP_REFERENCE_UPLOAD_CONCURRENCY = 2;
+const FALLBACK_TEMP_REFERENCE_UPLOAD_PROVIDERS = [
+    {
+        id: 'uguu',
+        name: 'Uguu',
+        endpoint: 'https://uguu.se/upload.php',
+        fields: [],
+        fileField: 'files[]',
+        accept: 'application/json',
+        responseType: 'json'
+    },
+    {
+        id: 'litterbox',
+        name: 'Litterbox',
+        endpoint: 'https://litterbox.catbox.moe/resources/internals/api.php',
+        fields: [
+            ['reqtype', 'fileupload'],
+            ['time', '1h']
+        ],
+        fileField: 'fileToUpload',
+        accept: 'text/plain'
+    }
+];
 const temporaryReferenceUrlCache = new Map();
+const temporaryReferenceUploadTasks = new Map();
 const DEFAULT_IMAGE_SIZE_OPTIONS = ['1024x1024', '1536x1024', '1024x1536'];
 const RAVENHASH_IMAGE_SIZE_OPTIONS = [
     ...DEFAULT_IMAGE_SIZE_OPTIONS,
@@ -70,7 +93,7 @@ const KNOWN_TOOL_NAMES = new Set([
 ]);
 
 class FlowCanvasBridge {
-    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted }) {
+    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted, notifyVideoProgress }) {
         this.store = store;
         this.getMainWindow = getMainWindow;
         this.getDefaultSaveFolder = getDefaultSaveFolder;
@@ -78,6 +101,7 @@ class FlowCanvasBridge {
         this.notifyRenderer = notifyRenderer;
         this.notifyTaskSubmitted = notifyTaskSubmitted;
         this.notifyTaskCompleted = notifyTaskCompleted;
+        this.notifyVideoProgress = notifyVideoProgress;
         this.server = null;
         this.host = DEFAULT_MCP_CONFIG.host;
         this.port = DEFAULT_MCP_CONFIG.port;
@@ -542,6 +566,10 @@ class FlowCanvasBridge {
                 recovering: recovering === true,
                 recovered: recovered === true,
                 createdAt: new Date().toISOString()
+            }),
+            onProgress: (progress) => this.notifyVideoProgress?.({
+                clientTaskId: body.clientTaskId || null,
+                ...progress
             })
         });
         if (!result?.success) throw new Error(result?.error || '\u89c6\u9891\u751f\u6210 API \u8bf7\u6c42\u5931\u8d25');
@@ -714,11 +742,17 @@ class FlowCanvasBridge {
                     prompt,
                     recovered: true,
                     createdAt: new Date().toISOString()
+                }),
+                onProgress: (progress) => this.notifyVideoProgress?.({
+                    clientTaskId: body.clientTaskId || null,
+                    ...progress
                 })
             }
         );
         const resolvedTaskId = completed.taskId || taskId;
+        this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'download' });
         const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'completed' });
         this.notifyTaskCompleted?.({ remoteTaskId: resolvedTaskId, filePath });
         const item = body.addToCanvas === false
             ? null
@@ -1469,81 +1503,212 @@ function multipartField(boundary, name, value) {
     );
 }
 
-async function uploadTemporaryReference(dataUri, label) {
-    if (/^https?:\/\//i.test(String(dataUri || '').trim())) return String(dataUri).trim();
-
-    const { mimeType, buffer } = decodeReferenceDataUri(dataUri);
-    if (buffer.length === 0) throw new Error(`${label}内容为空`);
-    const contentHash = crypto.createHash('sha256').update(buffer).digest('hex');
-    const cached = temporaryReferenceUrlCache.get(contentHash);
-    if (cached && cached.expiresAt > Date.now()) return cached.url;
-
-    const extension = extensionForReferenceMimeType(mimeType);
-    const fileName = `flow-canvas-${contentHash.slice(0, 16)}.${extension}`;
-    const boundary = `----FlowCanvas${crypto.randomBytes(12).toString('hex')}`;
-    const body = Buffer.concat([
-        multipartField(boundary, 'reqtype', 'fileupload'),
-        multipartField(boundary, 'time', '1h'),
+function buildTemporaryUploadBody(provider, boundary, fileName, mimeType, buffer) {
+    const fields = provider.fields.map(([name, value]) => multipartField(boundary, name, value));
+    return Buffer.concat([
+        ...fields,
         Buffer.from(
-            `--${boundary}\r\nContent-Disposition: form-data; name="fileToUpload"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`,
+            `--${boundary}\r\nContent-Disposition: form-data; name="${provider.fileField}"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`,
             'utf8'
         ),
         buffer,
         Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8')
     ]);
-    let lastFailure = '未知错误';
-    for (let attempt = 1; attempt <= TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 45_000);
-        let response;
-        let responseText = '';
-        let retryable = true;
-        try {
-            response = await net.fetch(TEMP_REFERENCE_UPLOAD_ENDPOINT, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                    Accept: 'text/plain'
-                },
-                body,
-                signal: controller.signal,
-                redirect: 'follow'
-            });
-            responseText = (await response.text()).trim();
-            if (response.ok && /^https?:\/\/\S+$/i.test(responseText)) {
-                temporaryReferenceUrlCache.set(contentHash, {
-                    url: responseText,
-                    expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
-                });
-                return responseText;
-            }
-            lastFailure = `HTTP ${response.status} ${responseText.slice(0, 300)}`.trim();
-            retryable = [408, 425, 429].includes(response.status) || response.status >= 500 || response.ok;
-        } catch (error) {
-            lastFailure = error?.name === 'AbortError'
-                ? '上传超时（45 秒）'
-                : (error.message || String(error));
-        } finally {
-            clearTimeout(timeout);
-        }
-
-        if (!retryable || attempt === TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS) break;
-        const retryAfterSeconds = Number(response?.headers?.get('retry-after'));
-        const delay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-            ? Math.min(10_000, retryAfterSeconds * 1000)
-            : 800 * (2 ** (attempt - 1));
-        console.warn(`[FlowCanvasBridge] ${label} temporary upload failed; retrying ${attempt + 1}/${TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS}:`, lastFailure);
-        await sleep(delay);
-    }
-
-    throw new Error(`${label}临时上传失败（最多已尝试 ${TEMP_REFERENCE_UPLOAD_MAX_ATTEMPTS} 次）：${lastFailure}`);
 }
 
-async function uploadTemporaryReferences(entries, labelPrefix) {
-    const urls = [];
-    for (let index = 0; index < entries.length; index += 1) {
-        urls.push(await uploadTemporaryReference(entries[index], `${labelPrefix} ${index + 1}`));
+function parseTemporaryUploadUrl(provider, responseText) {
+    const text = String(responseText || '').trim();
+    if (provider.responseType === 'json') {
+        try {
+            const payload = JSON.parse(text);
+            const url = payload?.url || payload?.files?.[0]?.url;
+            return payload?.success === true && /^https?:\/\/\S+$/i.test(String(url || ''))
+                ? String(url)
+                : '';
+        } catch (_) {
+            return '';
+        }
     }
+    return /^https?:\/\/\S+$/i.test(text) ? text : '';
+}
+
+function loadPrivateTemporaryUploadConfig(overrides = {}) {
+    let saved = {};
+    try {
+        const configPath = path.join(app.getPath('userData'), 'upload-storage.json');
+        if (fs.existsSync(configPath)) {
+            saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        }
+    } catch (error) {
+        console.warn('[FlowCanvasBridge] Failed to read private upload storage config:', error.message);
+    }
+
+    const endpoint = String(
+        overrides.temporaryUploadEndpoint
+        || process.env.FLOW_CANVAS_UPLOAD_ENDPOINT
+        || saved.endpoint
+        || ''
+    ).trim();
+    const token = String(
+        overrides.temporaryUploadToken
+        || process.env.FLOW_CANVAS_UPLOAD_TOKEN
+        || saved.token
+        || ''
+    ).trim();
+    if (!endpoint || !token) return null;
+
+    try {
+        const url = new URL(endpoint);
+        if (url.protocol !== 'https:') throw new Error('endpoint must use HTTPS');
+        return {
+            endpoint: url.toString(),
+            token
+        };
+    } catch (error) {
+        console.warn('[FlowCanvasBridge] Ignoring invalid private upload storage endpoint:', error.message);
+        return null;
+    }
+}
+
+function temporaryUploadProviders(overrides = {}) {
+    const privateConfig = loadPrivateTemporaryUploadConfig(overrides);
+    const selfHosted = privateConfig
+        ? [{
+            id: 'flow-canvas-storage',
+            name: 'Flow Canvas 自建存储',
+            endpoint: privateConfig.endpoint,
+            fields: [],
+            fileField: 'file',
+            accept: 'application/json',
+            responseType: 'json',
+            headers: {
+                Authorization: `Bearer ${privateConfig.token}`
+            }
+        }]
+        : [];
+    return [...selfHosted, ...FALLBACK_TEMP_REFERENCE_UPLOAD_PROVIDERS];
+}
+
+function temporaryUploadProviderFingerprint(providers) {
+    return crypto.createHash('sha256')
+        .update(providers.map(provider => `${provider.id}:${provider.endpoint}`).join('|'))
+        .digest('hex')
+        .slice(0, 16);
+}
+
+function temporaryUploadTimeoutMs(bufferLength) {
+    const extraSeconds = Math.ceil(bufferLength / (1024 * 1024)) * 5;
+    return Math.min(75_000, 30_000 + extraSeconds * 1000);
+}
+
+async function uploadTemporaryReferenceBuffer({ buffer, mimeType, contentHash, cacheKey, label, providers }) {
+    const extension = extensionForReferenceMimeType(mimeType);
+    const fileName = `flow-canvas-${contentHash.slice(0, 16)}.${extension}`;
+    const failures = [];
+    let totalAttempts = 0;
+
+    for (const provider of providers) {
+        for (let attempt = 1; attempt <= TEMP_REFERENCE_UPLOAD_ATTEMPTS_PER_PROVIDER; attempt += 1) {
+            totalAttempts += 1;
+            const boundary = `----FlowCanvas${crypto.randomBytes(12).toString('hex')}`;
+            const body = buildTemporaryUploadBody(provider, boundary, fileName, mimeType, buffer);
+            const controller = new AbortController();
+            const timeoutMs = temporaryUploadTimeoutMs(buffer.length);
+            const timeout = setTimeout(() => controller.abort(), timeoutMs);
+            let response;
+            let responseText = '';
+            let retryable = true;
+            let failure = '未知错误';
+            try {
+                response = await net.fetch(provider.endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                        Accept: provider.accept,
+                        ...(provider.headers || {})
+                    },
+                    body,
+                    signal: controller.signal,
+                    redirect: 'follow'
+                });
+                responseText = (await response.text()).trim();
+                const uploadedUrl = response.ok
+                    ? parseTemporaryUploadUrl(provider, responseText)
+                    : '';
+                if (uploadedUrl) {
+                    temporaryReferenceUrlCache.set(cacheKey, {
+                        url: uploadedUrl,
+                        expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
+                    });
+                    return uploadedUrl;
+                }
+                failure = `HTTP ${response.status} ${responseText.slice(0, 300)}`.trim();
+                retryable = [408, 425, 429].includes(response.status) || response.status >= 500 || response.ok;
+            } catch (error) {
+                failure = error?.name === 'AbortError'
+                    ? `上传超时（${Math.round(timeoutMs / 1000)} 秒）`
+                    : (error.message || String(error));
+            } finally {
+                clearTimeout(timeout);
+            }
+
+            failures.push(`${provider.name}: ${failure}`);
+            if (!retryable || attempt === TEMP_REFERENCE_UPLOAD_ATTEMPTS_PER_PROVIDER) break;
+            const retryAfterSeconds = Number(response?.headers?.get('retry-after'));
+            const delay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+                ? Math.min(10_000, retryAfterSeconds * 1000)
+                : 800 * attempt;
+            console.warn(`[FlowCanvasBridge] ${label} upload to ${provider.name} failed; retrying ${attempt + 1}/${TEMP_REFERENCE_UPLOAD_ATTEMPTS_PER_PROVIDER}:`, failure);
+            await sleep(delay);
+        }
+    }
+
+    const providerNames = providers.map(provider => provider.name).join('、');
+    throw new Error(
+        `${label}临时上传失败（${providerNames} 共尝试 ${totalAttempts} 次）：${failures.slice(-3).join('；')}`
+        + '。视频任务尚未提交到模型服务，不会产生本次生成费用。'
+    );
+}
+
+async function uploadTemporaryReference(dataUri, label, providers) {
+    if (/^https?:\/\//i.test(String(dataUri || '').trim())) return String(dataUri).trim();
+
+    const { mimeType, buffer } = decodeReferenceDataUri(dataUri);
+    if (buffer.length === 0) throw new Error(`${label}内容为空`);
+    const contentHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const cacheKey = `${temporaryUploadProviderFingerprint(providers)}:${contentHash}`;
+    const cached = temporaryReferenceUrlCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.url;
+
+    const pending = temporaryReferenceUploadTasks.get(cacheKey);
+    if (pending) return pending;
+    const task = uploadTemporaryReferenceBuffer({ buffer, mimeType, contentHash, cacheKey, label, providers });
+    temporaryReferenceUploadTasks.set(cacheKey, task);
+    try {
+        return await task;
+    } finally {
+        temporaryReferenceUploadTasks.delete(cacheKey);
+    }
+}
+
+async function uploadTemporaryReferences(entries, labelPrefix, providers, onProgress) {
+    const urls = new Array(entries.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(TEMP_REFERENCE_UPLOAD_CONCURRENCY, entries.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIndex < entries.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            onProgress?.({
+                stage: 'upload',
+                mediaType: labelPrefix,
+                current: index + 1,
+                total: entries.length
+            });
+            urls[index] = await uploadTemporaryReference(entries[index], `${labelPrefix} ${index + 1}`, providers);
+        }
+    });
+    await Promise.all(workers);
     return urls;
 }
 
@@ -1585,13 +1750,28 @@ function isFailedVideoStatus(status) {
     return ['failed', 'error', 'cancelled', 'canceled', 'rejected'].includes(String(status || '').toLowerCase());
 }
 
+function videoTaskProgressPercent(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return null;
+    return Math.min(100, Math.round(numeric <= 1 ? numeric * 100 : numeric));
+}
+
+function videoTaskProgressStage(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    if (['queued', 'pending', 'submitted', 'waiting'].includes(normalized)) return 'queued';
+    return 'processing';
+}
+
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialResponse, options = {}) {
     const directUrl = getVideoResultUrl(initialResponse);
-    if (directUrl) return { payload: initialResponse, url: directUrl, taskId };
+    if (directUrl) {
+        options.onProgress?.({ stage: 'download' });
+        return { payload: initialResponse, url: directUrl, taskId };
+    }
     if (!taskId) throw new Error('\u89c6\u9891\u63a5\u53e3\u8fd4\u56de\u4e2d\u6ca1\u6709\u4efb\u52a1 ID \u6216\u89c6\u9891\u5730\u5740');
 
     let currentTaskId = String(taskId);
@@ -1614,6 +1794,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
     let recoveryNotFoundCount = 0;
     let consecutiveConnectionFailures = 0;
     const isRecoveringSubmission = initialResponse?.recovering === true;
+    options.onProgress?.({ stage: isRecoveringSubmission ? 'recovering' : 'queued' });
     for (let attempt = 0; attempt < 720; attempt += 1) {
         if (attempt > 0) await sleep(5000);
         let taskUrl = taskUrls[taskUrlIndex];
@@ -1667,12 +1848,18 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         }
         const url = getVideoResultUrl(payload);
         if (url && (isCompletedVideoStatus(payload?.status) || !payload?.status)) {
+            options.onProgress?.({ stage: 'download', progress: 100 });
             return { payload, url, taskId: currentTaskId };
         }
         if (isFailedVideoStatus(payload?.status)) {
             const reason = payload?.error?.message || payload?.message || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
             throw new Error(`\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff1a${reason}`);
         }
+        options.onProgress?.({
+            stage: videoTaskProgressStage(payload?.status),
+            progress: videoTaskProgressPercent(payload?.progress),
+            remoteStatus: String(payload?.status || '') || null
+        });
     }
     throw new Error('\u89c6\u9891\u751f\u6210\u8d85\u65f6\uff1a\u7b49\u5f85 60 \u5206\u949f\u540e\u4ecd\u672a\u5b8c\u6210');
 }
@@ -1731,6 +1918,7 @@ async function downloadVideo(url, targetDir, prompt) {
 
 async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
     try {
+        options.onProgress?.({ stage: 'prepare' });
         const providerConfig = options.providerConfig || {};
         const apiKey = String(providerConfig.apiKey || process.env.FLOW_CANVAS_VIDEO_API_KEY || '').trim();
         const endpoint = buildOpenAiVideoEndpoint(providerConfig.endpoint || process.env.FLOW_CANVAS_VIDEO_ENDPOINT);
@@ -1786,12 +1974,25 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
             if (audioUrls.length > 0 && images.length === 0) {
                 return { success: false, error: 'MiniMax H3 使用参考音频时必须同时提供至少一张参考图片' };
             }
+            const uploadProviders = temporaryUploadProviders(providerConfig);
             const imageUrls = await uploadTemporaryReferences(
                 images.map(image => image.url),
-                '参考图片'
+                '参考图片',
+                uploadProviders,
+                options.onProgress
             );
-            const referenceVideoUrls = await uploadTemporaryReferences(videos.slice(0, 1), '参考视频');
-            const referenceAudioUrls = await uploadTemporaryReferences(audioUrls, '参考音频');
+            const referenceVideoUrls = await uploadTemporaryReferences(
+                videos.slice(0, 1),
+                '参考视频',
+                uploadProviders,
+                options.onProgress
+            );
+            const referenceAudioUrls = await uploadTemporaryReferences(
+                audioUrls,
+                '参考音频',
+                uploadProviders,
+                options.onProgress
+            );
             if (imageUrls.length === 1) {
                 body.first_image = imageUrls[0];
             } else if (imageUrls.length === 2) {
@@ -1813,6 +2014,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         let text;
         let initialResponse;
         let recoveringSubmission = false;
+        options.onProgress?.({ stage: 'submit' });
         try {
             response = await net.fetch(endpoint, {
                 method: 'POST',
@@ -1875,9 +2077,12 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 model,
                 initialResponse: payload,
                 recovered: recoveringSubmission
-            })
+            }),
+            onProgress: options.onProgress
         });
+        options.onProgress?.({ stage: 'download' });
         const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        options.onProgress?.({ stage: 'completed' });
         return {
             success: true,
             provider: 'openai-video',

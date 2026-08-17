@@ -60,6 +60,7 @@ async function bootstrap() {
             clearMediaReferenceSelections: () => canvasManager?.clearMediaReferenceSelections?.(),
             resolveMediaReferenceEntries: (entries, type) => canvasManager?.resolveMediaReferenceEntries?.(entries, type) || [],
             getActiveProjectId: () => storeData?.activeGroupId || null,
+            onGenerationTasksChanged: (tasks) => sidebarManager?.setGenerationTaskStates?.(tasks),
             beginImageGeneration: (settings) => canvasManager?.addImageGenerationPlaceholder?.(settings) || null,
             endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
             beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,

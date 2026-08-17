@@ -2,7 +2,15 @@
 
 Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作桌面应用。它把文件夹中的图片、视频和音频组织到无限画布上，并将多 API 模型、图片生成、视频生成、任务恢复和 MCP 自动化集中在同一个工作区中。
 
-当前稳定版本：`v1.1.0`
+当前稳定版本：`v1.1.1`
+
+## v1.1.1 更新内容
+
+- 修复参考素材临时服务器不稳定导致的 `ERR_CONNECTION_TIMED_OUT`：上传失败时自动切换备用临时存储节点。
+- 优化多张参考素材上传：支持有限并发、同素材上传合并、按文件大小调整超时，并补充节点失败原因。
+- 素材预上传失败时明确提示任务尚未提交到模型服务，避免误以为已经生成或重复扣费。
+- 文件夹组增加任务状态点：运行中灰白呼吸，成功后浅绿色常亮，失败或断连显示淡红色。
+- 生成任务记录所属项目，切换文件夹组时不再串用任务状态。
 
 ## v1.1.0 更新内容
 
@@ -54,9 +62,9 @@ Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作
 
 ### 使用安装包
 
-从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.1.0.exe`，按提示完成安装。
+从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.1.1.exe`，按提示完成安装。
 
-也可以下载便携版 `Flow.Canvas.1.1.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
+也可以下载便携版 `Flow.Canvas.1.1.1.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
 
 macOS 测试版由 GitHub Actions 分别生成 Apple Silicon (`arm64`) 和 Intel (`x64`) 的 `dmg/zip`。未签名测试包首次运行时，需要在“系统设置 > 隐私与安全性”中确认打开；正式分发建议配置 Apple Developer 签名与公证。
 
@@ -260,7 +268,7 @@ npm run build
 git diff --check
 ```
 
-## v1.1.0 支持范围
+## v1.1.1 支持范围
 
 - 桌面文件系统、剪贴板和资源管理器工作流已适配 Windows 10/11。
 - macOS 已加入 Apple Silicon/Intel 打包、Finder 拖放、文件剪贴板和 `Command` 快捷键适配，仍需在真实 Mac 上完成发布前回归测试。

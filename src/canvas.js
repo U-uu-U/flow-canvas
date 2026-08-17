@@ -449,11 +449,15 @@ export class CanvasManager {
         const entries = [];
         this.items.forEach(entry => {
             const rect = this._getEntryCanvasRect(entry);
-            if (rect) entries.push({ ...rect, kind: this._getFileType(entry.data.filePath) });
+            if (rect) entries.push({
+                ...rect,
+                kind: this._getFileType(entry.data.filePath),
+                selected: this.selectedItems.has(entry.data.id)
+            });
         });
         this.plans.forEach(entry => {
             const rect = this._getEntryCanvasRect(entry);
-            if (rect) entries.push({ ...rect, kind: 'plan' });
+            if (rect) entries.push({ ...rect, kind: 'plan', selected: this.selectedItems.has(entry.data.id) });
         });
         this.generationPlaceholders.forEach(entry => {
             const rect = entry?.placement;
@@ -553,9 +557,9 @@ export class CanvasManager {
         context.setLineDash([]);
 
         const colors = {
-            image: '#4f83cf',
-            video: '#c98955',
-            audio: '#4d9d7b',
+            image: '#7d838e',
+            video: '#969a9f',
+            audio: '#6c727b',
             document: '#8d929c',
             other: '#707783',
             plan: '#c0c4cb',
@@ -570,9 +574,15 @@ export class CanvasManager {
             const y = offsetY + (entry.y - bounds.y) * mapScale;
             const itemWidth = Math.max(2, entry.width * mapScale);
             const itemHeight = Math.max(2, entry.height * mapScale);
-            context.globalAlpha = entry.kind === 'pending' ? 0.5 : 0.86;
-            context.fillStyle = colors[entry.kind] || colors.other;
+            const selected = entry.selected === true;
+            context.globalAlpha = selected ? 1 : entry.kind === 'pending' ? 0.5 : 0.86;
+            context.fillStyle = selected ? '#aeb3ba' : (colors[entry.kind] || colors.other);
             context.fillRect(x, y, itemWidth, itemHeight);
+            if (selected) {
+                context.strokeStyle = 'rgba(232, 233, 236, 0.72)';
+                context.lineWidth = 1;
+                context.strokeRect(x + 0.5, y + 0.5, Math.max(0, itemWidth - 1), Math.max(0, itemHeight - 1));
+            }
         });
         context.restore();
         context.globalAlpha = 1;
@@ -591,8 +601,8 @@ export class CanvasManager {
             height: Math.max(4, viewportWorld.height * mapScale)
         };
         this._minimapViewportRect = viewport;
-        context.fillStyle = 'rgba(58, 123, 213, 0.13)';
-        context.strokeStyle = '#5d92dc';
+        context.fillStyle = 'rgba(119, 124, 133, 0.16)';
+        context.strokeStyle = '#8f949d';
         context.lineWidth = 1.5;
         context.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
         context.strokeRect(viewport.x + 0.75, viewport.y + 0.75, Math.max(0, viewport.width - 1.5), Math.max(0, viewport.height - 1.5));
@@ -2035,6 +2045,7 @@ export class CanvasManager {
                 node.strokeWidth(0);
             }
         });
+        this._scheduleMinimapDraw();
         this._syncImageTransformer();
     }
 

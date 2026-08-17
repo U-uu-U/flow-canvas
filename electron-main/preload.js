@@ -79,6 +79,9 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
         resumeVideo: (body) => ipcRenderer.invoke('mcp:video:resume', body),
+        onVideoProgress: (callback) => {
+            ipcRenderer.on('generation:video-progress', (_, payload) => callback(payload));
+        },
     },
 
     browserSync: {

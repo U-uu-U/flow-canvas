@@ -231,6 +231,7 @@ export class AgentSidebar {
         this.generationTasks = [];
         this.processedBrowserSyncEventIds = new Set();
         this.browserSyncPolling = false;
+        this.activeVideoWorkspaceTaskId = null;
         this.modePickerHideTimer = null;
         this.lastCanvasSelection = this.options.getSelectedCanvasEntries?.() || [];
 
@@ -263,6 +264,7 @@ export class AgentSidebar {
         this._renderModelSelect();
         this._renderGenerationTasks();
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
+        window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
         this._pollBrowserSyncEvents();
         this.browserSyncTimer = setInterval(() => this._pollBrowserSyncEvents(), 4000);
         this.options.subscribeCanvasSelection?.((entries) => {
@@ -1561,6 +1563,7 @@ export class AgentSidebar {
         this.generationTasks.unshift({
             id: routeClientTaskId || `browser-${remoteTaskId}`,
             kind: 'video',
+            projectId: event.projectId || this.options.getActiveProjectId?.() || null,
             status: nextStatus,
             providerId: null,
             providerName: event.sourceHost || '浏览器同步',
@@ -1591,6 +1594,7 @@ export class AgentSidebar {
         const task = {
             id,
             kind,
+            projectId: this.options.getActiveProjectId?.() || null,
             status: 'running',
             providerId: provider?.id || null,
             providerName: this._providerLabel(provider),
@@ -1695,6 +1699,7 @@ export class AgentSidebar {
     }
 
     _renderGenerationTasks() {
+        this.options.onGenerationTasksChanged?.(this.generationTasks);
         const pendingCount = this.generationTasks.filter(task => task.status === 'running').length;
         const readyCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'ready').length;
         const downloadingCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'downloading').length;
@@ -1732,13 +1737,23 @@ export class AgentSidebar {
         };
         this.taskHistoryList.innerHTML = this.generationTasks.map(task => {
             const status = statusLabels[task.status] ? task.status : 'failed';
-            const syncStageLabel = status === 'running' && task.params?.syncStage === 'ready'
+            let syncStageLabel = status === 'running' && task.params?.syncStage === 'ready'
                 ? '待下载'
                 : status === 'running' && task.params?.syncStage === 'downloading'
                     ? '下载中'
                     : status === 'running' && task.params?.syncStage === 'recovering'
                         ? '\u6062\u590d\u8fde\u63a5\u4e2d'
                         : statusLabels[status];
+            if (status === 'running' && task.params?.syncStage === 'upload') {
+                syncStageLabel = '上传素材中';
+            } else if (status === 'running' && task.params?.syncStage === 'submit') {
+                syncStageLabel = '提交任务中';
+            } else if (status === 'running' && task.params?.syncStage === 'queued') {
+                syncStageLabel = '等待模型处理';
+            } else if (status === 'running' && task.params?.syncStage === 'processing') {
+                const progress = Number(task.params?.progress);
+                syncStageLabel = Number.isFinite(progress) ? `模型生成中 ${progress}%` : '模型生成中';
+            }
             const sourceCount = (Array.isArray(task.sourcePaths) ? task.sourcePaths.length : 0)
                 + (task.params?.videoSourcePaths?.length || 0)
                 + (task.params?.audioSourcePaths?.length || 0);
@@ -2131,6 +2146,7 @@ export class AgentSidebar {
             videoParams,
             imageReferences.map(reference => reference.filePath).filter(Boolean)
         );
+        this.activeVideoWorkspaceTaskId = generationTask.id;
         if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
         this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
         const placeholder = this.options.beginVideoGeneration?.({ ratio }) || null;
@@ -2288,6 +2304,47 @@ export class AgentSidebar {
         } finally {
             if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.disabled = false;
         }
+    }
+
+    _handleVideoProgress(event = {}) {
+        const clientTaskId = String(event.clientTaskId || '').trim();
+        if (!clientTaskId) return;
+        const task = this.generationTasks.find(item => item.id === clientTaskId);
+        if (!task) return;
+
+        const stage = String(event.stage || 'processing');
+        const progress = Number.isFinite(Number(event.progress)) ? Number(event.progress) : null;
+        this._updateGenerationTask(task.id, {
+            params: {
+                ...(task.params || {}),
+                syncStage: stage,
+                progress,
+                remoteStatus: event.remoteStatus || null
+            }
+        });
+
+        if (clientTaskId !== this.activeVideoWorkspaceTaskId) return;
+        const mediaType = String(event.mediaType || '参考素材');
+        const index = Number(event.current);
+        const total = Number(event.total);
+        const messages = {
+            prepare: '正在读取参考素材...',
+            submit: '参考素材准备完成，正在提交模型任务...',
+            queued: '任务已提交，等待模型处理...',
+            recovering: '服务器已接收任务，正在恢复任务连接...',
+            download: '模型生成完成，正在下载视频...',
+            completed: '视频已下载，正在写入画布...'
+        };
+        let message = messages[stage] || '模型生成中...';
+        if (stage === 'upload') {
+            message = Number.isFinite(index) && Number.isFinite(total) && total > 0
+                ? `正在上传${mediaType}（${index}/${total}）...`
+                : `正在上传${mediaType}...`;
+        } else if (stage === 'processing' && progress !== null) {
+            message = `模型生成中 · ${progress}%`;
+        }
+        if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = stage === 'completed' ? '已完成' : '生成中';
+        this._setWorkspaceMessage(this.videoGenerateMessage, '', message);
     }
 
     async _generateImageFromWorkspace() {
