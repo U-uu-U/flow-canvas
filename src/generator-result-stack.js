@@ -20,6 +20,17 @@ function normalizePosition(value, count) {
     return ((position % count) + count) % count;
 }
 
+export function getGeneratorResultLayout(data = {}) {
+    return data.resultLayoutMode === 'branched' ? 'branched' : 'collapsed';
+}
+
+export function setGeneratorResultLayout(data, mode) {
+    const normalized = mode === 'branched' ? 'branched' : 'collapsed';
+    const changed = data.resultLayoutMode !== normalized;
+    data.resultLayoutMode = normalized;
+    return changed;
+}
+
 function legacyEntries(data = {}) {
     const paths = Array.isArray(data.resultFilePaths) ? data.resultFilePaths : [];
     const urls = Array.isArray(data.resultUrls) ? data.resultUrls : [];
@@ -83,10 +94,15 @@ export function appendGeneratorResult(data, entry) {
 }
 
 export function rotateGeneratorResults(data) {
+    return promoteGeneratorResult(data, 1);
+}
+
+export function promoteGeneratorResult(data, index = 0) {
     const entries = getGeneratorResultEntries(data);
-    if (entries.length > 1) {
-        entries.push(entries.shift());
-        data.resultStackPosition = normalizePosition(data.resultStackPosition, entries.length) + 1;
+    const offset = normalizePosition(index, entries.length);
+    if (entries.length > 1 && offset > 0) {
+        entries.push(...entries.splice(0, offset));
+        data.resultStackPosition = normalizePosition(data.resultStackPosition, entries.length) + offset;
     }
     const results = setGeneratorResultEntries(data, entries);
     data.resultStackPosition = normalizePosition(data.resultStackPosition, results.length);
@@ -104,6 +120,30 @@ export function removeGeneratorResultByFilePath(data, filePath) {
     setGeneratorResultEntries(data, entries);
     if (entries.length !== previous.length) data.resultStackPosition = 0;
     return { changed: entries.length !== previous.length, entries };
+}
+
+export function replaceGeneratorResultFilePath(data, oldFilePath, newFilePath) {
+    const target = normalizePath(oldFilePath);
+    if (!target || !newFilePath) {
+        return { changed: false, entries: ensureGeneratorResultEntries(data) };
+    }
+
+    let changed = false;
+    const entries = getGeneratorResultEntries(data).map(entry => {
+        const entryPath = entry.filePath || entry.item?.filePath || '';
+        if (normalizePath(entryPath) !== target) return entry;
+        changed = true;
+        return {
+            ...entry,
+            filePath: newFilePath,
+            item: entry.item ? { ...entry.item, filePath: newFilePath } : entry.item
+        };
+    });
+
+    return {
+        changed,
+        entries: changed ? setGeneratorResultEntries(data, entries) : ensureGeneratorResultEntries(data)
+    };
 }
 
 export function clearGeneratorResults(data) {

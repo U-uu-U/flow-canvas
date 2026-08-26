@@ -1413,6 +1413,7 @@ export class SidebarManager {
         this.pendingMove = {
             itemIds: payload.itemIds || [],
             filePaths: payload.filePaths || [],
+            fileTargets: payload.fileTargets || [],
             mode: payload.mode === 'copy' ? 'copy' : 'move'
         };
         document.body.classList.remove('sidebar-closed');

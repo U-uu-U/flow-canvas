@@ -167,20 +167,31 @@ function isImageTaskPayload(payload, statusCode = 0, location = '') {
 }
 
 function getGeneratedImageData(payload = {}) {
-    const candidates = [
-        payload?.data?.[0],
-        payload?.result?.data?.[0],
-        payload?.output?.data?.[0],
-        payload?.result?.output?.data?.[0]
+    return getGeneratedImageDataList(payload)[0] || null;
+}
+
+function getGeneratedImageDataList(payload = {}) {
+    const collections = [
+        payload?.data,
+        payload?.result?.data,
+        payload?.output?.data,
+        payload?.result?.output?.data,
+        payload?.images,
+        payload?.result?.images
     ];
-    const image = candidates.find(value => value && typeof value === 'object');
-    if (image) return image;
+    const collection = collections.find(value => Array.isArray(value) && value.length);
+    if (collection) {
+        return collection.map(value => {
+            if (value && typeof value === 'object') return value;
+            return typeof value === 'string' && value.trim() ? { url: value.trim() } : null;
+        }).filter(Boolean);
+    }
 
     const source = payload?.imageUrl
         || payload?.image_url
         || payload?.result?.imageUrl
         || payload?.result?.image_url;
-    return typeof source === 'string' && source.trim() ? { url: source.trim() } : null;
+    return typeof source === 'string' && source.trim() ? [{ url: source.trim() }] : [];
 }
 
 function isCompletedImageTaskStatus(status) {
@@ -285,11 +296,124 @@ function appendMidjourneyAspectRatio(prompt, size = '') {
     return ratio ? `${value} --ar ${ratio}` : value;
 }
 
-function buildMidjourneyImaginePayload(prompt, images = [], size = '') {
+function hasMidjourneyParameter(prompt, names) {
+    const alternatives = names.map(name => String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    return new RegExp(`(?:^|\\s)--(?:${alternatives})(?:\\s|=|$)`, 'i').test(String(prompt || ''));
+}
+
+function clampedNumber(value, min, max) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : null;
+}
+
+function midjourneyArgument(value, maxTokens = 16) {
+    return String(value || '')
+        .trim()
+        .split(/\s+/)
+        .filter(token => token && !token.startsWith('--'))
+        .slice(0, maxTokens)
+        .join(' ');
+}
+
+function appendMidjourneyParameters(prompt, options = {}, size = '') {
+    let value = String(prompt || '').trim();
+    const parameters = [];
+    const append = (names, parameter) => {
+        if (parameter && !hasMidjourneyParameter(value, names)) parameters.push(parameter);
+    };
+
+    const ratio = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.test(String(options.ratio || '').trim())
+        ? String(options.ratio).trim()
+        : midjourneyAspectRatio(size);
+    append(['ar', 'aspect'], ratio ? `--ar ${ratio}` : '');
+
+    const styleReference = midjourneyArgument(options.styleReference);
+    const omniReference = midjourneyArgument(options.omniReference, 1);
+    const requestedVersion = String(options.version || '').trim().toLowerCase().replace(/^v/, '');
+    const version = omniReference ? '7' : requestedVersion;
+    if (/^niji(?:[-\s]?7)?$/.test(version)) {
+        append(['niji', 'v', 'version'], '--niji 7');
+    } else if (['8.2', '8.1', '7', '6.1', '6'].includes(version)) {
+        append(['niji', 'v', 'version'], `--v ${version}`);
+    }
+
+    if (options.raw === true) append(['raw'], '--raw');
+
+    const stylize = clampedNumber(options.stylize, 0, 1000);
+    if (stylize != null && stylize !== 100) append(['s', 'stylize'], `--s ${Math.round(stylize)}`);
+    const chaos = clampedNumber(options.chaos, 0, 100);
+    if (chaos != null && chaos !== 0) append(['c', 'chaos'], `--c ${Math.round(chaos)}`);
+    const weird = clampedNumber(options.weird, 0, 3000);
+    if (weird != null && weird !== 0) append(['w', 'weird'], `--w ${Math.round(weird)}`);
+
+    const draft = options.draft === true && version === '7' && !omniReference;
+    const quality = Number(options.quality);
+    if (!draft && !omniReference && [0.5, 1, 2, 4].includes(quality) && quality !== 1) {
+        append(['q', 'quality'], `--q ${quality}`);
+    }
+
+    const imageWeightMax = /^niji/.test(version) ? 2 : 3;
+    const imageWeight = clampedNumber(options.imageWeight, 0, imageWeightMax);
+    if (options.hasImagePrompt === true && imageWeight != null && imageWeight !== 1) {
+        append(['iw'], `--iw ${imageWeight}`);
+    }
+
+    append(['sref'], styleReference ? `--sref ${styleReference}` : '');
+    const hasStyleReference = Boolean(styleReference) || hasMidjourneyParameter(value, ['sref']);
+    const styleWeight = clampedNumber(options.styleWeight, 0, 1000);
+    if (hasStyleReference && styleWeight != null && styleWeight !== 100) {
+        append(['sw'], `--sw ${Math.round(styleWeight)}`);
+    }
+    const styleVersion = Math.round(clampedNumber(options.styleVersion, 1, 6) || 0);
+    if (hasStyleReference && styleVersion) append(['sv'], `--sv ${styleVersion}`);
+
+    append(['oref'], omniReference ? `--oref ${omniReference}` : '');
+    const hasOmniReference = Boolean(omniReference) || hasMidjourneyParameter(value, ['oref']);
+    const omniWeight = clampedNumber(options.omniWeight, 1, 1000);
+    if (hasOmniReference && omniWeight != null && omniWeight !== 100) {
+        append(['ow'], `--ow ${Math.round(omniWeight)}`);
+    }
+
+    const profile = midjourneyArgument(options.profile, 8);
+    append(['p', 'profile'], profile ? `--p ${profile}` : '');
+
+    const seed = clampedNumber(options.seed, 0, 4294967295);
+    if (String(options.seed ?? '').trim() && seed != null) append(['seed'], `--seed ${Math.round(seed)}`);
+    if (options.tile === true) append(['tile'], '--tile');
+    if (draft) append(['draft'], '--draft');
+
+    const repeat = Math.round(clampedNumber(options.repeat, 1, 4) || 1);
+    if (repeat > 1) append(['r', 'repeat'], `--r ${repeat}`);
+
+    const speed = String(options.speed || '').trim().toLowerCase();
+    if (['fast', 'relax', 'turbo'].includes(speed) && !(omniReference && speed !== 'relax')) {
+        append(['fast', 'relax', 'turbo'], `--${speed}`);
+    }
+    const visibility = String(options.visibility || '').trim().toLowerCase();
+    if (['public', 'stealth'].includes(visibility)) {
+        append(['public', 'stealth'], `--${visibility}`);
+    }
+
+    const definition = String(options.definition || '').trim().toLowerCase();
+    const supportsDefinition = !version || ['8.2', '8.1'].includes(version);
+    if (supportsDefinition && definition === 'hd') append(['hd', 'sd'], '--hd');
+    if (supportsDefinition && definition === 'sd') append(['hd', 'sd'], '--sd');
+
+    const negativePrompt = String(options.negativePrompt || '').trim();
+    append(['no'], negativePrompt ? `--no ${negativePrompt}` : '');
+
+    if (parameters.length) value = `${value} ${parameters.join(' ')}`.trim();
+    return value;
+}
+
+function buildMidjourneyImaginePayload(prompt, images = [], size = '', options = {}) {
     return {
         base64Array: images.map(image => `data:${image.mimeType || 'application/octet-stream'};base64,${image.buffer.toString('base64')}`),
         notifyHook: '',
-        prompt: appendMidjourneyAspectRatio(prompt, size),
+        prompt: appendMidjourneyParameters(prompt, {
+            ...options,
+            hasImagePrompt: options.hasImagePrompt === true || images.length > 0
+        }, size),
         state: '',
         botType: 'MID_JOURNEY'
     };
@@ -298,6 +422,42 @@ function buildMidjourneyImaginePayload(prompt, images = [], size = '') {
 function isMidjourneyImageModel(model) {
     const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
     return normalized.includes('mjimagine') || normalized.includes('midjourney');
+}
+
+function isMidjourneyImagineModel(model) {
+    const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    return normalized === 'mjimagine' || normalized === 'midjourney';
+}
+
+function midjourneyGridRegions(width, height) {
+    const pixelWidth = Math.floor(Number(width));
+    const pixelHeight = Math.floor(Number(height));
+    if (pixelWidth < 2 || pixelHeight < 2) return [];
+    const leftWidth = Math.floor(pixelWidth / 2);
+    const topHeight = Math.floor(pixelHeight / 2);
+    const rightWidth = pixelWidth - leftWidth;
+    const bottomHeight = pixelHeight - topHeight;
+    return [
+        { left: 0, top: 0, width: leftWidth, height: topHeight },
+        { left: leftWidth, top: 0, width: rightWidth, height: topHeight },
+        { left: 0, top: topHeight, width: leftWidth, height: bottomHeight },
+        { left: leftWidth, top: topHeight, width: rightWidth, height: bottomHeight }
+    ];
+}
+
+function isNativeMidjourneyEndpoint(endpoint) {
+    const raw = String(endpoint || '').trim();
+    if (!raw) return false;
+    try {
+        const pathname = new URL(raw).pathname.replace(/\/+$/, '');
+        return /(?:^|\/)mj(?:\/|$)/i.test(pathname);
+    } catch (_) {
+        return /(?:^|\/)mj(?:\/|$)/i.test(raw);
+    }
+}
+
+function shouldUseNativeMidjourneyRoute(model, endpoint) {
+    return isMidjourneyImageModel(model) && isNativeMidjourneyEndpoint(endpoint);
 }
 
 function imageTaskRetryDelayMs(value, fallbackMs = 2000, now = Date.now()) {
@@ -312,6 +472,7 @@ function imageTaskRetryDelayMs(value, fallbackMs = 2000, now = Date.now()) {
 }
 
 module.exports = {
+    appendMidjourneyParameters,
     buildImageEditMultipart,
     buildImageTaskEndpoint,
     buildMidjourneyImaginePayload,
@@ -319,6 +480,7 @@ module.exports = {
     buildMidjourneyTaskEndpoint,
     collectImageEditInputs,
     getGeneratedImageData,
+    getGeneratedImageDataList,
     getImageTaskId,
     getImageTaskIdFromLocation,
     imageHttpErrorMessage,
@@ -328,5 +490,9 @@ module.exports = {
     isCompletedImageTaskStatus,
     isFailedImageTaskStatus,
     isImageTaskPayload,
-    isMidjourneyImageModel
+    isMidjourneyImagineModel,
+    isMidjourneyImageModel,
+    isNativeMidjourneyEndpoint,
+    midjourneyGridRegions,
+    shouldUseNativeMidjourneyRoute
 };

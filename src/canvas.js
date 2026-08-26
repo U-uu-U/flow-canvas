@@ -23,16 +23,21 @@ import {
 } from './image-crop-layout.js';
 import {
     getGeneratorComposerPosition,
-    getGeneratorPlaceholderSize
+    getGeneratorPlaceholderSize,
+    getGeneratorSplitPositions
 } from './generator-placeholder-layout.js';
 import {
     appendGeneratorResult,
     clearGeneratorResults,
     ensureGeneratorResultEntries,
+    getGeneratorResultLayout,
     getGeneratorResultEntries,
     keepFirstGeneratorResult,
+    promoteGeneratorResult,
     removeGeneratorResultByFilePath,
-    rotateGeneratorResults
+    replaceGeneratorResultFilePath,
+    rotateGeneratorResults,
+    setGeneratorResultLayout
 } from './generator-result-stack.js';
 import {
     IMAGE_ASPECT_RATIOS,
@@ -42,6 +47,13 @@ import {
     resolveGenerationDisplaySize,
     resolveImageDimensions
 } from './image-node-settings.js';
+import { isMidjourneyImageModel } from './provider-capabilities.js';
+import {
+    DEFAULT_IMAGE_PROMPT_PACK_ID,
+    composePromptFromTemplate,
+    findPromptTemplates,
+    getPromptPack
+} from './prompt-pack-registry.js';
 import {
     VIDEO_CONTROL_BUTTON_WIDTH,
     VIDEO_CONTROL_HEIGHT,
@@ -69,6 +81,118 @@ const OP_NODE_FOOTER_HEIGHT = 48;
 const OP_NODE_PROMPT_TOP = 43;
 const OP_GENERATOR_REFERENCE_TOP = 42;
 const OP_GENERATOR_PROMPT_TOP = 96;
+const TEXT_NODE_MIN_WIDTH = 240;
+const TEXT_NODE_MIN_HEIGHT = 156;
+const TEXT_NODE_MAX_WIDTH = 1400;
+const TEXT_NODE_MAX_HEIGHT = 1200;
+const GENERATOR_BRANCH_GAP = 16;
+const MIDJOURNEY_RESOLUTION_TIERS = ['1K', '2K'];
+const MIDJOURNEY_VERSION_OPTIONS = [
+    { value: '', label: '接口默认' },
+    { value: '8.2', label: 'V8.2' },
+    { value: '8.1', label: 'V8.1' },
+    { value: '7', label: 'V7' },
+    { value: '6.1', label: 'V6.1' },
+    { value: 'niji-7', label: 'Niji 7' }
+];
+const MIDJOURNEY_PARAMETER_PRESETS = [
+    {
+        id: 'recommended',
+        label: '推荐画质',
+        description: 'V8.2、HD、Raw，兼顾提示词服从度与最终质量',
+        values: {
+            resolutionTier: '2K',
+            midjourneyVersion: '8.2',
+            midjourneyRaw: true,
+            midjourneyQuality: 'default',
+            midjourneyStylize: 200,
+            midjourneyChaos: 10,
+            midjourneyWeird: 0,
+            midjourneyImageWeight: 1.5,
+            midjourneyStyleWeight: 200,
+            midjourneyStyleVersion: '6',
+            midjourneyOmniWeight: 300,
+            midjourneySeed: '',
+            midjourneyTile: false,
+            midjourneyDraft: false,
+            midjourneyRepeat: 1,
+            midjourneySpeed: '',
+            midjourneyVisibility: ''
+        }
+    },
+    {
+        id: 'fast-hd',
+        label: '极速高清',
+        description: 'V8.1、HD、Raw，优先使用官方最快模型',
+        values: {
+            resolutionTier: '2K',
+            midjourneyVersion: '8.1',
+            midjourneyRaw: true,
+            midjourneyQuality: 'default',
+            midjourneyStylize: 150,
+            midjourneyChaos: 5,
+            midjourneyWeird: 0,
+            midjourneyImageWeight: 1.5,
+            midjourneyStyleWeight: 200,
+            midjourneyStyleVersion: '6',
+            midjourneyOmniWeight: 300,
+            midjourneySeed: '',
+            midjourneyTile: false,
+            midjourneyDraft: false,
+            midjourneyRepeat: 1,
+            midjourneySpeed: 'fast',
+            midjourneyVisibility: ''
+        }
+    },
+    {
+        id: 'v7-maximum',
+        label: 'V7 极致',
+        description: 'V7、Quality 4、Turbo，换取更高渲染投入',
+        values: {
+            resolutionTier: '1K',
+            midjourneyVersion: '7',
+            midjourneyRaw: true,
+            midjourneyQuality: '4',
+            midjourneyStylize: 200,
+            midjourneyChaos: 5,
+            midjourneyWeird: 0,
+            midjourneyImageWeight: 1.5,
+            midjourneyStyleWeight: 200,
+            midjourneyStyleVersion: '6',
+            midjourneyOmniWeight: 300,
+            midjourneySeed: '',
+            midjourneyTile: false,
+            midjourneyDraft: false,
+            midjourneyRepeat: 1,
+            midjourneySpeed: 'turbo',
+            midjourneyVisibility: ''
+        }
+    },
+    {
+        id: 'experimental',
+        label: '实验拉满',
+        description: 'V7 强度与变化参数拉满，并重复提交 4 组四宫格',
+        values: {
+            resolutionTier: '1K',
+            midjourneyVersion: '7',
+            midjourneyRaw: true,
+            midjourneyQuality: '4',
+            midjourneyStylize: 1000,
+            midjourneyChaos: 100,
+            midjourneyWeird: 3000,
+            midjourneyImageWeight: 3,
+            midjourneyStyleWeight: 1000,
+            midjourneyStyleVersion: '6',
+            midjourneyOmniWeight: 1000,
+            midjourneySeed: 4294967295,
+            midjourneyTile: false,
+            midjourneyDraft: false,
+            midjourneyRepeat: 4,
+            midjourneySpeed: 'turbo',
+            midjourneyVisibility: ''
+        }
+    }
+];
 const GENERATION_COMPOSER_CARET_ANCHOR = '\u200B';
 const OP_STATUS_COLORS = {
     error: '#ef4444'
@@ -942,7 +1066,7 @@ export class CanvasManager {
         try {
             relative = node?.getClientRect?.({ relativeTo: group, skipShadow: true, skipStroke: true });
         } catch (_) { }
-        const width = Math.max(1, Number(relative?.width)
+        let width = Math.max(1, Number(relative?.width)
             || Number(entry.data?.node?.width)
             || Number(entry.data?.width)
             || DOC_DEFAULT_SIZE);
@@ -950,6 +1074,12 @@ export class CanvasManager {
             || Number(entry.data?.node?.height)
             || Number(entry.data?.height)
             || DOC_DEFAULT_SIZE);
+        const resultCount = entry.data?.kind === 'op' && entry.data?.nodeType === 'image'
+            ? getGeneratorResultEntries(entry.data).length
+            : 0;
+        if (resultCount > 1 && getGeneratorResultLayout(entry.data) === 'branched') {
+            width = width * resultCount + GENERATOR_BRANCH_GAP * (resultCount - 1);
+        }
         const x = Number(group.x()) + (Number(relative?.x) || 0);
         const y = Number(group.y()) + (Number(relative?.y) || 0);
         if (![x, y, width, height].every(Number.isFinite)) return null;
@@ -1153,7 +1283,7 @@ export class CanvasManager {
             <button type="button" data-action="crop" title="裁切图片" aria-label="裁切图片"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-crop"></use></svg></button>
             <button type="button" data-action="duplicate" title="创建副本" aria-label="创建副本"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg></button>
             <button type="button" data-action="replace" title="替换素材" aria-label="替换素材"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-replace"></use></svg></button>
-            <button type="button" data-action="reference" title="加入创作参考" aria-label="加入创作参考"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg></button>
+            <button type="button" data-action="reference" class="canvas-selection-generate has-menu" title="使用当前素材生成" aria-label="使用当前素材生成" aria-haspopup="menu"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg><span>生成</span></button>
             <button type="button" data-action="more" title="更多操作" aria-label="更多操作"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-more"></use></svg></button>
             <span class="canvas-selection-toolbar-divider" aria-hidden="true"></span>
             <button type="button" data-action="tag" title="分类与收藏" aria-label="分类与收藏"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-tag"></use></svg></button>
@@ -1245,7 +1375,13 @@ export class CanvasManager {
                 || !item.group.findOne('.displayNode');
         }
         const referenceButton = toolbar.querySelector('[data-action="reference"]');
-        if (referenceButton) referenceButton.disabled = !['image', 'video', 'audio'].includes(mediaType);
+        if (referenceButton) {
+            referenceButton.disabled = !['image', 'video', 'audio'].includes(mediaType);
+            referenceButton.title = mediaType === 'image'
+                ? '生成图片或视频，并将当前图片作为参考图'
+                : '使用当前素材生成';
+            referenceButton.setAttribute('aria-label', referenceButton.title);
+        }
     }
 
     _getSelectionActionPayload(primaryId = null) {
@@ -1613,6 +1749,10 @@ export class CanvasManager {
         menu.className = 'generation-type-menu';
         menu.setAttribute('role', 'menu');
         menu.setAttribute('aria-label', '选择生成类型');
+        const heading = document.createElement('div');
+        heading.className = 'generation-type-menu-heading';
+        heading.textContent = mediaType === 'image' ? '当前图片将作为参考图' : '当前素材将作为生成参考';
+        menu.appendChild(heading);
         choices.forEach(choice => {
             const button = document.createElement('button');
             button.type = 'button';
@@ -1626,7 +1766,8 @@ export class CanvasManager {
             button.querySelector('small').textContent = choice.description;
             button.addEventListener('click', () => {
                 this._closeGenerationTypeMenu();
-                this._createGeneratorFromMedia(itemId, choice.nodeType);
+                if (choice.nodeType === 'image') this.openMediaGenerationComposer(itemId);
+                else this._createGeneratorFromMedia(itemId, choice.nodeType);
             });
             menu.appendChild(button);
         });
@@ -1682,8 +1823,117 @@ export class CanvasManager {
             { nodeId: created.id, port: 'source' }
         );
         if (!connection) return created;
+        this._syncGenerationReferenceBadge(itemId);
+        this._showCanvasStatus(nodeType === 'image'
+            ? '已将当前图片设为参考图'
+            : '已将当前图片设为视频参考图');
         requestAnimationFrame(() => this.openGenerationComposer(created.id));
         return created;
+    }
+
+    openMediaGenerationComposer(itemId) {
+        const sourceEntry = this.items.get(itemId);
+        const source = sourceEntry?.data;
+        if (!sourceEntry || !source?.filePath || this._getItemMediaType(source) !== 'image') return null;
+        if (this._generationComposer?.mediaSourceId === itemId) {
+            this._positionGenerationComposer();
+            return this._generationComposer.nodeId;
+        }
+
+        const config = this._createDefaultOpConfig('image');
+        const size = getGeneratorPlaceholderSize('image', config, source);
+        const draftId = `media-composer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const draft = {
+            id: draftId,
+            kind: 'op',
+            nodeType: 'image',
+            title: '图片生成',
+            config,
+            model: config.model || '',
+            x: sourceEntry.group.x(),
+            y: sourceEntry.group.y(),
+            width: size.width,
+            height: size.height,
+            runStatus: STATUS.IDLE,
+            runError: '',
+            generatorUiVersion: 1,
+            resultEntries: [],
+            resultFilePaths: [],
+            resultUrls: [],
+            resultItems: [],
+            resultStackPosition: 0,
+            composerDraft: true,
+            composerSourceItemId: itemId
+        };
+        const draftGroup = new Konva.Group({
+            x: draft.x,
+            y: draft.y,
+            visible: false,
+            listening: false
+        });
+        this.items.set(draftId, { group: draftGroup, data: draft, loaded: true, loading: false });
+        this.openGenerationComposer(draftId, {
+            anchorNodeId: itemId,
+            mediaSourceId: itemId,
+            focusPrompt: false
+        });
+        this._syncGenerationReferenceBadge(itemId);
+        return draftId;
+    }
+
+    _materializeMediaComposerDraft(nodeId) {
+        const entry = this.items.get(nodeId);
+        const data = entry?.data;
+        if (!entry || !data?.composerDraft) return data || null;
+        const sourceId = data.composerSourceItemId;
+        const sourceEntry = this.items.get(sourceId);
+        const source = sourceEntry?.data;
+        if (!sourceEntry || !source) return null;
+
+        const size = getGeneratorPlaceholderSize(data.nodeType, data.config, source);
+        const sourceX = sourceEntry.group.x();
+        const sourceY = sourceEntry.group.y();
+        data.x = sourceX + Number(source.width || IMAGE_DEFAULT_WIDTH) + 64;
+        data.y = sourceY + Math.max(0, (Number(source.height || size.height) - size.height) / 2);
+        data.width = size.width;
+        data.height = size.height;
+        delete data.composerDraft;
+        delete data.composerSourceItemId;
+
+        entry.group.destroy();
+        this.items.delete(nodeId);
+        this.storeData.items.push(data);
+        this._createOpNode(data);
+        const connection = this.graphView?.connect(
+            { nodeId: sourceId, port: 'out' },
+            { nodeId, port: 'source' }
+        );
+        if (!connection) {
+            const materializedEntry = this.items.get(nodeId);
+            this.graphView?.clearPorts(nodeId);
+            materializedEntry?.group?.destroy();
+            this.items.delete(nodeId);
+            const storedIndex = this.storeData.items.findIndex(item => item?.id === nodeId);
+            if (storedIndex >= 0) this.storeData.items.splice(storedIndex, 1);
+            data.composerDraft = true;
+            data.composerSourceItemId = sourceId;
+            const draftGroup = new Konva.Group({
+                x: sourceX,
+                y: sourceY,
+                visible: false,
+                listening: false
+            });
+            this.items.set(nodeId, { group: draftGroup, data, loaded: true, loading: false });
+            this._showCanvasStatus('参考图连接失败，请重新选择图片', 3200);
+            return null;
+        }
+        if (this._generationComposer?.nodeId === nodeId) {
+            this._generationComposer.materialized = true;
+        }
+        this._renderGenerationComposerReferences(nodeId);
+        this._positionGenerationComposer();
+        this.emit('change');
+        return data;
     }
 
     _openMediaPreview(item) {
@@ -2676,6 +2926,10 @@ export class CanvasManager {
                     const scope = this.selectedItems.size ? this.selectedItems : [group.attrs.id];
                     this.graphView.scheduleSync(scope);
                 }
+                const composerAnchorId = this._generationComposer?.anchorNodeId || this._generationComposer?.nodeId;
+                if (composerAnchorId && this.selectedItems.has(composerAnchorId)) {
+                    this._positionGenerationComposer();
+                }
                 this._scheduleSelectionToolbarSync();
             }
         });
@@ -3591,6 +3845,7 @@ export class CanvasManager {
 
     renderInitialItems() {
         const items = this.storeData.items || [];
+        this._migrateCompletedImageGeneratorItems(items);
         console.log('[Canvas] renderInitialItems: storeData.items 数量 =', items.length);
         const generation = ++this._renderGeneration;
         const batchSize = 120;
@@ -3628,6 +3883,60 @@ export class CanvasManager {
 
         renderBatch();
         this.renderPlans();
+    }
+
+    _migrateCompletedImageGeneratorItems(items = []) {
+        const additions = [];
+        for (const raw of items) {
+            if (raw?.kind !== 'op' || raw.nodeType !== 'image') continue;
+            if (raw.preserveGeneratorStack === true) continue;
+            const results = getGeneratorResultEntries(raw)
+                .map(entry => ({
+                    ...entry,
+                    filePath: resolveCanvasFilePath(entry.filePath || entry.item?.filePath || '')
+                }))
+                .filter(entry => entry.filePath);
+            if (!results.length) continue;
+
+            const original = JSON.parse(JSON.stringify(raw));
+            const generationBase = {
+                nodeType: 'image',
+                title: original.title || '图片生成',
+                config: original.config || {},
+                model: original.model || original.config?.model || '',
+                generatedAt: Number(original.addedAt) || Date.now(),
+                replacedGenerator: true,
+                batchSize: results.length
+            };
+            const width = Math.max(1, Number(original.width) || IMAGE_DEFAULT_WIDTH);
+            const height = Math.max(1, Number(original.height) || IMAGE_DEFAULT_WIDTH);
+            const buildMediaData = (entry, index, id) => ({
+                ...(entry.item || {}),
+                id,
+                kind: 'media',
+                mediaType: 'image',
+                filePath: entry.filePath,
+                x: (Number(original.x) || 0) + index * (width + 28),
+                y: Number(original.y) || 0,
+                width,
+                height,
+                addedAt: Number(original.addedAt) || Date.now(),
+                generation: { ...generationBase, batchIndex: index }
+            });
+
+            const first = buildMediaData(results[0], 0, original.id);
+            Object.keys(raw).forEach(key => { delete raw[key]; });
+            Object.assign(raw, first);
+            results.slice(1).forEach((entry, offset) => {
+                const index = offset + 1;
+                additions.push(buildMediaData(
+                    entry,
+                    index,
+                    `${original.id}-result-${index}-${Math.random().toString(36).slice(2, 7)}`
+                ));
+            });
+        }
+        if (additions.length) items.push(...additions);
     }
 
     getSelectedCanvasEntries() {
@@ -3994,6 +4303,17 @@ export class CanvasManager {
         next.group.getLayer()?.batchDraw();
     }
 
+    _syncGenerationReferenceBadge(itemId) {
+        const item = this.items.get(itemId);
+        if (!item?.group || item.data?.kind === 'op') return;
+        item.group.findOne('.generationReferenceBadge')?.destroy();
+        item.group.getLayer()?.batchDraw();
+    }
+
+    _syncAllGenerationReferenceBadges() {
+        this.items.forEach((_item, itemId) => this._syncGenerationReferenceBadge(itemId));
+    }
+
     _syncHoveredMediaItemAtPointer() {
         const pointer = this.stage?.getPointerPosition?.();
         if (!pointer) return;
@@ -4208,7 +4528,8 @@ export class CanvasManager {
                 if (item) this._finishPlanReferencePick(item);
                 return;
             }
-            if (e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey) {
+            const additive = e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey;
+            if (additive) {
                 if (this.selectedItems.has(data.id)) {
                     const previousSelection = new Set(this.selectedItems);
                     this.selectedItems.delete(data.id);
@@ -4216,6 +4537,9 @@ export class CanvasManager {
                 } else {
                     this.selectItem(data.id, true);
                 }
+            } else {
+                this.selectItem(data.id, false);
+                if (fileType === 'image' && data.filePath) this.openMediaGenerationComposer(data.id);
             }
         });
 
@@ -4392,14 +4716,9 @@ export class CanvasManager {
         return data;
     }
 
-    addOpNode(nodeType, pos = null) {
+    _createDefaultOpConfig(nodeType) {
         const def = NODE_TYPES[nodeType];
-        if (!def) {
-            console.warn('[Canvas] 未知节点类型:', nodeType);
-            return null;
-        }
-
-        const at = pos || this._getViewportCenter();
+        if (!def) return null;
         const config = {};
         (def.config || []).forEach(field => {
             config[field.key] = field.default ?? '';
@@ -4424,6 +4743,18 @@ export class CanvasManager {
                 }
             }
         }
+        return config;
+    }
+
+    addOpNode(nodeType, pos = null) {
+        const def = NODE_TYPES[nodeType];
+        if (!def) {
+            console.warn('[Canvas] 未知节点类型:', nodeType);
+            return null;
+        }
+
+        const at = pos || this._getViewportCenter();
+        const config = this._createDefaultOpConfig(nodeType);
         const isGenerator = nodeType === 'image' || nodeType === 'video';
         const placeholderSize = isGenerator ? getGeneratorPlaceholderSize(nodeType, config) : null;
         const width = placeholderSize?.width || Math.max(OP_NODE_WIDTH, Number(def.width) || 0);
@@ -4553,7 +4884,7 @@ export class CanvasManager {
             if (e.evt.button === 2) return;
             const additive = e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey;
             this.selectItem(data.id, additive);
-            if (isGenerator && !additive) this.openGenerationComposer(data.id);
+            if (isGenerator && !additive) this.openGenerationComposer(data.id, { focusPrompt: false });
         });
         group.on('dblclick', (e) => {
             e.cancelBubble = true;
@@ -4571,13 +4902,34 @@ export class CanvasManager {
         group.on('contextmenu', e => {
             e.cancelBubble = true;
             if (!this.selectedItems.has(data.id)) this.selectItem(data.id, false);
-            const itemIds = [...this.selectedItems].filter(id => this.items.has(id));
+            const selectedEntries = [...this.selectedItems]
+                .map(id => this.items.get(id))
+                .filter(Boolean)
+                .sort((left, right) => (left.group.x() - right.group.x()) || (left.group.y() - right.group.y()));
+            const itemIds = selectedEntries.map(entry => entry.data.id);
+            const filePath = this._copyableFilePath(data);
+            const fileTargets = selectedEntries
+                .map(entry => {
+                    const selectedFilePath = this._copyableFilePath(entry.data);
+                    if (!selectedFilePath) return null;
+                    return {
+                        itemId: entry.data.id,
+                        filePath: selectedFilePath,
+                        generatorResult: entry.data.kind === 'op'
+                            && ['image', 'video'].includes(entry.data.nodeType)
+                    };
+                })
+                .filter(Boolean);
+            const filePaths = fileTargets.map(target => target.filePath);
             this.contextMenu.show(e, {
                 kind: 'op',
+                nodeType: data.nodeType,
                 itemId: data.id,
                 itemIds,
-                filePath: '',
-                filePaths: []
+                filePath,
+                filePaths,
+                fileTargets,
+                generatorResult: ['image', 'video'].includes(data.nodeType) && Boolean(filePath)
             });
         });
 
@@ -4624,6 +4976,19 @@ export class CanvasManager {
 
     _opReferenceEntries(data) {
         if (!data?.id || !['image', 'video'].includes(data.nodeType)) return [];
+        if (data.composerDraft && data.composerSourceItemId) {
+            const source = this.items.get(data.composerSourceItemId)?.data;
+            return source ? [{
+                connection: {
+                    id: `composer-reference-${data.id}`,
+                    kind: 'transient',
+                    transient: true,
+                    from: { nodeId: source.id, port: 'out' },
+                    to: { nodeId: data.id, port: 'source' }
+                },
+                source
+            }] : [];
+        }
         const acceptedTypes = data.nodeType === 'image'
             ? new Set(['image'])
             : new Set(['image', 'video', 'file']);
@@ -4812,8 +5177,11 @@ export class CanvasManager {
         const stroke = status === STATUS.ERROR
             ? OP_STATUS_COLORS.error
             : 'rgba(255, 255, 255, 0.24)';
+        const isBranched = data.nodeType === 'image'
+            && resultCount > 1
+            && getGeneratorResultLayout(data) === 'branched';
 
-        if (resultCount > 1) {
+        if (resultCount > 1 && !isBranched) {
             const collapsedOffset = 7;
             const expandedOffset = Math.min(64, Math.max(40, Math.round(width * 0.18)));
             const nextCard = new Konva.Group({
@@ -4858,6 +5226,39 @@ export class CanvasManager {
                     duration: 0.14,
                     easing: Konva.Easings.EaseInOut
                 });
+            });
+        } else if (isBranched) {
+            results.slice(1).forEach((result, offset) => {
+                const resultIndex = offset + 1;
+                const card = new Konva.Group({
+                    x: resultIndex * (width + GENERATOR_BRANCH_GAP),
+                    name: 'generatorBranchResult'
+                });
+                card.add(new Konva.Rect({
+                    width,
+                    height,
+                    fill: '#17181a',
+                    stroke: 'rgba(255, 255, 255, 0.16)',
+                    strokeWidth: 1,
+                    cornerRadius: 8
+                }));
+                this._addGeneratorResultPreview(group, card, data, result, width, height);
+                card.on('mouseenter.generatorStack', () => {
+                    document.body.style.cursor = 'pointer';
+                });
+                card.on('mouseleave.generatorStack', () => {
+                    document.body.style.cursor = 'default';
+                });
+                card.on('mousedown.generatorStack touchstart.generatorStack click.generatorStack tap.generatorStack', event => {
+                    if (event.evt?.button != null && event.evt.button !== 0) return;
+                    event.cancelBubble = true;
+                    event.evt?.preventDefault?.();
+                    if (event.type !== 'click' && event.type !== 'tap') return;
+                    promoteGeneratorResult(data, resultIndex);
+                    this.refreshOpNode(data.id);
+                    this.emit('change');
+                });
+                group.add(card);
             });
         }
 
@@ -4951,6 +5352,7 @@ export class CanvasManager {
         }
 
         if (resultCount > 1) {
+            if (data.nodeType === 'image') this._addGeneratorResultLayoutToggle(group, data, width);
             group.add(new Konva.Text({
                 name: 'generatorStackPosition',
                 x: Math.max(0, width - 72),
@@ -4967,6 +5369,189 @@ export class CanvasManager {
         }
 
         this._syncExternalNodeTitle(group, data, data.nodeType);
+    }
+
+    _addGeneratorResultLayoutToggle(group, data, width) {
+        const current = getGeneratorResultLayout(data);
+        const controlWidth = 102;
+        const controlHeight = 20;
+        const segmentWidth = controlWidth / 3;
+        const control = new Konva.Group({
+            name: 'generatorResultLayoutToggle',
+            x: Math.max(76, width - 182),
+            y: -26
+        });
+        control.add(new Konva.Rect({
+            width: controlWidth,
+            height: controlHeight,
+            fill: 'rgba(24, 26, 30, 0.96)',
+            stroke: 'rgba(255, 255, 255, 0.16)',
+            strokeWidth: 1,
+            cornerRadius: 5,
+            shadowColor: '#000000',
+            shadowBlur: 6,
+            shadowOpacity: 0.24
+        }));
+
+        [
+            { mode: 'branched', label: '分支' },
+            { mode: 'collapsed', label: '收束' },
+            { action: 'split', label: '拆开' }
+        ].forEach((option, index) => {
+            const selected = Boolean(option.mode) && current === option.mode;
+            const button = new Konva.Group({ x: index * segmentWidth });
+            const background = new Konva.Rect({
+                width: segmentWidth,
+                height: controlHeight,
+                fill: selected ? 'rgba(105, 109, 118, 0.72)' : 'rgba(0, 0, 0, 0)',
+                cornerRadius: 4
+            });
+            button.add(background, new Konva.Text({
+                width: segmentWidth,
+                height: controlHeight,
+                text: option.label,
+                align: 'center',
+                verticalAlign: 'middle',
+                fontFamily: 'Microsoft YaHei UI, Segoe UI, sans-serif',
+                fontSize: 10,
+                fill: selected ? '#f0f1f3' : '#a8abb1',
+                listening: false
+            }));
+            button.on('mouseenter.generatorStack', () => {
+                document.body.style.cursor = 'pointer';
+                if (!selected) background.fill('rgba(255, 255, 255, 0.08)');
+                group.getLayer()?.batchDraw();
+            });
+            button.on('mouseleave.generatorStack', () => {
+                document.body.style.cursor = 'default';
+                if (!selected) background.fill('rgba(0, 0, 0, 0)');
+                group.getLayer()?.batchDraw();
+            });
+            button.on('mousedown.generatorStack touchstart.generatorStack click.generatorStack tap.generatorStack', event => {
+                if (event.evt?.button != null && event.evt.button !== 0) return;
+                event.cancelBubble = true;
+                event.evt?.preventDefault?.();
+                if (event.type !== 'click' && event.type !== 'tap') return;
+                if (option.action === 'split') {
+                    void this._splitGeneratorResults(data.id);
+                    return;
+                }
+                if (!setGeneratorResultLayout(data, option.mode)) return;
+                this.refreshOpNode(data.id);
+                this._scheduleSelectionToolbarSync();
+                this.emit('change');
+            });
+            control.add(button);
+        });
+        group.add(control);
+    }
+
+    async _splitGeneratorResults(nodeId) {
+        const entry = this.items.get(nodeId);
+        const source = entry?.data;
+        if (!entry?.group || source?.kind !== 'op' || source.nodeType !== 'image') return [];
+
+        const results = getGeneratorResultEntries(source)
+            .map(result => ({
+                ...result,
+                filePath: resolveCanvasFilePath(result.filePath || result.item?.filePath || '')
+            }))
+            .filter(result => result.filePath);
+        if (results.length < 2) {
+            this._showCanvasStatus('没有可拆开的本地图片结果', 2800);
+            return [];
+        }
+
+        this._splittingGeneratorResultIds ||= new Set();
+        if (this._splittingGeneratorResultIds.has(nodeId)) return [];
+        this._splittingGeneratorResultIds.add(nodeId);
+
+        const positions = getGeneratorSplitPositions({
+            x: entry.group.x(),
+            y: entry.group.y(),
+            width: source.width,
+            height: source.height
+        }, results.length);
+        const referenceEntries = this._opReferenceEntries(source).map(({ source: reference }) => ({
+            itemId: reference.id,
+            filePath: reference.filePath || ''
+        }));
+        const generationBase = {
+            nodeType: 'image',
+            title: source.title || '图片生成',
+            config: JSON.parse(JSON.stringify(source.config || {})),
+            model: source.model || source.config?.model || '',
+            references: referenceEntries,
+            generatedAt: Date.now(),
+            splitFromStack: true,
+            sourceNodeId: source.id,
+            batchSize: results.length
+        };
+        const created = [];
+
+        try {
+            for (let index = 0; index < results.length; index += 1) {
+                const result = results[index];
+                const position = positions[index];
+                const resultItem = result.item && typeof result.item === 'object' ? result.item : {};
+                const child = {
+                    ...resultItem,
+                    id: `split-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+                    kind: 'media',
+                    mediaType: 'image',
+                    filePath: result.filePath,
+                    x: position.x,
+                    y: position.y,
+                    width: position.width,
+                    height: position.height,
+                    addedAt: Date.now(),
+                    fromNodeId: source.id,
+                    generation: {
+                        ...generationBase,
+                        batchIndex: index,
+                        candidateIndex: resultItem.candidateIndex || index + 1
+                    }
+                };
+                await this._createCard(child);
+                this.storeData.items.push(child);
+                created.push(child);
+            }
+
+            created.forEach(child => {
+                this._connectResultHistory(source, { image: child.filePath }, child.id);
+            });
+            clearGeneratorResults(source);
+            source.preserveGeneratorStack = false;
+            setGeneratorResultLayout(source, 'collapsed');
+            this.refreshOpNode(source.id);
+            this.selectItems(created.map(child => child.id));
+            this.graphView?.sync();
+            this._scheduleCullCheck();
+            this.emit('change');
+            this._showCanvasStatus(`已拆开为 ${created.length} 张图片并连接来源`, 3200);
+            return created;
+        } catch (error) {
+            const createdIds = new Set(created.map(child => child.id));
+            created.forEach(child => {
+                const item = this.items.get(child.id);
+                this.graphView?.removeNode(child.id);
+                this.selectedItems.delete(child.id);
+                if (!item) return;
+                this._unloadContent(item);
+                item.group.destroy();
+                this.items.delete(child.id);
+            });
+            for (let index = this.storeData.items.length - 1; index >= 0; index -= 1) {
+                if (createdIds.has(this.storeData.items[index]?.id)) this.storeData.items.splice(index, 1);
+            }
+            this._refreshCanvasBoundary();
+            this.graphView?.sync();
+            if (created.length) this.emit('change');
+            this._showCanvasStatus(`拆开失败：${error?.message || error}`, 4200);
+            return [];
+        } finally {
+            this._splittingGeneratorResultIds.delete(nodeId);
+        }
     }
 
     _addGeneratorResultPreview(ownerGroup, parent, data, result, width, height, name = '') {
@@ -5193,7 +5778,8 @@ export class CanvasManager {
 
         if (isGenerator) {
             const controlGap = 5;
-            const countWidth = 42;
+            const midjourneyImage = this._isMidjourneyImageData(data);
+            const countWidth = midjourneyImage ? 58 : 42;
             const runSpace = 48;
             const parameterX = 12 + modelPillWidth + controlGap;
             let countX;
@@ -5257,7 +5843,7 @@ export class CanvasManager {
                 x: countX,
                 y: footerControlY,
                 width: countWidth,
-                text: `${Math.max(1, Number(data.config?.count) || 1)}×`,
+                text: midjourneyImage ? '4候选' : `${Math.max(1, Number(data.config?.count) || 1)}×`,
                 align: 'center',
                 onClick: event => this._showOpCountMenu(data.id, event)
             });
@@ -5424,12 +6010,318 @@ export class CanvasManager {
         return width + 6;
     }
 
+    _isMidjourneyImageData(data) {
+        return data?.nodeType === 'image' && isMidjourneyImageModel(data.config?.model || data.model);
+    }
+
+    _normalizeMidjourneyImageConfig(data) {
+        if (!this._isMidjourneyImageData(data)) return false;
+        const config = data.config = data.config || {};
+        const hadMidjourneySettings = [
+            'midjourneyVersion',
+            'midjourneyRaw',
+            'midjourneyStylize',
+            'midjourneyChaos',
+            'midjourneyWeird',
+            'midjourneyQuality'
+        ].some(key => Object.prototype.hasOwnProperty.call(config, key));
+        if (!hadMidjourneySettings) {
+            const recommended = MIDJOURNEY_PARAMETER_PRESETS.find(preset => preset.id === 'recommended');
+            Object.assign(config, recommended.values, { midjourneyPreset: recommended.id });
+        }
+        config.count = 1;
+        config.concurrency = 1;
+        config.resolutionTier = MIDJOURNEY_RESOLUTION_TIERS.includes(config.resolutionTier)
+            ? config.resolutionTier
+            : '2K';
+        config.midjourneyVersion = MIDJOURNEY_VERSION_OPTIONS.some(option => option.value === config.midjourneyVersion)
+            ? config.midjourneyVersion
+            : '8.2';
+        config.midjourneyRaw = config.midjourneyRaw === true;
+        const normalizedNumber = (value, min, max, fallback) => {
+            const number = Number(value);
+            return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+        };
+        config.midjourneyStylize = normalizedNumber(config.midjourneyStylize, 0, 1000, 200);
+        config.midjourneyChaos = normalizedNumber(config.midjourneyChaos, 0, 100, 10);
+        config.midjourneyWeird = normalizedNumber(config.midjourneyWeird, 0, 3000, 0);
+        config.midjourneyQuality = ['default', '1', '2', '4'].includes(String(config.midjourneyQuality))
+            ? String(config.midjourneyQuality)
+            : 'default';
+        const imageWeightMax = config.midjourneyVersion === 'niji-7' ? 2 : 3;
+        config.midjourneyImageWeight = normalizedNumber(config.midjourneyImageWeight, 0, imageWeightMax, 1.5);
+        config.midjourneyStyleWeight = normalizedNumber(config.midjourneyStyleWeight, 0, 1000, 200);
+        config.midjourneyStyleVersion = ['', '1', '2', '3', '4', '5', '6'].includes(String(config.midjourneyStyleVersion ?? ''))
+            ? String(config.midjourneyStyleVersion ?? '')
+            : '6';
+        config.midjourneyOmniWeight = normalizedNumber(config.midjourneyOmniWeight, 1, 1000, 300);
+        const seed = String(config.midjourneySeed ?? '').trim();
+        config.midjourneySeed = seed === '' ? '' : Math.round(normalizedNumber(seed, 0, 4294967295, 0));
+        config.midjourneyRepeat = Math.round(normalizedNumber(config.midjourneyRepeat, 1, 4, 1));
+        config.midjourneyTile = config.midjourneyTile === true;
+        config.midjourneyDraft = config.midjourneyDraft === true;
+        config.midjourneySpeed = ['', 'fast', 'relax', 'turbo'].includes(config.midjourneySpeed)
+            ? config.midjourneySpeed
+            : '';
+        config.midjourneyVisibility = ['', 'public', 'stealth'].includes(config.midjourneyVisibility)
+            ? config.midjourneyVisibility
+            : '';
+        config.midjourneyProfile = String(config.midjourneyProfile || '').trim();
+        config.midjourneyStyleReference = String(config.midjourneyStyleReference || '').trim();
+        config.midjourneyOmniReference = String(config.midjourneyOmniReference || '').trim();
+        if (config.midjourneyDraft && !config.midjourneyOmniReference) {
+            config.midjourneyVersion = '7';
+            config.resolutionTier = '1K';
+            config.midjourneyQuality = 'default';
+        }
+        if (config.midjourneyRepeat > 1 && config.midjourneySpeed === 'relax') {
+            config.midjourneySpeed = 'fast';
+        }
+        if (config.midjourneyOmniReference) {
+            config.midjourneyVersion = '7';
+            config.resolutionTier = '1K';
+            if (config.midjourneyQuality === '4') config.midjourneyQuality = '2';
+            config.midjourneyDraft = false;
+            if (['fast', 'turbo'].includes(config.midjourneySpeed)) config.midjourneySpeed = '';
+        }
+        const presetIds = new Set(MIDJOURNEY_PARAMETER_PRESETS.map(preset => preset.id));
+        if (!presetIds.has(config.midjourneyPreset) && config.midjourneyPreset !== 'custom') {
+            config.midjourneyPreset = hadMidjourneySettings ? 'custom' : 'recommended';
+        }
+        return true;
+    }
+
+    _appendMidjourneyParameterControls(host, data, commit) {
+        if (!this._normalizeMidjourneyImageConfig(data)) return;
+        const config = data.config;
+        const controlSyncs = [];
+        let syncPresetButtons = () => {};
+        const markCustom = () => {
+            config.midjourneyPreset = 'custom';
+            syncPresetButtons();
+        };
+        const addChoices = (label, key, choices, description = '') => {
+            const section = document.createElement('div');
+            section.className = 'midjourney-setting-section';
+            const title = document.createElement('span');
+            title.className = 'midjourney-setting-title';
+            title.textContent = label;
+            if (description) title.title = description;
+            const help = description ? document.createElement('span') : null;
+            if (help) {
+                help.className = 'midjourney-setting-help';
+                help.textContent = description;
+            }
+            const options = document.createElement('div');
+            options.className = 'midjourney-option-grid';
+            choices.forEach(choice => {
+                const value = typeof choice === 'object' ? choice.value : choice;
+                const shown = typeof choice === 'object' ? choice.label : String(choice);
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = shown;
+                button.addEventListener('click', () => {
+                    config[key] = value;
+                    markCustom();
+                    this._normalizeMidjourneyImageConfig(data);
+                    controlSyncs.forEach(controlSync => controlSync());
+                    const panel = host.closest('.op-node-quick-menu, .generation-composer-image-settings-popover');
+                    panel?.querySelectorAll('[data-quality] button, .op-quality-options button').forEach(candidate => {
+                        candidate.classList.toggle('selected', candidate.textContent === config.resolutionTier);
+                    });
+                    commit();
+                });
+                options.appendChild(button);
+            });
+            const sync = () => {
+                options.querySelectorAll('button').forEach((button, index) => {
+                    const choice = choices[index];
+                    const value = typeof choice === 'object' ? choice.value : choice;
+                    button.classList.toggle('selected', String(config[key] ?? '') === String(value));
+                });
+            };
+            controlSyncs.push(sync);
+            sync();
+            section.append(title);
+            if (help) section.append(help);
+            section.append(options);
+            host.appendChild(section);
+        };
+        const addRange = (label, key, min, max, step, description = '') => {
+            const section = document.createElement('label');
+            section.className = 'midjourney-setting-section midjourney-range-setting';
+            const heading = document.createElement('span');
+            heading.className = 'midjourney-range-heading';
+            const title = document.createElement('span');
+            title.textContent = label;
+            if (description) title.title = description;
+            const output = document.createElement('output');
+            output.textContent = String(config[key]);
+            heading.append(title, output);
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.min = String(min);
+            input.max = String(max);
+            input.step = String(step);
+            input.value = String(config[key]);
+            input.setAttribute('aria-label', label);
+            input.addEventListener('input', () => {
+                config[key] = Number(input.value);
+                output.textContent = input.value;
+                markCustom();
+            });
+            input.addEventListener('change', commit);
+            const sync = () => {
+                input.value = String(config[key]);
+                output.textContent = String(config[key]);
+            };
+            controlSyncs.push(sync);
+            section.append(heading);
+            if (description) {
+                const help = document.createElement('span');
+                help.className = 'midjourney-setting-help';
+                help.textContent = description;
+                section.append(help);
+            }
+            section.append(input);
+            host.appendChild(section);
+        };
+        const addText = (label, key, placeholder, description = '', inputOptions = {}) => {
+            const section = document.createElement('label');
+            section.className = 'midjourney-setting-section midjourney-text-setting';
+            const title = document.createElement('span');
+            title.className = 'midjourney-setting-title';
+            title.textContent = label;
+            if (description) title.title = description;
+            const input = document.createElement('input');
+            input.type = inputOptions.type || 'text';
+            if (inputOptions.min != null) input.min = String(inputOptions.min);
+            if (inputOptions.max != null) input.max = String(inputOptions.max);
+            if (inputOptions.step != null) input.step = String(inputOptions.step);
+            input.value = String(config[key] ?? '');
+            input.placeholder = placeholder;
+            input.setAttribute('aria-label', label);
+            input.addEventListener('change', () => {
+                const value = input.value.trim();
+                config[key] = input.type === 'number' && value !== '' ? Number(value) : value;
+                markCustom();
+                this._normalizeMidjourneyImageConfig(data);
+                controlSyncs.forEach(sync => sync());
+                const panel = host.closest('.op-node-quick-menu, .generation-composer-image-settings-popover');
+                panel?.querySelectorAll('[data-quality] button, .op-quality-options button').forEach(candidate => {
+                    candidate.classList.toggle('selected', candidate.textContent === config.resolutionTier);
+                });
+                commit();
+            });
+            const sync = () => {
+                input.value = String(config[key] ?? '');
+            };
+            controlSyncs.push(sync);
+            section.append(title);
+            if (description) {
+                const help = document.createElement('span');
+                help.className = 'midjourney-setting-help';
+                help.textContent = description;
+                section.append(help);
+            }
+            section.append(input);
+            host.appendChild(section);
+        };
+
+        const presetSection = document.createElement('div');
+        presetSection.className = 'midjourney-setting-section midjourney-preset-section';
+        const presetTitle = document.createElement('span');
+        presetTitle.className = 'midjourney-setting-title';
+        presetTitle.textContent = '参数预设';
+        const presetGrid = document.createElement('div');
+        presetGrid.className = 'midjourney-preset-grid';
+        MIDJOURNEY_PARAMETER_PRESETS.forEach(preset => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = preset.label;
+            button.title = preset.description;
+            button.dataset.preset = preset.id;
+            button.addEventListener('click', () => {
+                Object.assign(config, preset.values, { midjourneyPreset: preset.id });
+                this._normalizeMidjourneyImageConfig(data);
+                controlSyncs.forEach(sync => sync());
+                const panel = host.closest('.op-node-quick-menu, .generation-composer-image-settings-popover');
+                panel?.querySelectorAll('[data-quality] button, .op-quality-options button').forEach(candidate => {
+                    candidate.classList.toggle('selected', candidate.textContent === config.resolutionTier);
+                });
+                commit();
+            });
+            presetGrid.appendChild(button);
+        });
+        syncPresetButtons = () => {
+            presetGrid.querySelectorAll('button').forEach(button => {
+                button.classList.toggle('selected', button.dataset.preset === config.midjourneyPreset);
+            });
+        };
+        controlSyncs.push(syncPresetButtons);
+        syncPresetButtons();
+        presetSection.append(presetTitle, presetGrid);
+        host.appendChild(presetSection);
+
+        addChoices('模型版本', 'midjourneyVersion', MIDJOURNEY_VERSION_OPTIONS);
+        addChoices('原生模式（Raw）', 'midjourneyRaw', [
+            { value: false, label: '关闭' },
+            { value: true, label: '开启' }
+        ], '减少模型默认美化，更贴近提示词本身');
+        addChoices('生成质量（Quality）', 'midjourneyQuality', [
+            { value: 'default', label: '默认' },
+            { value: '1', label: '1' },
+            { value: '2', label: '2' },
+            { value: '4', label: '4' }
+        ], '控制渲染投入；数值越高，通常耗时也越长');
+        addRange('风格化（Stylize）', 'midjourneyStylize', 0, 1000, 10, '控制 Midjourney 默认审美的介入程度');
+        addRange('变化度（Chaos）', 'midjourneyChaos', 0, 100, 1, '控制同批结果之间的差异幅度');
+        addRange('奇异度（Weird）', 'midjourneyWeird', 0, 3000, 10, '增加非常规和实验性的视觉结果');
+        addRange('图片权重（Image Weight）', 'midjourneyImageWeight', 0, config.midjourneyVersion === 'niji-7' ? 2 : 3, 0.1, '控制画布参考图对构图和内容的影响');
+        addText('随机种子（Seed）', 'midjourneySeed', '留空则每次随机', '固定初始噪声，便于对照测试；不是风格保存功能', {
+            type: 'number', min: 0, max: 4294967295, step: 1
+        });
+        addChoices('无缝纹理（Tile）', 'midjourneyTile', [
+            { value: false, label: '关闭' },
+            { value: true, label: '开启' }
+        ], '生成可以连续平铺的图案');
+        addChoices('重复组数（Repeat）', 'midjourneyRepeat', [1, 2, 3, 4], '每组会返回一套四宫格；仅 Fast 或 Turbo 可用');
+        addChoices('GPU 速度', 'midjourneySpeed', [
+            { value: '', label: '接口默认' },
+            { value: 'fast', label: '快速' },
+            { value: 'relax', label: '宽松' },
+            { value: 'turbo', label: '极速' }
+        ], 'V8.1 不支持 Turbo；Repeat 不支持 Relax');
+        addChoices('草稿模式（Draft）', 'midjourneyDraft', [
+            { value: false, label: '关闭' },
+            { value: true, label: '开启' }
+        ], 'API 路径只在 V7 编译该参数；V8 草稿目前仅支持官网');
+        addChoices('作品可见性', 'midjourneyVisibility', [
+            { value: '', label: '账号默认' },
+            { value: 'public', label: '公开' },
+            { value: 'stealth', label: '隐私' }
+        ], '隐私模式需要对应 Midjourney 订阅权限');
+        addText('个性化配置（Profile）', 'midjourneyProfile', 'Profile ID', '填写 Midjourney 个性化配置 ID');
+        addText('风格参考（Style Reference）', 'midjourneyStyleReference', '风格代码或公网图片 URL', '支持多个代码或 URL，用空格分隔');
+        addRange('风格权重（Style Weight）', 'midjourneyStyleWeight', 0, 1000, 10, '仅填写 Style Reference 后生效');
+        addChoices('风格版本（Style Version）', 'midjourneyStyleVersion', [
+            { value: '', label: '接口默认' }, '1', '2', '3', '4', '5', '6'
+        ], 'V7 默认 6；旧风格代码通常使用 4');
+        addText('全能参考（Omni Reference）', 'midjourneyOmniReference', '一张公网图片 URL', '填写后自动使用 V7，并忽略不兼容的 Q4、Draft、Fast 和 Turbo');
+        addRange('全能权重（Omni Weight）', 'midjourneyOmniWeight', 1, 1000, 10, '官方建议通常低于 400；仅填写 Omni Reference 后生效');
+        addText('排除内容（--no）', 'negativePrompt', '例如：文字、水印、边框');
+    }
+
     _opParameterSummary(data) {
         if (data.nodeType === 'image') {
             const width = Math.max(1, Number(data.config?.width) || 1024);
             const height = Math.max(1, Number(data.config?.height) || 1024);
             const tier = data.config?.resolutionTier || inferImageResolutionTier(width, height);
             const ratio = data.config?.ratio || inferImageAspectRatio(width, height);
+            if (this._isMidjourneyImageData(data)) {
+                const version = MIDJOURNEY_VERSION_OPTIONS.find(option => option.value === data.config?.midjourneyVersion)?.label;
+                return `${ratio === 'adaptive' ? '自适应' : ratio} · ${tier}${version && version !== '接口默认' ? ` · ${version}` : ''}`;
+            }
             return `${ratio === 'adaptive' ? '自适应' : ratio} · ${tier}`;
         }
         if (data.nodeType === 'video') {
@@ -5521,6 +6413,7 @@ export class CanvasManager {
                     data.config.sourceProviderId = provider.sourceProviderId || provider.id;
                     data.config.model = provider.model || '';
                     data.model = data.config.model;
+                    if (data.nodeType === 'image') this._normalizeMidjourneyImageConfig(data);
                     if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
                     this.refreshOpNode(nodeId);
                     this.emit('change');
@@ -5584,7 +6477,11 @@ export class CanvasManager {
         if (data.nodeType === 'image') {
             const initialWidth = Math.max(64, Number(data.config.width) || 1024);
             const initialHeight = Math.max(64, Number(data.config.height) || 1024);
-            data.config.resolutionTier = IMAGE_RESOLUTION_TIERS.includes(data.config.resolutionTier)
+            const midjourney = this._normalizeMidjourneyImageConfig(data);
+            const resolutionTiers = midjourney ? MIDJOURNEY_RESOLUTION_TIERS : IMAGE_RESOLUTION_TIERS;
+            let widthInput = null;
+            let heightInput = null;
+            data.config.resolutionTier = resolutionTiers.includes(data.config.resolutionTier)
                 ? data.config.resolutionTier
                 : inferImageResolutionTier(initialWidth, initialHeight);
             data.config.ratio = IMAGE_ASPECT_RATIOS.includes(data.config.ratio)
@@ -5609,7 +6506,7 @@ export class CanvasManager {
             qualitySection.className = 'op-quick-section';
             qualitySection.innerHTML = '<span class="op-quick-section-title">画质</span><div class="op-parameter-options op-quality-options"></div>';
             const qualityOptions = qualitySection.querySelector('.op-parameter-options');
-            IMAGE_RESOLUTION_TIERS.forEach(tier => {
+            resolutionTiers.forEach(tier => {
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.textContent = tier;
@@ -5618,8 +6515,8 @@ export class CanvasManager {
                     data.config.resolutionTier = tier;
                     applyImageProfile();
                     qualityOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
-                    widthInput.value = String(data.config.width);
-                    heightInput.value = String(data.config.height);
+                    if (widthInput) widthInput.value = String(data.config.width);
+                    if (heightInput) heightInput.value = String(data.config.height);
                     commit();
                 });
                 qualityOptions.appendChild(button);
@@ -5639,63 +6536,67 @@ export class CanvasManager {
                     data.config.ratio = ratio;
                     applyImageProfile();
                     ratioOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
-                    widthInput.value = String(data.config.width);
-                    heightInput.value = String(data.config.height);
+                    if (widthInput) widthInput.value = String(data.config.width);
+                    if (heightInput) heightInput.value = String(data.config.height);
                     commit();
                 });
                 ratioOptions.appendChild(button);
             });
             sections.appendChild(ratioSection);
 
-            const searchSection = document.createElement('div');
-            searchSection.className = 'op-quick-section';
-            searchSection.innerHTML = '<span class="op-quick-section-title">联网搜索</span><div class="op-parameter-options op-binary-options"></div>';
-            const searchOptions = searchSection.querySelector('.op-parameter-options');
-            [true, false].forEach(enabled => {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.textContent = enabled ? 'ON' : 'OFF';
-                button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
-                button.addEventListener('click', () => {
-                    data.config.webSearch = enabled;
-                    searchOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
-                    commit();
+            if (midjourney) {
+                this._appendMidjourneyParameterControls(sections, data, commit);
+            } else {
+                const searchSection = document.createElement('div');
+                searchSection.className = 'op-quick-section';
+                searchSection.innerHTML = '<span class="op-quick-section-title">联网搜索</span><div class="op-parameter-options op-binary-options"></div>';
+                const searchOptions = searchSection.querySelector('.op-parameter-options');
+                [true, false].forEach(enabled => {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.textContent = enabled ? 'ON' : 'OFF';
+                    button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
+                    button.addEventListener('click', () => {
+                        data.config.webSearch = enabled;
+                        searchOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                        commit();
+                    });
+                    searchOptions.appendChild(button);
                 });
-                searchOptions.appendChild(button);
-            });
-            sections.appendChild(searchSection);
+                sections.appendChild(searchSection);
 
-            const section = document.createElement('div');
-            section.className = 'op-quick-section op-exact-dimensions';
-            section.innerHTML = '<span class="op-quick-section-title">精确尺寸</span>';
-            const dimensions = document.createElement('div');
-            dimensions.className = 'op-dimension-inputs';
-            const widthInput = document.createElement('input');
-            const heightInput = document.createElement('input');
-            [widthInput, heightInput].forEach(input => {
-                input.type = 'number';
-                input.min = '64';
-                input.max = '8192';
-                input.step = '64';
-            });
-            widthInput.value = String(Number(data.config.width) || 1024);
-            heightInput.value = String(Number(data.config.height) || 1024);
-            widthInput.setAttribute('aria-label', '图片宽度');
-            heightInput.setAttribute('aria-label', '图片高度');
-            const applyDimensions = () => {
-                data.config.width = Math.max(64, Math.min(8192, Number(widthInput.value) || 1024));
-                data.config.height = Math.max(64, Math.min(8192, Number(heightInput.value) || 1024));
-                data.config.resolutionTier = inferImageResolutionTier(data.config.width, data.config.height);
-                data.config.ratio = inferImageAspectRatio(data.config.width, data.config.height);
-                widthInput.value = String(data.config.width);
-                heightInput.value = String(data.config.height);
-                commit();
-            };
-            widthInput.addEventListener('change', applyDimensions);
-            heightInput.addEventListener('change', applyDimensions);
-            dimensions.append(widthInput, document.createTextNode('×'), heightInput);
-            section.appendChild(dimensions);
-            sections.appendChild(section);
+                const section = document.createElement('div');
+                section.className = 'op-quick-section op-exact-dimensions';
+                section.innerHTML = '<span class="op-quick-section-title">精确尺寸</span>';
+                const dimensions = document.createElement('div');
+                dimensions.className = 'op-dimension-inputs';
+                widthInput = document.createElement('input');
+                heightInput = document.createElement('input');
+                [widthInput, heightInput].forEach(input => {
+                    input.type = 'number';
+                    input.min = '64';
+                    input.max = '8192';
+                    input.step = '64';
+                });
+                widthInput.value = String(Number(data.config.width) || 1024);
+                heightInput.value = String(Number(data.config.height) || 1024);
+                widthInput.setAttribute('aria-label', '图片宽度');
+                heightInput.setAttribute('aria-label', '图片高度');
+                const applyDimensions = () => {
+                    data.config.width = Math.max(64, Math.min(8192, Number(widthInput.value) || 1024));
+                    data.config.height = Math.max(64, Math.min(8192, Number(heightInput.value) || 1024));
+                    data.config.resolutionTier = inferImageResolutionTier(data.config.width, data.config.height);
+                    data.config.ratio = inferImageAspectRatio(data.config.width, data.config.height);
+                    widthInput.value = String(data.config.width);
+                    heightInput.value = String(data.config.height);
+                    commit();
+                };
+                widthInput.addEventListener('change', applyDimensions);
+                heightInput.addEventListener('change', applyDimensions);
+                dimensions.append(widthInput, document.createTextNode('×'), heightInput);
+                section.appendChild(dimensions);
+                sections.appendChild(section);
+            }
         } else {
             const profile = this._normalizeVideoConfigForProfile(data.config);
             addChoices('画面比例', 'ratio', profile?.ratios || [], value => value === 'adaptive' ? '自适应' : value);
@@ -5780,6 +6681,22 @@ export class CanvasManager {
         const data = this.items.get(nodeId)?.data;
         if (!data || !['image', 'video'].includes(data.nodeType)) return;
         data.config = data.config || {};
+        if (this._normalizeMidjourneyImageConfig(data)) {
+            const menu = document.createElement('section');
+            menu.className = 'op-node-quick-menu op-node-count-menu';
+            menu.setAttribute('role', 'dialog');
+            menu.setAttribute('aria-label', 'Midjourney 候选数量');
+            menu.innerHTML = `
+                <div class="op-quick-menu-head">
+                    <strong>候选数量</strong>
+                    <button type="button" data-close title="关闭" aria-label="关闭">×</button>
+                </div>
+                <div class="op-quick-empty">一次 MJ 请求固定返回 4 张候选图，不会额外发起 4 次生成。</div>
+            `;
+            menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
+            this._mountOpQuickMenu(menu, nodeId, event);
+            return;
+        }
         const menu = document.createElement('section');
         menu.className = 'op-node-quick-menu op-node-count-menu';
         menu.setAttribute('role', 'dialog');
@@ -6096,8 +7013,13 @@ export class CanvasManager {
             textarea.placeholder = '输入 Prompt 文本';
             textarea.spellcheck = false;
             textarea.setAttribute('aria-label', 'Prompt 文本');
-            this.opInlineLayer.appendChild(textarea);
-            editor = { element: textarea };
+            const resizeHandle = document.createElement('button');
+            resizeHandle.type = 'button';
+            resizeHandle.className = 'op-text-node-resize-handle';
+            resizeHandle.title = '拖动调整文本框大小';
+            resizeHandle.setAttribute('aria-label', '调整文本框大小');
+            this.opInlineLayer.append(textarea, resizeHandle);
+            editor = { element: textarea, resizeHandle };
             this._textNodeEditors.set(nodeId, editor);
 
             ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
@@ -6129,6 +7051,28 @@ export class CanvasManager {
                 this._textNodeChangeTimers.delete(nodeId);
                 if (this.items.has(nodeId)) this.emit('change');
             });
+            ['pointerdown', 'mousedown', 'click', 'dblclick'].forEach(type => {
+                resizeHandle.addEventListener(type, inputEvent => inputEvent.stopPropagation());
+            });
+            resizeHandle.addEventListener('pointerdown', inputEvent => {
+                this._startPersistentTextNodeResize(nodeId, inputEvent);
+            });
+            resizeHandle.addEventListener('keydown', keyEvent => {
+                const step = keyEvent.shiftKey ? 40 : 16;
+                const deltaWidth = keyEvent.key === 'ArrowRight' ? step : keyEvent.key === 'ArrowLeft' ? -step : 0;
+                const deltaHeight = keyEvent.key === 'ArrowDown' ? step : keyEvent.key === 'ArrowUp' ? -step : 0;
+                if (!deltaWidth && !deltaHeight) return;
+                keyEvent.preventDefault();
+                keyEvent.stopPropagation();
+                const current = this.items.get(nodeId)?.data;
+                if (!current) return;
+                this._resizePersistentTextNode(
+                    nodeId,
+                    (Number(current.width) || OP_NODE_WIDTH) + deltaWidth,
+                    (Number(current.height) || OP_NODE_HEIGHTS.text) + deltaHeight,
+                    { commit: true }
+                );
+            });
         }
 
         const nextValue = String(entry.data.config.text || '');
@@ -6144,20 +7088,93 @@ export class CanvasManager {
         const scale = this.stage.scaleX();
         const visible = isCanvasTextContentVisible(scale);
         editor.element.hidden = !visible;
+        if (editor.resizeHandle) editor.resizeHandle.hidden = !visible;
         editor.element.setAttribute('aria-hidden', visible ? 'false' : 'true');
         editor.element.tabIndex = visible ? 0 : -1;
+        if (editor.resizeHandle) editor.resizeHandle.tabIndex = visible ? 0 : -1;
         if (!visible) return;
         const data = entry.data;
         const width = Number(data.width) || OP_NODE_WIDTH;
         const height = Number(data.height) || OP_NODE_HEIGHT;
         const footerY = height;
+        const left = this.stage.x() + (entry.group.x() + 11) * scale;
+        const top = this.stage.y() + (entry.group.y() + this._opPromptTop(data) - 2) * scale;
+        const editorWidth = Math.max(120, (width - 22) * scale);
+        const editorHeight = Math.max(58, (footerY - this._opPromptTop(data) - 4) * scale);
         Object.assign(editor.element.style, {
-            left: `${this.stage.x() + (entry.group.x() + 11) * scale}px`,
-            top: `${this.stage.y() + (entry.group.y() + this._opPromptTop(data) - 2) * scale}px`,
-            width: `${Math.max(120, (width - 22) * scale)}px`,
-            height: `${Math.max(58, (footerY - this._opPromptTop(data) - 4) * scale)}px`,
+            left: `${left}px`,
+            top: `${top}px`,
+            width: `${editorWidth}px`,
+            height: `${editorHeight}px`,
             fontSize: `${Math.max(11, Math.min(20, 13 * scale))}px`
         });
+        if (editor.resizeHandle) {
+            const nodeRight = this.stage.x() + (entry.group.x() + width) * scale;
+            const nodeBottom = this.stage.y() + (entry.group.y() + height) * scale;
+            Object.assign(editor.resizeHandle.style, {
+                left: `${nodeRight - 8}px`,
+                top: `${nodeBottom - 8}px`
+            });
+        }
+    }
+
+    _resizePersistentTextNode(nodeId, width, height, { commit = false } = {}) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.nodeType !== 'text') return false;
+        const nextWidth = Math.round(Math.max(TEXT_NODE_MIN_WIDTH, Math.min(TEXT_NODE_MAX_WIDTH, Number(width) || TEXT_NODE_MIN_WIDTH)));
+        const nextHeight = Math.round(Math.max(TEXT_NODE_MIN_HEIGHT, Math.min(TEXT_NODE_MAX_HEIGHT, Number(height) || TEXT_NODE_MIN_HEIGHT)));
+        if (nextWidth === Number(entry.data.width) && nextHeight === Number(entry.data.height)) return false;
+        entry.data.width = nextWidth;
+        entry.data.height = nextHeight;
+        this.refreshOpNode(nodeId);
+        if (commit) {
+            this.graphView?.sync();
+            this._refreshCanvasBoundary();
+            this.emit('change');
+        }
+        return true;
+    }
+
+    _startPersistentTextNodeResize(nodeId, event) {
+        if (event.button !== 0) return;
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.nodeType !== 'text') return;
+        event.preventDefault();
+        event.stopPropagation();
+        this._activeTextNodeResizeStop?.();
+        this.selectItem(nodeId, event.ctrlKey || event.metaKey || event.shiftKey);
+
+        const scale = Math.max(0.01, this.stage.scaleX() || 1);
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const startWidth = Number(entry.data.width) || OP_NODE_WIDTH;
+        const startHeight = Number(entry.data.height) || OP_NODE_HEIGHTS.text;
+        let changed = false;
+        const move = moveEvent => {
+            changed = this._resizePersistentTextNode(
+                nodeId,
+                startWidth + (moveEvent.clientX - startX) / scale,
+                startHeight + (moveEvent.clientY - startY) / scale
+            ) || changed;
+        };
+        const stop = () => {
+            window.removeEventListener('pointermove', move, true);
+            window.removeEventListener('pointerup', stop, true);
+            window.removeEventListener('pointercancel', stop, true);
+            window.removeEventListener('blur', stop);
+            document.body.classList.remove('text-node-resizing');
+            this._activeTextNodeResizeStop = null;
+            if (!changed) return;
+            this.graphView?.sync();
+            this._refreshCanvasBoundary();
+            this.emit('change');
+        };
+        this._activeTextNodeResizeStop = stop;
+        document.body.classList.add('text-node-resizing');
+        window.addEventListener('pointermove', move, true);
+        window.addEventListener('pointerup', stop, true);
+        window.addEventListener('pointercancel', stop, true);
+        window.addEventListener('blur', stop);
     }
 
     _syncPersistentTextEditors() {
@@ -6175,12 +7192,18 @@ export class CanvasManager {
     _removePersistentTextEditor(nodeId) {
         clearTimeout(this._textNodeChangeTimers.get(nodeId));
         this._textNodeChangeTimers.delete(nodeId);
-        this._textNodeEditors.get(nodeId)?.element?.remove();
+        const editor = this._textNodeEditors.get(nodeId);
+        editor?.element?.remove();
+        editor?.resizeHandle?.remove();
         this._textNodeEditors.delete(nodeId);
     }
 
     _removeAllPersistentTextEditors() {
-        this._textNodeEditors.forEach(editor => editor.element?.remove());
+        this._activeTextNodeResizeStop?.();
+        this._textNodeEditors.forEach(editor => {
+            editor.element?.remove();
+            editor.resizeHandle?.remove();
+        });
         this._textNodeEditors.clear();
         this._textNodeChangeTimers.forEach(timer => clearTimeout(timer));
         this._textNodeChangeTimers.clear();
@@ -6445,7 +7468,7 @@ export class CanvasManager {
             });
     }
 
-    openGenerationComposer(nodeId) {
+    openGenerationComposer(nodeId, options = {}) {
         const entry = this.items.get(nodeId);
         if (!entry?.data || entry.data.kind !== 'op' || !['image', 'video'].includes(entry.data.nodeType)) return;
         const { data } = entry;
@@ -6503,6 +7526,9 @@ export class CanvasManager {
 
         const active = {
             nodeId,
+            anchorNodeId: options.anchorNodeId || nodeId,
+            mediaSourceId: options.mediaSourceId || null,
+            focusPrompt: options.focusPrompt !== false,
             element: composer,
             changed: false,
             closeOutside: null,
@@ -6522,6 +7548,9 @@ export class CanvasManager {
         });
         prompt.addEventListener('input', () => {
             data.config.prompt = this._generationComposerPromptValue(prompt);
+            if (data.config.promptTemplate?.appliedPrompt !== data.config.prompt) {
+                delete data.config.promptTemplate;
+            }
             const previousCitationIds = Array.isArray(data.config.referenceCitationIds)
                 ? data.config.referenceCitationIds.join('\u0000')
                 : '';
@@ -6575,20 +7604,7 @@ export class CanvasManager {
             }
         });
 
-        const count = composer.querySelector('[data-count]');
-        for (let value = 1; value <= 8; value += 1) {
-            const option = document.createElement('option');
-            option.value = String(value);
-            option.textContent = `${value}×`;
-            count.appendChild(option);
-        }
-        count.value = String(Math.max(1, Math.min(8, Number(data.config.count) || 1)));
-        count.addEventListener('change', () => {
-            data.config.count = Number(count.value) || 1;
-            data.config.concurrency = Math.max(1, Math.min(data.config.count, data.nodeType === 'video' ? 2 : 3));
-            active.changed = true;
-            this.emit('change');
-        });
+        this._syncGenerationComposerCount(nodeId);
 
         composer.querySelector('[data-submit]').addEventListener('click', () => this._runGeneratorFromComposer(nodeId));
         active.closeOutside = event => {
@@ -6634,7 +7650,7 @@ export class CanvasManager {
         this._positionGenerationComposer();
         requestAnimationFrame(() => {
             this._positionGenerationComposer();
-            this._focusGenerationComposerPromptEnd(prompt);
+            if (active.focusPrompt) this._focusGenerationComposerPromptEnd(prompt);
         });
     }
 
@@ -6746,11 +7762,13 @@ export class CanvasManager {
             remove.title = '移除参考素材';
             remove.setAttribute('aria-label', '移除参考素材');
             remove.textContent = '×';
-            remove.addEventListener('click', event => {
-                event.stopPropagation();
-                this.graphView?.disconnect(connection.id);
-            });
-            tile.appendChild(remove);
+            if (!connection.transient) {
+                remove.addEventListener('click', event => {
+                    event.stopPropagation();
+                    this.graphView?.disconnect(connection.id);
+                });
+                tile.appendChild(remove);
+            }
             host.appendChild(tile);
         });
 
@@ -6762,6 +7780,7 @@ export class CanvasManager {
         add.innerHTML = '<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>';
         add.classList.toggle('active', this._activeNodeReferenceTargetId === nodeId);
         add.addEventListener('click', () => {
+            if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
             if (this._activeNodeReferenceTargetId === nodeId) this.endMediaReferencePick();
             else this.beginNodeReferencePick(nodeId);
             this._renderGenerationComposerReferences(nodeId);
@@ -7014,6 +8033,44 @@ export class CanvasManager {
         button.classList.toggle('is-empty', !selected && !data.config?.model);
     }
 
+    _syncGenerationComposerCount(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const select = active.element.querySelector('[data-count]');
+        const label = select?.closest('.generation-composer-count');
+        if (!select || !label) return;
+        const midjourney = this._normalizeMidjourneyImageConfig(data);
+        select.replaceChildren();
+        label.classList.toggle('is-midjourney', midjourney);
+        label.title = midjourney ? '一次请求返回 4 张候选' : '生成数量';
+        select.setAttribute('aria-label', label.title);
+        if (midjourney) {
+            const option = document.createElement('option');
+            option.value = '1';
+            option.textContent = '4候选';
+            select.appendChild(option);
+            select.value = '1';
+            select.disabled = true;
+            select.onchange = null;
+            return;
+        }
+        select.disabled = false;
+        for (let value = 1; value <= 8; value += 1) {
+            const option = document.createElement('option');
+            option.value = String(value);
+            option.textContent = `${value}×`;
+            select.appendChild(option);
+        }
+        select.value = String(Math.max(1, Math.min(8, Number(data.config.count) || 1)));
+        select.onchange = () => {
+            data.config.count = Number(select.value) || 1;
+            data.config.concurrency = Math.max(1, Math.min(data.config.count, data.nodeType === 'video' ? 2 : 3));
+            active.changed = true;
+            this.emit('change');
+        };
+    }
+
     _showGenerationComposerModelMenu(nodeId, anchor) {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
@@ -7073,11 +8130,13 @@ export class CanvasManager {
                     data.config.sourceProviderId = provider.sourceProviderId || provider.id;
                     data.config.model = provider.model || '';
                     data.model = data.config.model;
+                    if (data.nodeType === 'image') this._normalizeMidjourneyImageConfig(data);
                     if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
                     active.changed = true;
                     this._closeGenerationComposerPopover(active);
                     this._syncGenerationComposerModelButton(nodeId);
                     this._renderGenerationComposerParameters(nodeId);
+                    this._syncGenerationComposerCount(nodeId);
                     this.refreshOpNode(nodeId);
                     this.emit('change');
                 });
@@ -7090,15 +8149,147 @@ export class CanvasManager {
         search.focus({ preventScroll: true });
     }
 
+    _showGenerationComposerPromptLibrary(nodeId, anchor) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+
+        const pack = getPromptPack(DEFAULT_IMAGE_PROMPT_PACK_ID);
+        if (!pack) return;
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-prompt-library-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', '提示词模板库');
+        popover.innerHTML = `
+            <div class="generation-composer-prompt-library-head">
+                <div>
+                    <strong>提示词模板</strong>
+                    <small>${pack.name} · ${pack.templates.length}</small>
+                </div>
+                <span>本地</span>
+            </div>
+            <div class="generation-composer-prompt-library-filters">
+                <label class="generation-composer-popover-search">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                    <input type="search" autocomplete="off" placeholder="搜索模板、风格或场景" aria-label="搜索提示词模板">
+                </label>
+                <select aria-label="筛选模板分类" data-template-category></select>
+            </div>
+            <div class="generation-composer-prompt-library-count" aria-live="polite"></div>
+            <div class="generation-composer-prompt-library-list"></div>
+        `;
+        const search = popover.querySelector('input');
+        const category = popover.querySelector('[data-template-category]');
+        const count = popover.querySelector('.generation-composer-prompt-library-count');
+        const list = popover.querySelector('.generation-composer-prompt-library-list');
+        const allOption = document.createElement('option');
+        allOption.value = '';
+        allOption.textContent = '全部分类';
+        category.appendChild(allOption);
+        pack.categories.forEach(item => {
+            const option = document.createElement('option');
+            option.value = item.id;
+            option.textContent = item.name;
+            category.appendChild(option);
+        });
+
+        const applyTemplate = (template, mode) => {
+            const promptElement = active.element.querySelector('[data-prompt]');
+            const currentPrompt = this._generationComposerPromptValue(promptElement);
+            const previous = data.config.promptTemplate;
+            const basePrompt = mode === 'enhance' && previous?.appliedPrompt === currentPrompt
+                ? previous.basePrompt
+                : currentPrompt;
+            const nextPrompt = composePromptFromTemplate(template, basePrompt, mode);
+            data.config.prompt = nextPrompt;
+            data.config.promptTemplate = {
+                packId: pack.id,
+                packVersion: pack.version,
+                templateId: template.id,
+                mode,
+                basePrompt: mode === 'enhance' ? basePrompt : '',
+                appliedPrompt: nextPrompt
+            };
+            this._setGenerationComposerPromptValue(promptElement, nextPrompt);
+            this._syncGenerationComposerCitationsFromPrompt(data, promptElement);
+            active.changed = true;
+            anchor.title = `当前模板：${template.name}`;
+            anchor.classList.add('has-template');
+            this._closeGenerationComposerPopover(active);
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            this._showCanvasStatus(mode === 'enhance' ? `已用“${template.name}”增强提示词` : `已写入“${template.name}”模板`);
+            this._focusGenerationComposerPromptEnd(promptElement);
+        };
+
+        const render = () => {
+            const matches = findPromptTemplates(pack.id, {
+                query: search.value,
+                category: category.value
+            });
+            count.textContent = `${matches.length} 个模板`;
+            list.replaceChildren();
+            if (!matches.length) {
+                const empty = document.createElement('div');
+                empty.className = 'generation-composer-popover-empty';
+                empty.textContent = '没有匹配的模板';
+                list.appendChild(empty);
+                return;
+            }
+            matches.forEach(template => {
+                const card = document.createElement('article');
+                card.className = 'generation-composer-prompt-template';
+                const heading = document.createElement('div');
+                heading.className = 'generation-composer-prompt-template-heading';
+                const title = document.createElement('strong');
+                title.textContent = template.name;
+                const categoryLabel = document.createElement('span');
+                categoryLabel.textContent = template.categoryName;
+                heading.append(title, categoryLabel);
+                const summary = document.createElement('p');
+                summary.textContent = template.summary;
+                const tags = document.createElement('div');
+                tags.className = 'generation-composer-prompt-template-tags';
+                [...new Set([...(template.styles || []), ...(template.scenes || [])])].slice(0, 3).forEach(value => {
+                    const tag = document.createElement('span');
+                    tag.textContent = value;
+                    tags.appendChild(tag);
+                });
+                const actions = document.createElement('div');
+                actions.className = 'generation-composer-prompt-template-actions';
+                const write = document.createElement('button');
+                write.type = 'button';
+                write.textContent = '写入结构';
+                write.addEventListener('click', () => applyTemplate(template, 'template'));
+                const enhance = document.createElement('button');
+                enhance.type = 'button';
+                enhance.className = 'primary';
+                enhance.textContent = '增强当前';
+                enhance.addEventListener('click', () => applyTemplate(template, 'enhance'));
+                actions.append(write, enhance);
+                card.append(heading, summary, tags, actions);
+                list.appendChild(card);
+            });
+            this._positionGenerationComposerPopover(active);
+        };
+        search.addEventListener('input', render);
+        category.addEventListener('change', render);
+        render();
+        this._mountGenerationComposerPopover(active, popover, anchor);
+        search.focus({ preventScroll: true });
+    }
+
     _syncGenerationComposerImageButtons(nodeId) {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
         if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
         const parameterLabel = active.element.querySelector('[data-image-settings-label]');
-        const styleLabel = active.element.querySelector('[data-image-style-label]');
         const cameraLabel = active.element.querySelector('[data-image-camera-label]');
         if (parameterLabel) parameterLabel.textContent = this._opParameterSummary(data);
-        if (styleLabel) styleLabel.textContent = data.config?.style || '风格';
         if (cameraLabel) cameraLabel.textContent = data.config?.cameraControl || '摄影机控制';
     }
 
@@ -7170,10 +8361,15 @@ export class CanvasManager {
             this._closeGenerationComposerPopover(active);
             return;
         }
+        const midjourney = this._normalizeMidjourneyImageConfig(data);
         const profile = this.options.getImageModelProfile?.(data.config) || null;
-        const availableTiers = profile?.resolutionTiers?.length
+        const profileTiers = profile?.resolutionTiers?.length
             ? profile.resolutionTiers
             : IMAGE_RESOLUTION_TIERS;
+        const compatibleMidjourneyTiers = MIDJOURNEY_RESOLUTION_TIERS.filter(tier => profileTiers.includes(tier));
+        const availableTiers = midjourney
+            ? (compatibleMidjourneyTiers.length ? compatibleMidjourneyTiers : MIDJOURNEY_RESOLUTION_TIERS)
+            : profileTiers;
         const popover = document.createElement('section');
         popover.className = 'generation-composer-popover generation-composer-image-settings-popover';
         popover.setAttribute('role', 'dialog');
@@ -7187,10 +8383,12 @@ export class CanvasManager {
                 <div class="generation-composer-setting-title">比例</div>
                 <div class="generation-composer-ratio-grid" data-ratios role="group" aria-label="画面比例"></div>
             </div>
-            <div class="generation-composer-setting-section">
-                <div class="generation-composer-setting-title">联网搜索</div>
-                <div class="generation-composer-segmented" data-web-search role="group" aria-label="联网搜索"></div>
-            </div>
+            ${midjourney ? '<div class="generation-composer-midjourney-settings" data-midjourney-settings></div>' : `
+                <div class="generation-composer-setting-section">
+                    <div class="generation-composer-setting-title">联网搜索</div>
+                    <div class="generation-composer-segmented" data-web-search role="group" aria-label="联网搜索"></div>
+                </div>
+            `}
         `;
         const commitImageProfile = () => {
             const reference = this._opReferenceEntries(data)[0]?.source;
@@ -7205,7 +8403,7 @@ export class CanvasManager {
             this.emit('change');
         };
         const qualityHost = popover.querySelector('[data-quality]');
-        IMAGE_RESOLUTION_TIERS.forEach(tier => {
+        (midjourney ? MIDJOURNEY_RESOLUTION_TIERS : IMAGE_RESOLUTION_TIERS).forEach(tier => {
             const button = document.createElement('button');
             button.type = 'button';
             button.textContent = tier;
@@ -7247,29 +8445,32 @@ export class CanvasManager {
             ratioHost.appendChild(button);
         });
         const searchHost = popover.querySelector('[data-web-search]');
-        [true, false].forEach(enabled => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.textContent = enabled ? 'ON' : 'OFF';
-            button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
-            button.addEventListener('click', () => {
-                data.config.webSearch = enabled;
-                searchHost.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+        if (searchHost) {
+            [true, false].forEach(enabled => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = enabled ? 'ON' : 'OFF';
+                button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
+                button.addEventListener('click', () => {
+                    data.config.webSearch = enabled;
+                    searchHost.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                    active.changed = true;
+                    this.refreshOpNode(nodeId);
+                    this.emit('change');
+                });
+                searchHost.appendChild(button);
+            });
+        }
+        const midjourneyHost = popover.querySelector('[data-midjourney-settings]');
+        if (midjourneyHost) {
+            this._appendMidjourneyParameterControls(midjourneyHost, data, () => {
                 active.changed = true;
+                this._syncGenerationComposerImageButtons(nodeId);
                 this.refreshOpNode(nodeId);
                 this.emit('change');
             });
-            searchHost.appendChild(button);
-        });
+        }
         this._mountGenerationComposerPopover(active, popover, anchor);
-    }
-
-    _showGenerationComposerImageStyle(nodeId, anchor) {
-        this._showGenerationComposerImageChoice(nodeId, anchor, {
-            key: 'style',
-            title: '图片风格',
-            emptyLabel: '默认风格'
-        });
     }
 
     _showGenerationComposerImageCamera(nodeId, anchor) {
@@ -7405,14 +8606,18 @@ export class CanvasManager {
         if (data.nodeType === 'image') {
             const width = Math.max(64, Number(data.config.width) || 1024);
             const height = Math.max(64, Number(data.config.height) || 1024);
-            data.config.resolutionTier = IMAGE_RESOLUTION_TIERS.includes(data.config.resolutionTier)
+            const midjourney = this._normalizeMidjourneyImageConfig(data);
+            const allowedResolutionTiers = midjourney ? MIDJOURNEY_RESOLUTION_TIERS : IMAGE_RESOLUTION_TIERS;
+            data.config.resolutionTier = allowedResolutionTiers.includes(data.config.resolutionTier)
                 ? data.config.resolutionTier
                 : inferImageResolutionTier(width, height);
             data.config.ratio = IMAGE_ASPECT_RATIOS.includes(data.config.ratio)
                 ? data.config.ratio
                 : inferImageAspectRatio(width, height);
             const profile = this.options.getImageModelProfile?.(data.config) || null;
-            const availableTiers = profile?.resolutionTiers || [];
+            const availableTiers = midjourney
+                ? MIDJOURNEY_RESOLUTION_TIERS.filter(tier => !profile?.resolutionTiers?.length || profile.resolutionTiers.includes(tier))
+                : (profile?.resolutionTiers || []);
             if (availableTiers.length && !availableTiers.includes(data.config.resolutionTier)) {
                 data.config.resolutionTier = availableTiers.includes(profile.defaultResolutionTier)
                     ? profile.defaultResolutionTier
@@ -7429,7 +8634,7 @@ export class CanvasManager {
             settings.type = 'button';
             settings.className = 'generation-composer-trigger generation-composer-parameter-trigger';
             settings.dataset.imageSettings = '';
-            settings.title = '画质、比例和联网搜索';
+            settings.title = midjourney ? 'MJ 画质、比例与模型参数' : '画质、比例和联网搜索';
             settings.setAttribute('aria-label', '图片生成参数');
             settings.setAttribute('aria-haspopup', 'dialog');
             settings.innerHTML = `
@@ -7437,17 +8642,22 @@ export class CanvasManager {
                 <span data-image-settings-label></span>
             `;
             settings.addEventListener('click', () => this._showGenerationComposerImageSettings(nodeId, settings));
-            const style = document.createElement('button');
-            style.type = 'button';
-            style.className = 'generation-composer-trigger generation-composer-style-trigger';
-            style.title = '图片风格';
-            style.setAttribute('aria-label', '图片风格');
-            style.setAttribute('aria-haspopup', 'dialog');
-            style.innerHTML = `
+            const promptLibrary = document.createElement('button');
+            promptLibrary.type = 'button';
+            promptLibrary.className = 'generation-composer-trigger generation-composer-prompt-library';
+            promptLibrary.dataset.promptLibrary = '';
+            promptLibrary.title = '打开提示词模板库';
+            promptLibrary.setAttribute('aria-label', '打开提示词模板库');
+            promptLibrary.setAttribute('aria-haspopup', 'dialog');
+            promptLibrary.innerHTML = `
                 <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
-                <span data-image-style-label></span>
+                <span>模板</span>
             `;
-            style.addEventListener('click', () => this._showGenerationComposerImageStyle(nodeId, style));
+            const selectedPromptTemplate = getPromptPack(DEFAULT_IMAGE_PROMPT_PACK_ID)?.templates
+                .find(template => template.id === data.config.promptTemplate?.templateId);
+            promptLibrary.classList.toggle('has-template', Boolean(selectedPromptTemplate));
+            if (selectedPromptTemplate) promptLibrary.title = `当前模板：${selectedPromptTemplate.name}`;
+            promptLibrary.addEventListener('click', () => this._showGenerationComposerPromptLibrary(nodeId, promptLibrary));
             const camera = document.createElement('button');
             camera.type = 'button';
             camera.className = 'generation-composer-trigger generation-composer-camera-trigger';
@@ -7459,7 +8669,7 @@ export class CanvasManager {
                 <span data-image-camera-label></span>
             `;
             camera.addEventListener('click', () => this._showGenerationComposerImageCamera(nodeId, camera));
-            host.append(settings, style, camera);
+            host.append(settings, promptLibrary, camera);
             this._syncGenerationComposerImageButtons(nodeId);
         } else {
             const profile = this._normalizeVideoConfigForProfile(data.config);
@@ -7492,6 +8702,7 @@ export class CanvasManager {
             });
         }
         optionRow.hidden = !optionRow.childElementCount;
+        this._syncGenerationComposerCount(nodeId);
         this._positionGenerationComposer();
     }
 
@@ -7513,6 +8724,7 @@ export class CanvasManager {
             active.element.querySelector('[data-model]')?.focus();
             return;
         }
+        if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
 
         data.runError = '';
         clearGeneratorResults(data);
@@ -7552,9 +8764,17 @@ export class CanvasManager {
 
     _positionGenerationComposer() {
         const active = this._generationComposer;
-        const entry = active ? this.items.get(active.nodeId) : null;
+        const entry = active ? this.items.get(active.anchorNodeId || active.nodeId) : null;
         if (!active?.element?.isConnected || !entry?.group) return;
         const containerRect = this.container.getBoundingClientRect();
+        const bounds = {
+            left: Math.max(0, containerRect.left),
+            top: Math.max(0, containerRect.top),
+            right: Math.min(window.innerWidth, containerRect.right),
+            bottom: Math.min(window.innerHeight, containerRect.bottom)
+        };
+        const availableWidth = Math.max(280, bounds.right - bounds.left - 24);
+        active.element.style.width = `${Math.min(680, window.innerWidth - 24, availableWidth)}px`;
         const scale = this.stage.scaleX() || 1;
         const left = containerRect.left + this.stage.x() + entry.group.x() * scale;
         const top = containerRect.top + this.stage.y() + entry.group.y() * scale;
@@ -7570,7 +8790,8 @@ export class CanvasManager {
         const position = getGeneratorComposerPosition(
             anchor,
             { width: rect.width, height: rect.height },
-            { width: window.innerWidth, height: window.innerHeight }
+            { width: window.innerWidth, height: window.innerHeight },
+            { bounds }
         );
         active.element.style.left = `${position.left}px`;
         active.element.style.top = `${position.top}px`;
@@ -7588,9 +8809,15 @@ export class CanvasManager {
         document.removeEventListener('pointerdown', active.closeOutside, true);
         document.removeEventListener('keydown', active.closeOnKey, true);
         active.element?.remove();
+        const draftEntry = this.items.get(active.nodeId);
+        if (draftEntry?.data?.composerDraft) {
+            draftEntry.group?.destroy();
+            this.items.delete(active.nodeId);
+        }
         if (!keepReferencePick && this._activeNodeReferenceTargetId === active.nodeId) {
             this.endMediaReferencePick({ silent: true });
         }
+        if (active.mediaSourceId) this._syncGenerationReferenceBadge(active.mediaSourceId);
         if (commit && active.changed) this.emit('change');
     }
 
@@ -7796,6 +9023,12 @@ export class CanvasManager {
             data.width = size.width;
             data.height = size.height;
         }
+        if (data.composerDraft) {
+            if (this._generationComposer?.nodeId === nodeId) this._renderGenerationComposerReferences(nodeId);
+            this._syncGenerationComposerStatus(nodeId);
+            this._positionGenerationComposer();
+            return;
+        }
         this._drawOpNode(group, data, data.width || OP_NODE_WIDTH, data.height || OP_NODE_HEIGHT);
         if (data.nodeType === 'text') this._ensurePersistentTextEditor(nodeId);
         this.graphView?.renderPorts(nodeId);
@@ -7805,18 +9038,78 @@ export class CanvasManager {
         this.layer.batchDraw();
     }
 
-    /**
-     * 生成结果自动落地成素材卡片，并连一条 history 边指回源节点。
-     * 这是节点体系相对侧栏聊天的核心优势：产物立刻可以连出去做下一步，
-     * 不用手动往画布上摆。参考 Infinite-Canvas 的 createPendingOutputFromSource。
-     * history 边只做溯源，不参与执行遍历（graph-model 的 topoOrder 会忽略它）。
-     */
+    async _convertImageGeneratorToMedia(sourceItem, output, filePath) {
+        const entry = this.items.get(sourceItem?.id);
+        if (!entry?.group || !filePath) return null;
+
+        const sourceId = sourceItem.id;
+        const wasSelected = this.selectedItems.has(sourceId);
+        const sourceReferences = this._opReferenceEntries(sourceItem).map(({ source }) => ({
+            itemId: source.id,
+            filePath: source.filePath || ''
+        }));
+        const generation = {
+            nodeType: 'image',
+            title: sourceItem.title || '图片生成',
+            config: JSON.parse(JSON.stringify(sourceItem.config || {})),
+            model: sourceItem.model || sourceItem.config?.model || '',
+            references: sourceReferences,
+            generatedAt: Date.now(),
+            replacedGenerator: true
+        };
+        const resultItem = output?._resultItem || {};
+        const x = entry.group.x();
+        const y = entry.group.y();
+        const width = Math.max(1, Number(sourceItem.width) || Number(resultItem.width) || IMAGE_DEFAULT_WIDTH);
+        const height = Math.max(1, Number(sourceItem.height) || Number(resultItem.height) || IMAGE_DEFAULT_WIDTH);
+        const mediaData = {
+            ...resultItem,
+            id: sourceId,
+            kind: 'media',
+            mediaType: 'image',
+            filePath,
+            x,
+            y,
+            width,
+            height,
+            addedAt: Date.now(),
+            generation
+        };
+
+        if (this._generationComposer?.nodeId === sourceId) this._closeGenerationComposer();
+        this.graphView?.clearPorts(sourceId);
+        entry.group.getAttr('generatorAnimation')?.stop?.();
+        (entry.group.getAttr('generatorPreviewVideos') || []).forEach(video => {
+            video.pause?.();
+            video.removeAttribute?.('src');
+            video.load?.();
+        });
+        entry.group.destroy();
+        this.items.delete(sourceId);
+        this.selectedItems.delete(sourceId);
+
+        Object.keys(sourceItem).forEach(key => { delete sourceItem[key]; });
+        Object.assign(sourceItem, mediaData);
+        await this._createCard(sourceItem);
+        this.graphView?.convertGeneratorOutputNode(sourceId);
+        this._scheduleCullCheck();
+        if (wasSelected) this.selectItem(sourceId, true);
+        this._scheduleSelectionToolbarSync();
+        this.emit('change');
+        return sourceItem;
+    }
+
+    /** 图片节点的首个结果替换占位节点；其余结果落成相邻素材卡片。 */
     async _landResult(sourceItem, output) {
         const rawResult = output?.image || output?.video || output?.file || '';
         const filePath = output?._resultFilePath
             || (/^https?:\/\//i.test(String(rawResult)) ? '' : resolveCanvasFilePath(rawResult));
         const resultUrl = output?._resultUrl
             || (/^https?:\/\//i.test(String(rawResult)) ? String(rawResult) : '');
+        if (output?._preserveGeneratorStack) sourceItem.preserveGeneratorStack = true;
+        if (sourceItem?.kind === 'op' && sourceItem.nodeType === 'image' && filePath && !output?._preserveGeneratorStack) {
+            return this._convertImageGeneratorToMedia(sourceItem, output, filePath);
+        }
         if (sourceItem?.kind === 'op' && ['image', 'video'].includes(sourceItem.nodeType)) {
             if (!filePath && !resultUrl) return null;
             const results = appendGeneratorResult(sourceItem, {
@@ -7826,16 +9119,22 @@ export class CanvasManager {
             });
 
             if (results.length === 1) {
-                const resultItem = output?._resultItem || {};
-                const mediaWidth = Number(resultItem.naturalWidth || resultItem.pixelWidth || resultItem.width);
-                const mediaHeight = Number(resultItem.naturalHeight || resultItem.pixelHeight || resultItem.height);
-                if (mediaWidth > 0 && mediaHeight > 0) {
-                    const size = getGeneratorPlaceholderSize(sourceItem.nodeType, { ratio: 'adaptive' }, {
-                        width: mediaWidth,
-                        height: mediaHeight
-                    });
+                if (output?._forceSquarePreview === true) {
+                    const size = getGeneratorPlaceholderSize('image', { ratio: '1:1' });
                     sourceItem.width = size.width;
                     sourceItem.height = size.height;
+                } else {
+                    const resultItem = output?._resultItem || {};
+                    const mediaWidth = Number(resultItem.naturalWidth || resultItem.pixelWidth || resultItem.width);
+                    const mediaHeight = Number(resultItem.naturalHeight || resultItem.pixelHeight || resultItem.height);
+                    if (mediaWidth > 0 && mediaHeight > 0) {
+                        const size = getGeneratorPlaceholderSize(sourceItem.nodeType, { ratio: 'adaptive' }, {
+                            width: mediaWidth,
+                            height: mediaHeight
+                        });
+                        sourceItem.width = size.width;
+                        sourceItem.height = size.height;
+                    }
                 }
             }
             this.refreshOpNode(sourceItem.id);
@@ -7843,16 +9142,20 @@ export class CanvasManager {
             return sourceItem;
         }
         if (!filePath) return null;              // 纯文本产物留在缓存里，不落地
-        const firstReference = this._opReferenceEntries(sourceItem)[0]?.source || null;
+        const generatedKind = sourceItem.generation?.nodeType || sourceItem.nodeType;
+        const generatedConfig = sourceItem.generation?.config || sourceItem.config || {};
+        const firstReference = sourceItem.kind === 'op'
+            ? this._opReferenceEntries(sourceItem)[0]?.source || null
+            : sourceItem;
         const displaySize = resolveGenerationDisplaySize({
-            kind: sourceItem.nodeType,
+            kind: generatedKind,
             referenceSize: firstReference ? {
                 width: firstReference.width,
                 height: firstReference.height
             } : null,
-            ratio: sourceItem.config?.ratio,
-            size: sourceItem.nodeType === 'image'
-                ? `${Number(sourceItem.config?.width) || 1024}x${Number(sourceItem.config?.height) || 1024}`
+            ratio: generatedConfig.ratio,
+            size: generatedKind === 'image'
+                ? `${Number(generatedConfig.width) || 1024}x${Number(generatedConfig.height) || 1024}`
                 : '',
             longEdge: VIDEO_PLACEHOLDER_LONG_EDGE
         });
@@ -11900,6 +13203,7 @@ export class CanvasManager {
 
     _syncViewportFixedControls() {
         this._syncVideoControlLayout();
+        this._syncAllGenerationReferenceBadges();
         this.graphView?.syncViewportControlScale(this.stage?.scaleX?.());
         this.layer.batchDraw();
     }
@@ -12545,6 +13849,16 @@ export class CanvasManager {
         this.graphView?.scheduleSync(id);
         this._updatePlanReferencesForMovedItem(id, oldPath, filePath);
         this._scheduleCullCheck();
+        this.emit('change');
+        return true;
+    }
+
+    updateGeneratorResultFilePath(id, oldFilePath, newFilePath) {
+        const item = this.items.get(id);
+        if (!item || item.data?.kind !== 'op' || !['image', 'video'].includes(item.data.nodeType)) return false;
+        const replaced = replaceGeneratorResultFilePath(item.data, oldFilePath, newFilePath);
+        if (!replaced.changed) return false;
+        this.refreshOpNode(id);
         this.emit('change');
         return true;
     }

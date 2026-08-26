@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     getGeneratorComposerPosition,
     getGeneratorPlaceholderSize,
+    getGeneratorSplitPositions,
     parseAspectRatio
 } from './generator-placeholder-layout.js';
 
@@ -37,5 +38,29 @@ test('composer prefers below and clamps inside the viewport', () => {
             { width: 800, height: 760 }
         ),
         { left: 12, top: 356, placement: 'above' }
+    );
+});
+
+test('split results form a centered two-by-two grid to the right of the generator', () => {
+    assert.deepEqual(
+        getGeneratorSplitPositions({ x: 100, y: 200, width: 264, height: 264 }, 4),
+        [
+            { x: 436, y: 56, width: 264, height: 264 },
+            { x: 724, y: 56, width: 264, height: 264 },
+            { x: 436, y: 344, width: 264, height: 264 },
+            { x: 724, y: 344, width: 264, height: 264 }
+        ]
+    );
+});
+
+test('composer stays inside the visible canvas bounds', () => {
+    assert.deepEqual(
+        getGeneratorComposerPosition(
+            { left: 280, top: 120, right: 560, bottom: 400, width: 280, height: 280 },
+            { width: 560, height: 220 },
+            { width: 1200, height: 800 },
+            { bounds: { left: 268, top: 38, right: 1200, bottom: 800 } }
+        ),
+        { left: 280, top: 414, placement: 'below' }
     );
 });

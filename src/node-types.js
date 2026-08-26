@@ -8,6 +8,7 @@ import {
     extractDeterministicSignals,
     validateEditPlan
 } from './image-intent-pipeline.js';
+import { isMidjourneyImageModel } from './provider-capabilities.js';
 
 // ============================================================
 // Flow Canvas — Node Type Definitions (节点类型注册表)
@@ -437,9 +438,11 @@ NODE_TYPES['image'] = {
     ],
     async execute(inputs, config, ctx) {
         const sources = collectGenerationSources(inputs, ['prompt', 'reference']);
+        const provider = ctx?.getImageProvider?.(config);
+        const midjourneyModel = isMidjourneyImageModel(provider?.model || config.model);
         const prompts = expandGenerationPrompts({
             prompt: sources.filter(value => typeof value === 'string' && !toFilePath(value))
-        }, config);
+        }, midjourneyModel ? { ...config, count: 1 } : config);
 
         // 纯素材模式：没有 prompt 但自身有文件，直接透传，不调 API
         const own = ctx?.item?.filePath;
@@ -448,7 +451,6 @@ NODE_TYPES['image'] = {
         }
         if (!prompts.length) throw new Error('请填写提示词或连接上游文本');
 
-        const provider = ctx?.getImageProvider?.(config);
         if (!provider?.apiKey) throw new Error('请先在 AI 助手设置中配置图像模型');
         if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
 
@@ -457,7 +459,7 @@ NODE_TYPES['image'] = {
         if (own && !refs.some(r => r.filePath === own)) refs.unshift({ filePath: own });
         const sourceReferences = await prepareGenerationReferences(refs, ctx?.prepareImageReferences);
 
-        const results = await mapWithConcurrency(prompts, config.concurrency, async prompt => {
+        const resultGroups = await mapWithConcurrency(prompts, midjourneyModel ? 1 : config.concurrency, async prompt => {
             const effectivePrompt = [
                 prompt,
                 config.style ? `视觉风格：${config.style}` : '',
@@ -474,7 +476,7 @@ NODE_TYPES['image'] = {
             const providerPrompt = intentOutcome?.fallback?.used === false && intentOutcome.compiledRequest?.prompt
                 ? intentOutcome.compiledRequest.prompt
                 : effectivePrompt;
-            const requestPrompt = config.negativePrompt
+            const requestPrompt = config.negativePrompt && !midjourneyModel
                 ? `${providerPrompt}\n\nNegative: ${config.negativePrompt}`
                 : providerPrompt;
             const generationStartedAt = Date.now();
@@ -488,6 +490,30 @@ NODE_TYPES['image'] = {
                     quality: config.quality || 'high',
                     webSearch: config.webSearch === true ? true : undefined,
                     responseFormat: 'url',
+                    midjourney: midjourneyModel ? {
+                        ratio: config.ratio,
+                        version: config.midjourneyVersion,
+                        raw: config.midjourneyRaw === true,
+                        stylize: config.midjourneyStylize,
+                        chaos: config.midjourneyChaos,
+                        weird: config.midjourneyWeird,
+                        quality: config.midjourneyQuality,
+                        imageWeight: config.midjourneyImageWeight,
+                        styleReference: config.midjourneyStyleReference,
+                        styleWeight: config.midjourneyStyleWeight,
+                        styleVersion: config.midjourneyStyleVersion,
+                        omniReference: config.midjourneyOmniReference,
+                        omniWeight: config.midjourneyOmniWeight,
+                        profile: config.midjourneyProfile,
+                        seed: config.midjourneySeed,
+                        tile: config.midjourneyTile === true,
+                        draft: config.midjourneyDraft === true,
+                        repeat: config.midjourneyRepeat,
+                        speed: config.midjourneySpeed,
+                        visibility: config.midjourneyVisibility,
+                        definition: config.resolutionTier === '2K' ? 'hd' : 'sd',
+                        negativePrompt: config.negativePrompt
+                    } : undefined,
                     sourceReferences,
                     addToCanvas: false
                 });
@@ -503,11 +529,13 @@ NODE_TYPES['image'] = {
                 throw error;
             }
 
-            const filePath = result?.filePath || result?.item?.filePath || null;
-            const imageUrl = filePath
-                ? 'local-res://' + encodeURIComponent(filePath)
-                : (result?.url || null);
-            if (!imageUrl) {
+            const filePaths = (Array.isArray(result?.filePaths) && result.filePaths.length
+                ? result.filePaths
+                : [result?.filePath || result?.item?.filePath]).filter(Boolean);
+            const imageUrls = filePaths.length
+                ? filePaths.map(filePath => 'local-res://' + encodeURIComponent(filePath))
+                : [result?.url].filter(Boolean);
+            if (!imageUrls.length) {
                 intent?.finish({
                     ...imageProviderSummary(provider),
                     status: 'failed',
@@ -524,18 +552,24 @@ NODE_TYPES['image'] = {
                 durationMs: Date.now() - generationStartedAt,
                 requestPrompt,
                 imageOrder: sourceReferences.map(reference => reference.filePath),
-                filePath,
+                filePath: filePaths[0] || null,
+                filePaths,
                 requestedSize: `${config.width || 1024}x${config.height || 1024}`,
                 actualSize: result?.actualSize || null
             }, intentOutcome);
-            return {
+            return imageUrls.map((imageUrl, index) => ({
                 image: imageUrl,
-                _resultFilePath: filePath,
-                _resultItem: result?.item || null,
-                _resultUrl: result?.url || null
-            };
+                _resultFilePath: filePaths[index] || null,
+                _resultItem: index === 0 ? (result?.item || null) : null,
+                _resultUrl: filePaths.length ? null : (result?.url || null),
+                _midjourney: result?.midjourney || null,
+                _candidateIndex: result?.images?.[index]?.candidateIndex || null,
+                _preserveGeneratorStack: midjourneyModel && imageUrls.length > 1,
+                _forceSquarePreview: midjourneyModel && imageUrls.length > 1
+            }));
         });
 
+        const results = resultGroups.flat();
         return packGenerationResults('image', results);
     }
 };

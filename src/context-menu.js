@@ -35,6 +35,7 @@ export class ContextMenu {
             const currentItem = this.currentItem;
             const primaryPath = this.currentItem.filePath;
             const filePaths = this.currentItem.filePaths || [primaryPath];
+            const fileTargets = this.currentItem.fileTargets || [];
             const itemIds = this.currentItem.itemIds || null;
             const nodeId = this.currentItem.itemId || itemIds?.[0] || null;
 
@@ -79,14 +80,18 @@ export class ContextMenu {
                 } else if (action === 'openFile') {
                     await window.flowCanvas.shell.openFile(primaryPath);
                 } else if (action === 'repairMaterial') {
-                    const ev = new CustomEvent('context-repair-material', { detail: { itemIds, filePaths } });
+                    const ev = new CustomEvent('context-repair-material', { detail: { itemIds, filePaths, fileTargets } });
                     document.dispatchEvent(ev);
                 } else if (action === 'relinkMaterial') {
+                    const primaryTarget = fileTargets.find(target => target.itemId === nodeId) || fileTargets[0] || null;
                     const ev = new CustomEvent('context-relink-material', {
                         detail: {
-                            itemId: itemIds?.[0] || currentItem.itemId || null,
-                            itemIds: itemIds?.length === 1 ? itemIds : [],
-                            filePath: primaryPath
+                            itemId: primaryTarget?.itemId || currentItem.itemId || itemIds?.[0] || null,
+                            itemIds: fileTargets.length === 1
+                                ? [fileTargets[0].itemId]
+                                : (itemIds?.length === 1 ? itemIds : []),
+                            filePath: primaryTarget?.filePath || primaryPath,
+                            fileTargets: primaryTarget ? [primaryTarget] : []
                         }
                     });
                     document.dispatchEvent(ev);
@@ -111,7 +116,7 @@ export class ContextMenu {
                         this._showStatus(`复制失败：${res?.error || '未找到系统文件夹'}`);
                     }
                 } else if (action === 'moveToFolder') {
-                    const ev = new CustomEvent('context-move-to-folder', { detail: { itemIds, filePaths } });
+                    const ev = new CustomEvent('context-move-to-folder', { detail: { itemIds, filePaths, fileTargets } });
                     document.dispatchEvent(ev);
                 } else if (action === 'removeFromBoard') {
                     const ev = new CustomEvent('context-remove', { detail: { itemIds, filePaths } });
@@ -127,13 +132,19 @@ export class ContextMenu {
         e.evt.preventDefault();
         this.currentItem = item;
         const isOpNode = item.kind === 'op';
+        const filePaths = (item.filePaths || []).filter(Boolean);
+        const hasFiles = filePaths.length > 0 || Boolean(item.filePath);
+        const isGeneratorResult = isOpNode && item.generatorResult === true;
+        const fileCount = filePaths.length || (item.filePath ? 1 : 0);
 
         this.el.querySelectorAll('.context-op-only').forEach(menuItem => {
             menuItem.style.display = isOpNode ? '' : 'none';
         });
         this.el.querySelectorAll('.context-menu-divider:not(.context-op-only)').forEach(divider => {
-            divider.style.display = isOpNode ? 'none' : '';
+            divider.style.display = isOpNode && !hasFiles ? 'none' : '';
         });
+
+        this._syncFileActionLabels({ isGeneratorResult, fileCount });
 
         // 根据选择数量更新描述文字
         const removeBtnSpan = this.el.querySelector('[data-action="removeFromBoard"] span:nth-child(2)');
@@ -145,45 +156,31 @@ export class ContextMenu {
             removeBtnSpan.textContent = `从白板移除`;
         }
 
-        const moveBtnSpan = this.el.querySelector('[data-action="moveToFolder"] span:nth-child(2)');
-        if (moveBtnSpan) {
-            moveBtnSpan.textContent = item.filePaths && item.filePaths.length > 1
-                ? `剪切 ${item.filePaths.length} 项到文件夹`
-                : '剪切到文件夹';
-        }
-        const copyToFolderBtnSpan = this.el.querySelector('[data-action="copyToFolder"] span:nth-child(2)');
-        if (copyToFolderBtnSpan) {
-            copyToFolderBtnSpan.textContent = item.filePaths && item.filePaths.length > 1
-                ? `复制 ${item.filePaths.length} 项到文件夹`
-                : '复制到文件夹';
-        }
-        const copyToExplorerBtnSpan = this.el.querySelector('[data-action="copyToExplorer"] span:nth-child(2)');
-        if (copyToExplorerBtnSpan) {
-            copyToExplorerBtnSpan.textContent = item.filePaths && item.filePaths.length > 1
-                ? `复制 ${item.filePaths.length} 项到当前系统文件夹`
-                : '复制到当前系统文件夹';
-        }
-
         const repairItem = this.el.querySelector('[data-action="repairMaterial"]');
         const repairText = repairItem?.querySelector('span:nth-child(2)');
         if (repairText) {
-            repairText.textContent = item.filePaths && item.filePaths.length > 1
-                ? `自动修补选中素材 (${item.filePaths.length} 项)`
-                : '自动修补断联素材';
+            repairText.textContent = isGeneratorResult
+                ? (fileCount > 1 ? `自动修补 ${fileCount} 个当前结果` : '自动修补当前结果')
+                : (fileCount > 1 ? `自动修补选中素材 (${fileCount} 项)` : '自动修补断联素材');
         }
         if (repairItem) {
-            repairItem.style.display = item.filePaths?.length ? '' : 'none';
+            repairItem.style.display = hasFiles ? '' : 'none';
         }
 
         const relinkItem = this.el.querySelector('[data-action="relinkMaterial"]');
         if (relinkItem) {
-            const canRelink = !isOpNode && ((item.itemIds || []).length === 1 || Boolean(item.itemId));
+            const fileTargetCount = item.fileTargets?.length || fileCount;
+            const canRelink = hasFiles && fileTargetCount === 1
+                && (!isOpNode || isGeneratorResult);
             relinkItem.style.display = canRelink ? '' : 'none';
             const relinkText = relinkItem.querySelector('span:nth-child(2)');
-            if (relinkText) relinkText.textContent = item.loadError ? '手动重接素材' : (item.filePath ? '替换素材' : '上传素材');
+            if (relinkText) {
+                relinkText.textContent = isGeneratorResult
+                    ? '替换当前结果'
+                    : (item.loadError ? '手动重接素材' : (item.filePath ? '替换素材' : '上传素材'));
+            }
         }
 
-        const hasFiles = (item.filePaths || []).filter(Boolean).length > 0 || Boolean(item.filePath);
         ['copy', 'copyFilePath', 'copyAiReference', 'showInExplorer', 'openFile', 'copyToFolder', 'copyToExplorer', 'moveToFolder']
             .forEach(action => {
                 const menuItem = this.el.querySelector(`[data-action="${action}"]`);
@@ -208,6 +205,36 @@ export class ContextMenu {
             { opacity: 0, y: 4, scale: 0.985 },
             { opacity: 1, y: 0, scale: 1, duration: 0.14, ease: 'power2.out' }
         );
+    }
+
+    _syncFileActionLabels({ isGeneratorResult, fileCount }) {
+        const multiple = fileCount > 1;
+        const labels = isGeneratorResult
+            ? {
+                copy: multiple ? `复制 ${fileCount} 个当前结果到剪贴板` : '复制当前结果到剪贴板',
+                copyFilePath: multiple ? `复制 ${fileCount} 个结果文件地址` : '复制当前结果文件地址',
+                copyAiReference: multiple ? `复制 ${fileCount} 个结果 AI 引用地址` : '复制当前结果 AI 引用地址',
+                showInExplorer: '在资源管理器中显示当前结果',
+                openFile: '用默认程序打开当前结果',
+                copyToFolder: multiple ? `复制 ${fileCount} 个当前结果到文件夹` : '复制当前结果到文件夹',
+                copyToExplorer: multiple ? `复制 ${fileCount} 个当前结果到当前系统文件夹` : '复制当前结果到当前系统文件夹',
+                moveToFolder: multiple ? `剪切 ${fileCount} 个当前结果到文件夹` : '剪切当前结果到文件夹'
+            }
+            : {
+                copy: '复制到剪贴板',
+                copyFilePath: '复制文件地址',
+                copyAiReference: '复制 AI 引用地址',
+                showInExplorer: '在资源管理器中显示',
+                openFile: '用默认程序打开',
+                copyToFolder: multiple ? `复制 ${fileCount} 项到文件夹` : '复制到文件夹',
+                copyToExplorer: multiple ? `复制 ${fileCount} 项到当前系统文件夹` : '复制到当前系统文件夹',
+                moveToFolder: multiple ? `剪切 ${fileCount} 项到文件夹` : '剪切到文件夹'
+            };
+
+        Object.entries(labels).forEach(([action, label]) => {
+            const text = this.el.querySelector(`[data-action="${action}"] span:nth-child(2)`);
+            if (text) text.textContent = label;
+        });
     }
 
     hide() {

@@ -1307,6 +1307,59 @@ body:not(.sidebar-closed) .canvas-project-chip {
     outline-color: rgba(255, 255, 255, 0.25);
 }
 
+.op-text-node-resize-handle {
+    position: absolute;
+    z-index: 2;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: #747a83;
+    pointer-events: auto;
+    cursor: nwse-resize;
+    touch-action: none;
+    transition: color 120ms ease;
+}
+
+.op-text-node-resize-handle::before,
+.op-text-node-resize-handle::after {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    border-radius: 0 0 6px 0;
+    content: '';
+}
+
+.op-text-node-resize-handle::after {
+    right: 6px;
+    bottom: 6px;
+    width: 6px;
+    height: 6px;
+    border-right-width: 1px;
+    border-bottom-width: 1px;
+    border-radius: 0 0 3px 0;
+    opacity: 0.48;
+}
+
+.op-text-node-resize-handle:hover,
+.op-text-node-resize-handle:focus-visible,
+body.text-node-resizing .op-text-node-resize-handle {
+    color: #d0d4da;
+}
+
+body.text-node-resizing,
+body.text-node-resizing * {
+    cursor: nwse-resize !important;
+    user-select: none !important;
+}
+
 .op-inline-prompt-editor::placeholder {
     color: #74777d;
 }
@@ -5492,6 +5545,13 @@ select.plan-cell-input {
     animation: connection-node-menu-in 120ms ease-out both;
 }
 
+.generation-type-menu-heading {
+    padding: 7px 9px 6px;
+    color: #8f939a;
+    font-size: 11px;
+    letter-spacing: 0;
+}
+
 .generation-type-menu > button {
     display: grid;
     width: 100%;
@@ -5925,12 +5985,20 @@ select.plan-cell-input {
     border-radius: 0;
 }
 
-.generation-composer-style-trigger {
-    max-width: 104px;
-}
-
 .generation-composer-camera-trigger {
     max-width: 118px;
+}
+
+.generation-composer-prompt-library {
+    max-width: 82px;
+}
+
+.generation-composer-prompt-library.has-template {
+    color: #eef0f2;
+}
+
+.generation-composer-prompt-library.has-template .flow-icon {
+    color: #c7cacf;
 }
 
 .generation-composer-camera-icon {
@@ -5977,6 +6045,17 @@ select.plan-cell-input {
     width: 42px;
     flex: 0 0 42px;
     background: transparent;
+}
+
+.generation-composer-count.is-midjourney {
+    width: 58px;
+    flex-basis: 58px;
+}
+
+.generation-composer-count.is-midjourney select:disabled {
+    color: #d7dadf;
+    cursor: default;
+    opacity: 1;
 }
 
 .generation-composer-agent-toggle {
@@ -6215,6 +6294,263 @@ select.plan-cell-input {
     color: #bfc2c7;
 }
 
+.generation-composer-prompt-library-popover {
+    width: min(540px, calc(100vw - 20px));
+    height: min(520px, calc(100vh - 20px));
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    gap: 9px;
+    padding: 12px;
+}
+
+.generation-composer-prompt-library-head,
+.generation-composer-prompt-library-head > div {
+    display: flex;
+    align-items: center;
+}
+
+.generation-composer-prompt-library-head {
+    min-height: 24px;
+    justify-content: space-between;
+}
+
+.generation-composer-prompt-library-head > div {
+    min-width: 0;
+    gap: 8px;
+}
+
+.generation-composer-prompt-library-head strong {
+    color: #d9dbe0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0;
+}
+
+.generation-composer-prompt-library-head small,
+.generation-composer-prompt-library-head > span {
+    color: #7e838b;
+    font-size: 9px;
+    letter-spacing: 0;
+}
+
+.generation-composer-prompt-library-head > span {
+    padding: 3px 6px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.035);
+    color: #858a92;
+}
+
+.generation-composer-prompt-library-filters {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 132px;
+    gap: 7px;
+}
+
+.generation-composer-prompt-library-filters select {
+    height: 34px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 6px;
+    outline: 0;
+    background: #292b2f;
+    color: #c6c9ce;
+    color-scheme: dark;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0;
+}
+
+.generation-composer-prompt-library-filters select:focus {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.generation-composer-prompt-library-count {
+    min-height: 13px;
+    color: #777c84;
+    font-size: 9px;
+    letter-spacing: 0;
+}
+
+.generation-composer-prompt-library-list {
+    display: grid;
+    min-height: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 7px;
+    padding-right: 3px;
+    overflow-y: auto;
+    scrollbar-color: rgba(151, 156, 164, 0.42) transparent;
+    scrollbar-width: thin;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar {
+    width: 10px;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar-track {
+    margin-block: 5px;
+    border-radius: 999px;
+    background: transparent;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar-thumb {
+    min-height: 48px;
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(151, 156, 164, 0.48);
+    background-clip: padding-box;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(190, 194, 200, 0.68);
+    background-clip: padding-box;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar-thumb:active {
+    background: rgba(214, 217, 221, 0.82);
+    background-clip: padding-box;
+}
+
+.generation-composer-prompt-library-list::-webkit-scrollbar-button,
+.generation-composer-prompt-library-list::-webkit-scrollbar-corner {
+    display: none;
+    width: 0;
+    height: 0;
+    background: transparent;
+}
+
+.generation-composer-prompt-template {
+    display: grid;
+    min-width: 0;
+    min-height: 126px;
+    grid-template-rows: auto minmax(32px, 1fr) auto auto;
+    gap: 7px;
+    padding: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.generation-composer-prompt-template:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.generation-composer-prompt-template-heading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 7px;
+}
+
+.generation-composer-prompt-template-heading strong {
+    min-width: 0;
+    overflow: hidden;
+    color: #d4d6da;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.generation-composer-prompt-template-heading span {
+    flex: 0 0 auto;
+    color: #737880;
+    font-size: 8px;
+    letter-spacing: 0;
+    white-space: nowrap;
+}
+
+.generation-composer-prompt-template p {
+    display: -webkit-box;
+    margin: 0;
+    overflow: hidden;
+    color: #92969d;
+    font-size: 9px;
+    letter-spacing: 0;
+    line-height: 1.5;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.generation-composer-prompt-template-tags {
+    display: flex;
+    min-width: 0;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.generation-composer-prompt-template-tags span {
+    max-width: 76px;
+    padding: 2px 5px;
+    overflow: hidden;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.045);
+    color: #7f848c;
+    font-size: 8px;
+    letter-spacing: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.generation-composer-prompt-template-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5px;
+}
+
+.generation-composer-prompt-template-actions button {
+    min-width: 0;
+    height: 27px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.045);
+    color: #90949b;
+    font: inherit;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+
+.generation-composer-prompt-template-actions button:hover,
+.generation-composer-prompt-template-actions button:focus-visible {
+    border-color: rgba(255, 255, 255, 0.12);
+    outline: 0;
+    background: rgba(255, 255, 255, 0.075);
+    color: #e0e2e5;
+}
+
+.generation-composer-prompt-template-actions button.primary {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.095);
+    color: #d9dce1;
+}
+
+.generation-composer-prompt-template-actions button.primary:hover,
+.generation-composer-prompt-template-actions button.primary:focus-visible {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.13);
+    color: #f0f1f3;
+}
+
+@media (max-width: 580px) {
+    .generation-composer-prompt-library-popover {
+        height: min(590px, calc(100vh - 20px));
+    }
+
+    .generation-composer-prompt-library-filters {
+        grid-template-columns: 1fr;
+    }
+
+    .generation-composer-prompt-library-list {
+        grid-template-columns: 1fr;
+    }
+}
+
 .generation-composer-popover-empty {
     padding: 22px 10px;
     color: #7f848c;
@@ -6225,8 +6561,174 @@ select.plan-cell-input {
 
 .generation-composer-image-settings-popover {
     width: min(440px, calc(100vw - 20px));
+    max-height: min(720px, calc(100vh - 20px));
     padding: 14px;
+    overflow-y: auto;
     background: rgba(48, 49, 51, 0.98);
+    scrollbar-color: rgba(151, 156, 164, 0.58) transparent;
+    scrollbar-width: thin;
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar {
+    width: 10px;
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar-track {
+    margin-block: 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar-thumb {
+    min-height: 52px;
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(151, 156, 164, 0.58);
+    background-clip: padding-box;
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar-thumb:hover {
+    background: rgba(190, 194, 200, 0.76);
+    background-clip: padding-box;
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar-thumb:active {
+    background: rgba(214, 217, 221, 0.88);
+    background-clip: padding-box;
+}
+
+.generation-composer-image-settings-popover::-webkit-scrollbar-button,
+.generation-composer-image-settings-popover::-webkit-scrollbar-corner {
+    display: none;
+    width: 0;
+    height: 0;
+    background: transparent;
+}
+
+.generation-composer-midjourney-settings {
+    display: grid;
+    gap: 8px;
+}
+
+.midjourney-setting-section {
+    display: grid;
+    gap: 7px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.midjourney-setting-title,
+.midjourney-range-heading {
+    color: #969aa1;
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: 0;
+}
+
+.midjourney-setting-help {
+    color: #74787f;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 0;
+    line-height: 1.45;
+}
+
+.midjourney-preset-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+}
+
+.midjourney-preset-grid button {
+    min-width: 0;
+    min-height: 34px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.055);
+    color: #8f9399;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+
+.midjourney-preset-grid button:hover {
+    color: #d4d6da;
+}
+
+.midjourney-preset-grid button.selected {
+    border-color: rgba(159, 197, 175, 0.42);
+    background: rgba(126, 164, 143, 0.16);
+    color: #dce8e0;
+}
+
+.midjourney-option-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+}
+
+.midjourney-option-grid button {
+    min-width: 0;
+    min-height: 30px;
+    padding: 4px 7px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.055);
+    color: #8f9399;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+
+.midjourney-option-grid button:hover {
+    color: #d4d6da;
+}
+
+.midjourney-option-grid button.selected {
+    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.12);
+    color: #f0f1f2;
+}
+
+.midjourney-range-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.midjourney-range-heading output {
+    color: #d6d8dc;
+    font-variant-numeric: tabular-nums;
+}
+
+.midjourney-range-setting input[type='range'] {
+    width: 100%;
+    margin: 2px 0;
+    accent-color: #aeb3ba;
+}
+
+.midjourney-text-setting input {
+    min-width: 0;
+    height: 32px;
+    box-sizing: border-box;
+    padding: 0 9px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+    outline: 0;
+    background: rgba(0, 0, 0, 0.14);
+    color: #e1e3e6;
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0;
+}
+
+.midjourney-text-setting input:focus {
+    border-color: rgba(255, 255, 255, 0.24);
 }
 
 .generation-composer-prompt-merge-popover {
@@ -8827,6 +9329,40 @@ body.task-history-open .creation-prompt-dock {
 .canvas-selection-toolbar button .flow-icon {
     width: 20px;
     height: 20px;
+}
+
+.canvas-selection-toolbar button.has-menu {
+    position: relative;
+}
+
+.canvas-selection-toolbar button.has-menu::after {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    width: 0;
+    height: 0;
+    border-top: 3px solid currentColor;
+    border-right: 3px solid transparent;
+    border-left: 3px solid transparent;
+    content: '';
+    opacity: 0.72;
+}
+
+.canvas-selection-toolbar button.canvas-selection-generate {
+    width: 70px;
+    flex-basis: 70px;
+    grid-template-columns: 20px auto;
+    gap: 6px;
+    padding: 0 16px 0 9px;
+}
+
+.canvas-selection-toolbar button.canvas-selection-generate > span {
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .canvas-selection-toolbar-divider {

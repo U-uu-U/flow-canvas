@@ -160,6 +160,106 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
     }
 });
 
+test('image execute: mj_imagine 一次请求展开为四张候选并保留结果堆叠', async () => {
+    const calls = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateImage: async options => {
+                    calls.push(options);
+                    return {
+                        filePath: 'C:/output/mj_U1.png',
+                        filePaths: [
+                            'C:/output/mj_U1.png',
+                            'C:/output/mj_U2.png',
+                            'C:/output/mj_U3.png',
+                            'C:/output/mj_U4.png'
+                        ],
+                        images: [1, 2, 3, 4].map(candidateIndex => ({ candidateIndex })),
+                        midjourney: { candidateCount: 4 }
+                    };
+                }
+            }
+        }
+    };
+
+    try {
+        const output = await helpers.NODE_TYPES.image.execute({}, {
+            prompt: 'editorial portrait',
+            width: 1024,
+            height: 1024,
+            ratio: '3:2',
+            resolutionTier: '2K',
+            count: 4,
+            concurrency: 4,
+            midjourneyVersion: '8.2',
+            midjourneyRaw: true,
+            midjourneyStylize: 250,
+            midjourneyChaos: 20,
+            midjourneyWeird: 400,
+            midjourneyQuality: '2',
+            midjourneyImageWeight: 1.5,
+            midjourneyStyleReference: '123456',
+            midjourneyStyleWeight: 200,
+            midjourneyStyleVersion: '6',
+            midjourneyOmniReference: '',
+            midjourneyOmniWeight: 300,
+            midjourneyProfile: 'profile-1',
+            midjourneySeed: 42,
+            midjourneyTile: true,
+            midjourneyDraft: false,
+            midjourneyRepeat: 2,
+            midjourneySpeed: 'turbo',
+            midjourneyVisibility: 'stealth',
+            negativePrompt: 'text, watermark'
+        }, {
+            item: {},
+            getImageProvider: () => ({
+                apiKey: 'test-key',
+                endpoint: 'https://example.test/v1',
+                model: 'mj_imagine'
+            }),
+            prepareImageReferences: refs => refs
+        });
+
+        assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0].midjourney, {
+            ratio: '3:2',
+            version: '8.2',
+            raw: true,
+            stylize: 250,
+            chaos: 20,
+            weird: 400,
+            quality: '2',
+            imageWeight: 1.5,
+            styleReference: '123456',
+            styleWeight: 200,
+            styleVersion: '6',
+            omniReference: '',
+            omniWeight: 300,
+            profile: 'profile-1',
+            seed: 42,
+            tile: true,
+            draft: false,
+            repeat: 2,
+            speed: 'turbo',
+            visibility: 'stealth',
+            definition: 'hd',
+            negativePrompt: 'text, watermark'
+        });
+        assert.equal(output._batchResults.length, 4);
+        assert.deepEqual(
+            output._batchResults.map(result => result._candidateIndex),
+            [1, 2, 3, 4]
+        );
+        assert.ok(output._batchResults.every(result => result._preserveGeneratorStack === true));
+        assert.ok(output._batchResults.every(result => result._forceSquarePreview === true));
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
 test('image execute: Shadow Planner 与图片 Provider 并行且不改写真实请求', async () => {
     const generationCalls = [];
     const plannerCalls = [];

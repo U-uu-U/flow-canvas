@@ -30,3 +30,8 @@ export function inferProviderCapability(provider = {}) {
 export function providerHasCapability(provider, capability) {
     return inferProviderCapability(provider) === normalizeProviderCapability(capability);
 }
+
+export function isMidjourneyImageModel(model) {
+    const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    return normalized === 'mjimagine' || normalized === 'midjourney';
+}

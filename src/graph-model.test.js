@@ -46,6 +46,22 @@ test('getPorts: 空媒体节点按持久化 mediaType 推导输出类型', () =>
     ]);
 });
 
+test('convertGeneratorOutputConnections: 输入改为溯源线，输出改接普通素材端口', () => {
+    const connections = [
+        conn('reference', 'out', 'generator', 'source'),
+        conn('prompt', 'text', 'generator', 'source'),
+        conn('generator', 'image', 'video', 'source'),
+        conn('other', 'out', 'target', 'source')
+    ];
+
+    const converted = G.convertGeneratorOutputConnections(connections, 'generator');
+    assert.equal(converted[0].kind, 'history');
+    assert.equal(converted[0].to.port, 'source');
+    assert.equal(converted[1].kind, 'history');
+    assert.equal(converted[2].from.port, 'out');
+    assert.deepStrictEqual(converted[3], connections[3]);
+});
+
 test('getPorts: op 节点读 NODE_TYPES 定义', () => {
     const ports = G.getPorts(op('o1', 'image'));
     assert.deepStrictEqual(ports.inputs, [

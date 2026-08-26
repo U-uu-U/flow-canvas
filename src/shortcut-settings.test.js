@@ -27,6 +27,7 @@ test('captures and matches exact keyboard modifiers', () => {
     assert.equal(shortcutFromKeyboardEvent(event), 'Mod+Shift+D');
     assert.equal(matchesShortcut(event, 'Mod+Shift+D'), true);
     assert.equal(matchesShortcut(event, 'Mod+D'), false);
+    assert.equal(matchesShortcut({ key: 'Delete' }, DEFAULT_SHORTCUTS.delete), true);
 });
 
 test('formats the platform command modifier for display', () => {

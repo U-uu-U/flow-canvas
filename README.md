@@ -2,7 +2,17 @@
 
 Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作桌面应用。它把文件夹中的图片、视频和音频组织到无限画布上，并将多 API 模型、图片生成、视频生成、任务恢复和 MCP 自动化集中在同一个工作区中。
 
-当前稳定版本：`v1.2.0`
+当前稳定版本：`v1.3.0`
+
+## v1.3.0 更新内容
+
+- 重构图片生成节点交互：从画布素材直接打开紧凑生成面板，支持文本与参考素材连线、生成数量和节点参数联动。
+- 完善 Midjourney 适配：提供版本、画质、Raw、Stylize、Chaos、Weird、Seed、速度等参数，并按四宫格顺序保留全部候选结果。
+- 多结果节点支持堆叠与分支展开、悬停轮换和准确序号；复制、拖出及右键文件操作始终以当前首图为准。
+- 生图节点右键菜单补齐复制、文件地址、AI 引用、资源管理器定位、默认打开、修补、替换和文件夹操作，移动后会同步更新结果路径。
+- 新增精简版 Awesome GPT Image 2 提示词模板库，支持模板搜索、结构化写入和在原提示词后追加增强约束。
+- 文本节点支持自由拉伸，并在低缩放级别隐藏正文；画布连线、生成占位尺寸和生成面板定位进一步优化。
+- 增强 OpenAI 兼容异步任务与 Midjourney 任务轮询，补充任务 ID 恢复、跨域鉴权保护和更明确的供应商错误提示。
 
 ## v1.2.0 更新内容
 
@@ -82,9 +92,9 @@ Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作
 
 ### 使用安装包
 
-从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.2.0.exe`，按提示完成安装。
+从 [GitHub Releases](https://github.com/U-uu-U/flow-canvas/releases) 下载 `Flow.Canvas.Setup.1.3.0.exe`，按提示完成安装。
 
-也可以下载便携版 `Flow.Canvas.1.2.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
+也可以下载便携版 `Flow.Canvas.1.3.0.exe` 直接运行。当前安装包未进行商业代码签名，Windows 首次启动时可能显示 SmartScreen 提示。
 
 macOS 测试版由 GitHub Actions 分别生成 Apple Silicon (`arm64`) 和 Intel (`x64`) 的 `dmg/zip`。未签名测试包首次运行时，需要在“系统设置 > 隐私与安全性”中确认打开；正式分发建议配置 Apple Developer 签名与公证。
 
@@ -288,7 +298,7 @@ npm run build
 git diff --check
 ```
 
-## v1.2.0 支持范围
+## v1.3.0 支持范围
 
 - 桌面文件系统、剪贴板和资源管理器工作流已适配 Windows 10/11。
 - macOS 已加入 Apple Silicon/Intel 打包、Finder 拖放、文件剪贴板和 `Command` 快捷键适配，仍需在真实 Mac 上完成发布前回归测试。

@@ -83,6 +83,26 @@ export function normalizeGeneratorInputConnections(connections = [], items = [])
     return normalized;
 }
 
+export function convertGeneratorOutputConnections(connections = [], nodeId) {
+    if (!nodeId) return [...(connections || [])];
+    return (connections || []).map(connection => {
+        if (connection?.to?.nodeId === nodeId) {
+            return {
+                ...connection,
+                kind: 'history',
+                to: { ...connection.to, port: 'source' }
+            };
+        }
+        if (connection?.from?.nodeId === nodeId) {
+            return {
+                ...connection,
+                from: { ...connection.from, port: 'out' }
+            };
+        }
+        return connection;
+    });
+}
+
 function findPort(item, portName, direction) {
     const ports = getPorts(item);
     const list = direction === 'output' ? ports.outputs : ports.inputs;

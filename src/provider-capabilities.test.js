@@ -21,3 +21,10 @@ test('旧配置继续按模型信息推断用途', () => {
     assert.equal(helpers.inferProviderCapability({ capability: 'vision' }), 'text');
     assert.equal(helpers.inferProviderCapability({ capability: 'multimodal' }), 'text');
 });
+
+test('Midjourney 图片模型只匹配初始四宫格生成动作', () => {
+    assert.equal(helpers.isMidjourneyImageModel('mj_imagine'), true);
+    assert.equal(helpers.isMidjourneyImageModel('Midjourney'), true);
+    assert.equal(helpers.isMidjourneyImageModel('mj_upscale'), false);
+    assert.equal(helpers.isMidjourneyImageModel('gpt-image-2'), false);
+});

@@ -4,9 +4,13 @@ import {
     appendGeneratorResult,
     clearGeneratorResults,
     ensureGeneratorResultEntries,
+    getGeneratorResultLayout,
     keepFirstGeneratorResult,
+    promoteGeneratorResult,
     removeGeneratorResultByFilePath,
-    rotateGeneratorResults
+    replaceGeneratorResultFilePath,
+    rotateGeneratorResults,
+    setGeneratorResultLayout
 } from './generator-result-stack.js';
 
 test('migrates legacy result arrays into aligned entries', () => {
@@ -59,6 +63,24 @@ test('rotates the second result to the front and sends the first to the tail', (
     assert.equal(data.resultStackPosition, 0);
 });
 
+test('branch layout persists and any candidate can become the first result', () => {
+    const data = {
+        resultEntries: [
+            { filePath: 'A.png' },
+            { filePath: 'B.png' },
+            { filePath: 'C.png' },
+            { filePath: 'D.png' }
+        ]
+    };
+
+    assert.equal(getGeneratorResultLayout(data), 'collapsed');
+    assert.equal(setGeneratorResultLayout(data, 'branched'), true);
+    assert.equal(getGeneratorResultLayout(data), 'branched');
+    promoteGeneratorResult(data, 2);
+    assert.deepEqual(data.resultFilePaths, ['C.png', 'D.png', 'A.png', 'B.png']);
+    assert.equal(data.resultStackPosition, 2);
+});
+
 test('removing a file updates the canonical queue and legacy count fields', () => {
     const data = {
         resultEntries: [
@@ -96,4 +118,21 @@ test('copying a stacked generator keeps only the visible first result', () => {
     assert.deepEqual(data.resultUrls, ['https://example.test/b.png']);
     assert.deepEqual(data.resultItems, [{ id: 'b' }]);
     assert.equal(data.resultStackPosition, 0);
+});
+
+test('replacing a result path preserves the stack and updates nested result metadata', () => {
+    const data = {
+        resultEntries: [
+            { filePath: 'C:/output/a.png', item: { id: 'a', filePath: 'C:/output/a.png' } },
+            { filePath: 'C:/output/b.png', item: { id: 'b', filePath: 'C:/output/b.png' } }
+        ],
+        resultStackPosition: 1
+    };
+
+    const result = replaceGeneratorResultFilePath(data, 'c:\\output\\a.png', 'D:/archive/a.png');
+
+    assert.equal(result.changed, true);
+    assert.deepEqual(data.resultFilePaths, ['D:/archive/a.png', 'C:/output/b.png']);
+    assert.equal(data.resultEntries[0].item.filePath, 'D:/archive/a.png');
+    assert.equal(data.resultStackPosition, 1);
 });

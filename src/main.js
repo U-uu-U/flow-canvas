@@ -152,7 +152,7 @@ async function bootstrap() {
             repairDisconnectedMaterials(e.detail || {}, { manual: true });
         });
 
-        sidebarManager.on('moveToFolder', async ({ itemIds = [], filePaths = [], targetFolder }) => {
+        sidebarManager.on('moveToFolder', async ({ itemIds = [], filePaths = [], fileTargets = [], targetFolder }) => {
             if (!targetFolder || filePaths.length === 0) return;
             const result = await window.flowCanvas.folder.moveFiles(filePaths, targetFolder);
             if (!result?.success) {
@@ -162,18 +162,28 @@ async function bootstrap() {
 
             try {
                 isRestoringHistory = true;
-                const idByPath = new Map();
-                itemIds.forEach(id => {
-                    const item = storeData.items.find(entry => entry.id === id);
-                    if (item?.filePath) idByPath.set(item.filePath, id);
+                const idsByPath = new Map();
+                fileTargets.forEach(target => {
+                    const pathKey = normalizeFsPath(target.filePath);
+                    if (!pathKey || !target.itemId) return;
+                    const ids = idsByPath.get(pathKey) || [];
+                    ids.push(target.itemId);
+                    idsByPath.set(pathKey, ids);
                 });
 
                 (result.moved || []).forEach(({ oldPath, newPath }) => {
-                    const id = idByPath.get(oldPath);
-                    if (!id || !newPath) return;
-                    const item = storeData.items.find(entry => entry.id === id);
-                    if (item) item.filePath = newPath;
-                    canvasManager.updateItemFilePath(id, newPath);
+                    if (!oldPath || !newPath) return;
+                    const candidateIds = idsByPath.get(normalizeFsPath(oldPath)) || itemIds;
+                    candidateIds.forEach(id => {
+                        const item = storeData.items.find(entry => entry.id === id);
+                        if (!item) return;
+                        if (normalizeFsPath(item.filePath) === normalizeFsPath(oldPath)) {
+                            const updated = canvasManager.updateItemFilePath(id, newPath);
+                            if (!updated) item.filePath = newPath;
+                            return;
+                        }
+                        canvasManager.updateGeneratorResultFilePath(id, oldPath, newPath);
+                    });
                 });
             } finally {
                 isRestoringHistory = false;
@@ -853,22 +863,33 @@ async function repairDisconnectedMaterials(detail = {}, options = {}) {
     const candidateIds = itemIds.length > 0
         ? itemIds
         : (detail.itemId ? [detail.itemId] : []);
-    if (candidateIds.length === 0) return;
+    if (candidateIds.length === 0 && !(detail.fileTargets || []).length) return;
 
-    const items = candidateIds
-        .map(id => storeData.items.find(item => item.id === id))
-        .filter(Boolean);
-    if (items.length === 0) return;
+    const explicitTargets = (detail.fileTargets || [])
+        .map(target => ({
+            item: storeData.items.find(item => item.id === target.itemId),
+            filePath: target.filePath || '',
+            generatorResult: target.generatorResult === true
+        }))
+        .filter(target => target.item && target.filePath);
+    const targets = explicitTargets.length > 0
+        ? explicitTargets
+        : candidateIds
+            .map(id => storeData.items.find(item => item.id === id))
+            .filter(Boolean)
+            .map(item => ({ item, filePath: item.filePath || '', generatorResult: false }))
+            .filter(target => target.filePath);
+    if (targets.length === 0) return;
 
     let repaired = 0;
     if (options.manual) {
-        if (items.length !== 1) {
+        if (targets.length !== 1) {
             showHistoryStatus('手动重接一次只能选择 1 个素材');
             return;
         }
-        repaired = await relinkMaterialManually(items[0]);
+        repaired = await relinkMaterialManually(targets[0]);
     } else {
-        repaired = await repairMaterialsAutomatically(items);
+        repaired = await repairMaterialsAutomatically(targets);
     }
 
     if (repaired > 0) {
@@ -878,14 +899,17 @@ async function repairDisconnectedMaterials(detail = {}, options = {}) {
     }
 }
 
-async function relinkMaterialManually(item) {
+async function relinkMaterialManually(target) {
     if (!window.flowCanvas?.file?.selectReplacement) {
         showHistoryStatus('当前版本不支持选择替代文件');
         return 0;
     }
-    const expectedType = getBoardMediaType(item.filePath, item.mediaType);
+    const expectedType = getBoardMediaType(
+        target.filePath,
+        target.generatorResult ? target.item.nodeType : target.item.mediaType
+    );
     const result = await window.flowCanvas.file.selectReplacement({
-        originalPath: item.filePath,
+        originalPath: target.filePath,
         mediaType: expectedType
     });
     if (!result?.success || !result.filePath) {
@@ -901,12 +925,15 @@ async function relinkMaterialManually(item) {
         showHistoryStatus(`请选择${expectedType === 'image' ? '图片' : expectedType === 'video' ? '视频' : expectedType === 'audio' ? '音频' : '同类型'}素材`);
         return 0;
     }
-    applyMaterialRelink(item, result.filePath);
+    if (!applyMaterialRelink(target, result.filePath)) {
+        showHistoryStatus('替换失败，结果路径没有更新');
+        return 0;
+    }
     showHistoryStatus('已重接素材');
     return 1;
 }
 
-async function repairMaterialsAutomatically(items) {
+async function repairMaterialsAutomatically(targets) {
     const folders = sidebarManager?.getActiveWatchFolders?.() || storeData?.watchFolders || [];
     if (!window.flowCanvas?.folder?.scan || folders.length === 0) {
         showHistoryStatus('请先关联素材文件夹，或使用“手动重接素材”');
@@ -936,25 +963,30 @@ async function repairMaterialsAutomatically(items) {
     }
 
     let repaired = 0;
-    items.forEach(item => {
-        const match = nameMap.get(getFileNameKey(item.filePath)) || findLikelyMaterialMatch(item.filePath, candidates);
+    targets.forEach(target => {
+        const match = nameMap.get(getFileNameKey(target.filePath)) || findLikelyMaterialMatch(target.filePath, candidates);
         if (!match) return;
-        applyMaterialRelink(item, match);
-        repaired += 1;
+        if (applyMaterialRelink(target, match)) repaired += 1;
     });
 
     showHistoryStatus(repaired > 0 ? `已修补 ${repaired} 个素材` : '没有在当前文件夹里找到同名素材');
     return repaired;
 }
 
-function applyMaterialRelink(item, nextPath) {
-    const oldPath = item.filePath;
-    const updated = canvasManager.updateItemFilePath(item.id, nextPath, {
-        reflowToNewAspect: true,
-        forceReload: true
-    });
-    if (!updated) item.filePath = nextPath;
-    console.log('[Main] 素材已重接:', oldPath, '=>', nextPath);
+function applyMaterialRelink(target, nextPath) {
+    const { item, filePath: oldPath, generatorResult } = target;
+    const updated = generatorResult
+        ? canvasManager.updateGeneratorResultFilePath(item.id, oldPath, nextPath)
+        : canvasManager.updateItemFilePath(item.id, nextPath, {
+            reflowToNewAspect: true,
+            forceReload: true
+        });
+    if (!updated && !generatorResult) item.filePath = nextPath;
+    if (updated || !generatorResult) {
+        console.log('[Main] 素材已重接:', oldPath, '=>', nextPath);
+        return true;
+    }
+    return false;
 }
 
 function getFileNameKey(filePath) {

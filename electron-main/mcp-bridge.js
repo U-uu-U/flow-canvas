@@ -6,6 +6,7 @@ const sharp = require('sharp');
 const { app, net } = require('electron');
 const { PlanService, DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 const {
+    appendMidjourneyParameters,
     buildImageEditMultipart,
     buildImageTaskEndpoint,
     buildMidjourneyImaginePayload,
@@ -13,6 +14,7 @@ const {
     buildMidjourneyTaskEndpoint,
     collectImageEditInputs,
     getGeneratedImageData,
+    getGeneratedImageDataList,
     getImageTaskId,
     imageHttpErrorMessage,
     imageTaskErrorMessage,
@@ -21,7 +23,10 @@ const {
     isCompletedImageTaskStatus,
     isFailedImageTaskStatus,
     isImageTaskPayload,
-    isMidjourneyImageModel
+    isMidjourneyImagineModel,
+    isMidjourneyImageModel,
+    midjourneyGridRegions,
+    shouldUseNativeMidjourneyRoute
 } = require('./openai-image-request');
 const { ReferenceCache } = require('./reference-cache');
 
@@ -569,6 +574,11 @@ class FlowCanvasBridge {
         return {
             item: committed.item,
             filePath: result.filePath,
+            filePaths: Array.isArray(result.filePaths) && result.filePaths.length
+                ? result.filePaths
+                : [result.filePath].filter(Boolean),
+            images: Array.isArray(result.images) ? result.images : [],
+            midjourney: result.midjourney || null,
             provider: result.provider,
             taskId: result.taskId || null,
             image: {
@@ -1240,6 +1250,44 @@ async function resolveGeneratedImageBuffer(image, endpoint) {
     return Buffer.from(await imageRes.arrayBuffer());
 }
 
+function generatedImageExtension(metadata = {}) {
+    if (metadata.format === 'jpeg') return '.jpg';
+    if (metadata.format === 'webp') return '.webp';
+    if (metadata.format === 'avif') return '.avif';
+    return '.png';
+}
+
+async function saveGeneratedImage(image, endpoint, targetDir, prompt) {
+    const buffer = await resolveGeneratedImageBuffer(image, endpoint);
+    if (!buffer) return null;
+    const metadata = await sharp(buffer).metadata().catch(() => ({}));
+    const filePath = path.join(targetDir, uniqueImageName('ai', prompt, generatedImageExtension(metadata)));
+    fs.writeFileSync(filePath, buffer);
+    return {
+        filePath,
+        width: metadata.width || 1024,
+        height: metadata.height || 1024,
+        format: metadata.format || null
+    };
+}
+
+async function splitMidjourneyGrid(gridImage) {
+    const regions = midjourneyGridRegions(gridImage?.width, gridImage?.height);
+    if (regions.length !== 4 || !gridImage?.filePath) return [];
+    const parsed = path.parse(gridImage.filePath);
+    const source = sharp(gridImage.filePath);
+    return Promise.all(regions.map(async (region, index) => {
+        const filePath = path.join(parsed.dir, `${parsed.name}_U${index + 1}${parsed.ext || '.png'}`);
+        await source.clone().extract(region).toFile(filePath);
+        return {
+            filePath,
+            width: region.width,
+            height: region.height,
+            candidateIndex: index + 1
+        };
+    }));
+}
+
 async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPayload, options = {}) {
     const standardEndpoint = buildImageTaskEndpoint(generationEndpoint, taskId, options.location);
     const midjourneyEndpoint = buildMidjourneyTaskEndpoint(generationEndpoint, taskId);
@@ -1332,15 +1380,21 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         const size = String(options.size || '').trim().replace(/\u00d7/g, 'x');
         const requestedQuality = String(options.quality || 'high').trim().toLowerCase();
         const quality = ['auto', 'low', 'medium', 'high'].includes(requestedQuality) ? requestedQuality : 'high';
-        const nativeMidjourney = isMidjourneyImageModel(model);
+        const midjourneyModel = isMidjourneyImageModel(model);
+        const nativeMidjourney = shouldUseNativeMidjourneyRoute(model, providerConfig.endpoint);
+        const midjourneyOptions = midjourneyModel
+            ? { ...(options.midjourney || {}), hasImagePrompt: sourceImages.length > 0 }
+            : options.midjourney;
         const endpoint = nativeMidjourney
             ? buildMidjourneySubmitEndpoint(providerConfig.endpoint)
             : buildOpenAiImageEndpoint(providerConfig.endpoint, isEdit ? 'edits' : 'generations');
         const requestBody = nativeMidjourney
-            ? buildMidjourneyImaginePayload(prompt, sourceImages, size)
+            ? buildMidjourneyImaginePayload(prompt, sourceImages, size, midjourneyOptions)
             : {
                 model,
-                prompt,
+                prompt: midjourneyModel
+                    ? appendMidjourneyParameters(prompt, midjourneyOptions, size)
+                    : prompt,
                 n: Math.min(8, Math.max(1, Number(options.n) || 1)),
                 quality,
                 response_format: options.responseFormat === 'b64_json' ? 'b64_json' : 'url',
@@ -1401,7 +1455,8 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         } catch (_) {
             return { success: false, error: 'Image API did not return valid JSON' };
         }
-        let image = getGeneratedImageData(json);
+        let finalPayload = json;
+        let image = getGeneratedImageData(finalPayload);
         let taskId = '';
         const location = res.headers.get('location');
         if (isImageTaskPayload(json, res.status, location)) {
@@ -1419,6 +1474,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     nativeMidjourney
                 });
                 image = completed.image;
+                finalPayload = completed.payload;
             }
         } else if (res.status === 202) {
             const reason = imageTaskErrorMessage(json);
@@ -1434,30 +1490,45 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                 error: `Midjourney 提交失败：${imageTaskErrorMessage(json) || `code ${String(json?.code ?? 'unknown')}`}`
             };
         }
-        const buffer = await resolveGeneratedImageBuffer(image, endpoint);
-        if (!buffer) return { success: false, error: 'OpenAI response did not include image data' };
-        const metadata = await sharp(buffer).metadata().catch(() => ({}));
-        const extension = metadata.format === 'jpeg'
-            ? '.jpg'
-            : metadata.format === 'webp'
-                ? '.webp'
-                : metadata.format === 'avif'
-                    ? '.avif'
-                    : '.png';
-        const filePath = path.join(targetDir, uniqueImageName('ai', prompt, extension));
-        fs.writeFileSync(filePath, buffer);
-        const actualSize = metadata.width && metadata.height ? `${metadata.width}x${metadata.height}` : null;
+        const imageEntries = getGeneratedImageDataList(finalPayload);
+        if (!imageEntries.length && image) imageEntries.push(image);
+        const savedImages = (await Promise.all(imageEntries.map(entry =>
+            saveGeneratedImage(entry, endpoint, targetDir, prompt)
+        ))).filter(Boolean);
+        if (!savedImages.length) return { success: false, error: 'OpenAI response did not include image data' };
+
+        let outputImages = savedImages;
+        let gridFilePath = null;
+        if (isMidjourneyImagineModel(model) && savedImages.length === 1) {
+            const candidates = await splitMidjourneyGrid(savedImages[0]);
+            if (candidates.length === 4) {
+                gridFilePath = savedImages[0].filePath;
+                outputImages = candidates;
+            }
+        }
+
+        const primary = outputImages[0];
+        const filePath = primary.filePath;
+        const actualSize = primary.width && primary.height ? `${primary.width}x${primary.height}` : null;
+        const buttons = finalPayload?.buttons || finalPayload?.result?.buttons || [];
         return {
             success: true,
             provider: 'openai',
             filePath,
-            width: metadata.width || 1024,
-            height: metadata.height || 1024,
+            filePaths: outputImages.map(entry => entry.filePath),
+            images: outputImages,
+            width: primary.width || 1024,
+            height: primary.height || 1024,
             requestedSize: size || null,
             actualSize,
             sizeMatchesRequest: !size || !actualSize || actualSize.toLowerCase() === size.toLowerCase(),
             endpointMode: nativeMidjourney ? 'midjourney-imagine' : (isEdit ? 'edits' : 'generations'),
-            taskId: taskId || null
+            taskId: taskId || null,
+            midjourney: midjourneyModel ? {
+                candidateCount: outputImages.length,
+                gridFilePath,
+                buttons: Array.isArray(buttons) ? buttons : []
+            } : null
         };
     } catch (error) {
         return { success: false, error: error.message };

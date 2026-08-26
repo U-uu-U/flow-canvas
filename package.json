@@ -1,11 +1,12 @@
 {
     "name": "flow-canvas",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "本地素材管理、无限画布与 AI 图片/视频创作桌面应用",
     "main": "electron-main/main.js",
     "scripts": {
         "dev": "vite",
-        "test": "node --test electron-main/generation-trace-store.test.js electron-main/openai-image-request.test.js electron-main/reference-cache.test.js src/generator-placeholder-layout.test.js src/generator-result-stack.test.js src/graph-model.test.js src/graph-runner.test.js src/graph-view.test.js src/image-crop-layout.test.js src/image-intent-pipeline.test.js src/image-node-settings.test.js src/node-types.test.js src/provider-capabilities.test.js src/selection-toolbar-layout.test.js src/shortcut-settings.test.js src/undo-stack.test.js src/video-control-layout.test.js src/viewport-zoom.test.js",
+        "test": "node --test electron-main/generation-trace-store.test.js electron-main/openai-image-request.test.js electron-main/reference-cache.test.js src/generator-placeholder-layout.test.js src/generator-result-stack.test.js src/graph-model.test.js src/graph-runner.test.js src/graph-view.test.js src/image-crop-layout.test.js src/image-intent-pipeline.test.js src/image-node-settings.test.js src/node-types.test.js src/prompt-pack-registry.test.js src/provider-capabilities.test.js src/selection-toolbar-layout.test.js src/shortcut-settings.test.js src/undo-stack.test.js src/video-control-layout.test.js src/viewport-zoom.test.js",
+        "sync:prompt-pack": "node scripts/sync-awesome-prompt-pack.mjs",
         "build": "vite build",
         "mcp": "node mcp/flow-canvas-mcp.mjs",
         "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",

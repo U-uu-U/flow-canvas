@@ -634,6 +634,7 @@ export class GraphView {
         if (opts.kind && opts.kind !== 'flow') conn.kind = opts.kind;
         this.connections.push(conn);
         this.canvas.refreshOpNode?.(to.nodeId);
+        this.canvas._syncGenerationReferenceBadge?.(from.nodeId);
         this.renderPorts(from.nodeId);
         this.renderPorts(to.nodeId);
         this.drawEdge(conn);
@@ -648,6 +649,7 @@ export class GraphView {
         this.edgeShapes.delete(connectionId);
         if (removed) {
             this.canvas.refreshOpNode?.(removed.to.nodeId);
+            this.canvas._syncGenerationReferenceBadge?.(removed.from.nodeId);
             this.renderPorts(removed.from.nodeId);
             this.renderPorts(removed.to.nodeId);
         }
@@ -782,10 +784,21 @@ export class GraphView {
         this.clearPorts(nodeId);
     }
 
+    convertGeneratorOutputNode(nodeId) {
+        this.load(G.convertGeneratorOutputConnections(this.connections, nodeId));
+    }
+
     load(connections) {
         this.edgeShapes.forEach(line => line.destroy());
         this.edgeShapes.clear();
-        this.connections = G.normalizeGeneratorInputConnections(connections, this._allNodes());
+        const migratedGeneratorIds = (this.canvas.storeData?.items || [])
+            .filter(item => item?.kind === 'media' && item.generation?.replacedGenerator)
+            .map(item => item.id);
+        const migratedConnections = migratedGeneratorIds.reduce(
+            (current, nodeId) => G.convertGeneratorOutputConnections(current, nodeId),
+            connections || []
+        );
+        this.connections = G.normalizeGeneratorInputConnections(migratedConnections, this._allNodes());
         new Set(this.connections.map(connection => connection.to.nodeId))
             .forEach(nodeId => this.canvas.refreshOpNode?.(nodeId));
         // 卡片尺寸在内容加载后才稳定，先画一遍再于下一帧重算坐标
@@ -794,6 +807,7 @@ export class GraphView {
         requestAnimationFrame(() => {
             this.renderAllPorts();
             this.connections.forEach(conn => this.drawEdge(conn));
+            this.canvas._syncAllGenerationReferenceBadges?.();
         });
     }
 
