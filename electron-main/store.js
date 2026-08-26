@@ -14,8 +14,10 @@ const DEFAULT_DATA = {
     version: 1,
     watchFolders: [],
     folderGroups: [],       // [{id, name, folders: [...paths], items: [...]}]
+    assetLibrary: { folders: [], defaultFolder: null },
     activeGroupId: null,    // 当前激活的文件夹组 ID
     items: [],
+    connections: [],        // [{id, from: {nodeId, port}, to: {nodeId, port}}]
     mcp: { ...DEFAULT_MCP_CONFIG },
     viewport: { x: 0, y: 0, scale: 1 },
     defaultSaveFolder: null,
@@ -73,14 +75,27 @@ class Store {
             ? source.folderGroups.map(group => this._normalizeGroup(group))
             : [];
         const activeGroup = folderGroups.find(group => group.id === source.activeGroupId) || null;
+        const assetLibrarySource = source.assetLibrary && typeof source.assetLibrary === 'object'
+            ? source.assetLibrary
+            : {};
+        const assetLibraryFolders = Array.isArray(assetLibrarySource.folders)
+            ? [...new Set(assetLibrarySource.folders.filter(folder => typeof folder === 'string' && folder.trim()))]
+            : [];
 
         return {
             ...DEFAULT_DATA,
             ...source,
             watchFolders: Array.isArray(source.watchFolders) ? [...source.watchFolders] : [],
             folderGroups,
+            assetLibrary: {
+                folders: assetLibraryFolders,
+                defaultFolder: typeof assetLibrarySource.defaultFolder === 'string'
+                    ? assetLibrarySource.defaultFolder
+                    : null
+            },
             activeGroupId: activeGroup ? activeGroup.id : (source.activeGroupId || null),
             items: Array.isArray(source.items) ? [...source.items] : [],
+            connections: Array.isArray(source.connections) ? [...source.connections] : [],
             removedFromBoardPaths: Array.isArray(source.removedFromBoardPaths)
                 ? [...source.removedFromBoardPaths]
                 : [],
@@ -115,7 +130,8 @@ class Store {
                 ? [...source.removedFromBoardPaths]
                 : [],
             removedFromBoardPathsInitialized: source.removedFromBoardPathsInitialized === true,
-            plans: Array.isArray(source.plans) ? [...source.plans] : []
+            plans: Array.isArray(source.plans) ? [...source.plans] : [],
+            connections: Array.isArray(source.connections) ? [...source.connections] : []
         };
 
         delete normalized.items;
@@ -137,11 +153,19 @@ class Store {
         const existingGroups = Array.isArray(existing?.folderGroups) ? existing.folderGroups.length : 0;
         const existingWatchFolders = Array.isArray(existing?.watchFolders) ? existing.watchFolders.length : 0;
         const existingItems = Array.isArray(existing?.items) ? existing.items.length : 0;
+        const existingAssetFolders = Array.isArray(existing?.assetLibrary?.folders)
+            ? existing.assetLibrary.folders.length
+            : 0;
         const nextGroups = Array.isArray(next?.folderGroups) ? next.folderGroups.length : 0;
         const nextWatchFolders = Array.isArray(next?.watchFolders) ? next.watchFolders.length : 0;
         const nextItems = Array.isArray(next?.items) ? next.items.length : 0;
-        const existingHasBoardData = existingGroups > 0 || existingWatchFolders > 0 || existingItems > 0;
-        const nextIsEmptyBoard = nextGroups === 0 && nextWatchFolders === 0 && nextItems === 0 && !next.activeGroupId;
+        const nextAssetFolders = Array.isArray(next?.assetLibrary?.folders)
+            ? next.assetLibrary.folders.length
+            : 0;
+        const existingHasBoardData = existingGroups > 0 || existingWatchFolders > 0
+            || existingItems > 0 || existingAssetFolders > 0;
+        const nextIsEmptyBoard = nextGroups === 0 && nextWatchFolders === 0 && nextItems === 0
+            && nextAssetFolders === 0 && !next.activeGroupId;
         return existingHasBoardData && nextIsEmptyBoard;
     }
 

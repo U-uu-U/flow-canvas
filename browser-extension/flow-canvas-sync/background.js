@@ -1,5 +1,10 @@
 const NATIVE_HOST = 'com.flow.canvas_sync';
 const ROUTED_TASK_TAKEOVER_DELAY_MS = 60000;
+const CAPTURE_MEDIA_LIMIT = 160;
+const CAPTURE_MEDIA_EXT = /\.(mp4|webm|mov|m4v|mp3|m4a|wav|ogg|flac|aac)(?:[?#]|$)/i;
+const CAPTURE_STREAM_EXT = /\.(m3u8|mpd)(?:[?#]|$)/i;
+const CAPTURE_SEGMENT_EXT = /\.(ts|m4s|cmf[vat])(?:[?#]|$)/i;
+const captureMediaByTab = new Map();
 const DEFAULT_SETTINGS = {
   enabled: true,
   autoDownload: true,
@@ -168,6 +173,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!state.settings.autoDownloadSince) state.settings.autoDownloadSince = Date.now();
   await saveState(state);
   await sendNative({ action: 'ping' });
+  await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false }).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -196,7 +202,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
+  if (message?.type === 'GET_CAPTURE_CONTEXT') {
+    sendNative({ action: 'flow_context' }).then(sendResponse);
+    return true;
+  }
+  if (message?.type === 'GET_CAPTURE_MEDIA') {
+    const items = [...(captureMediaByTab.get(Number(message.tabId))?.values() || [])];
+    sendResponse({ success: true, items });
+    return false;
+  }
+  if (message?.type === 'IMPORT_CAPTURE_ASSETS') {
+    sendNative({
+      action: 'import_assets',
+      libraryId: message.libraryId,
+      targetFolder: message.targetFolder,
+      categories: message.categories,
+      autoClassify: message.autoClassify === true,
+      assets: message.assets
+    }).then(sendResponse);
+    return true;
+  }
+  if (message?.type === 'OPEN_CAPTURE_PANEL') {
+    chrome.windows.getCurrent().then(windowInfo => chrome.sidePanel.open({ windowId: windowInfo.id }))
+      .then(() => sendResponse({ success: true }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
 });
+
+function captureMediaKind(url, contentType) {
+  if (CAPTURE_STREAM_EXT.test(url) || /mpegurl|dash/i.test(contentType || '')) return 'video';
+  if (/^audio\//i.test(contentType || '') || /\.(mp3|m4a|wav|ogg|flac|aac)(?:[?#]|$)/i.test(url)) return 'audio';
+  return 'video';
+}
+
+function rememberCaptureMedia(tabId, url, contentType) {
+  if (!Number.isInteger(tabId) || tabId < 0 || !url || /^(?:blob|data):/i.test(url)) return;
+  let media = captureMediaByTab.get(tabId);
+  if (!media) {
+    media = new Map();
+    captureMediaByTab.set(tabId, media);
+  }
+  if (media.has(url) || media.size >= CAPTURE_MEDIA_LIMIT) return;
+  media.set(url, {
+    url,
+    sourceUrl: url,
+    kind: captureMediaKind(url, contentType),
+    contentType: contentType || '',
+    streamType: CAPTURE_STREAM_EXT.test(url) || /mpegurl|dash/i.test(contentType || '') ? 'stream' : '',
+    fromNetwork: true
+  });
+}
+
+chrome.webRequest.onHeadersReceived.addListener(details => {
+  if (details.type === 'main_frame') {
+    captureMediaByTab.delete(details.tabId);
+    return;
+  }
+  if (CAPTURE_SEGMENT_EXT.test(details.url)) return;
+  const contentType = String((details.responseHeaders || [])
+    .find(header => String(header.name || '').toLowerCase() === 'content-type')?.value || '')
+    .split(';', 1)[0].trim();
+  if (/mp2t/i.test(contentType)) return;
+  if (/^(?:video|audio)\//i.test(contentType) || /mpegurl|dash/i.test(contentType)
+    || CAPTURE_MEDIA_EXT.test(details.url) || CAPTURE_STREAM_EXT.test(details.url)) {
+    rememberCaptureMedia(details.tabId, details.url, contentType);
+  }
+}, { urls: ['<all_urls>'] }, ['responseHeaders']);
+
+chrome.tabs.onRemoved.addListener(tabId => captureMediaByTab.delete(tabId));
 
 chrome.downloads.onChanged.addListener(async delta => {
   if (!delta.state?.current || !['complete', 'interrupted'].includes(delta.state.current)) return;

@@ -1,13 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Flow Download Manager + Task Sync",
-  "version": "2.0.0",
-  "description": "保留自定义下载归档，并同步视频任务到 Flow Canvas。",
+  "name": "Flow Canvas 素材采集与任务同步",
+  "version": "3.0.0",
+  "description": "从网页批量采集素材到 Flow Canvas，并同步视频任务与下载。",
   "permissions": [
+    "activeTab",
     "downloads",
     "nativeMessaging",
+    "scripting",
+    "sidePanel",
     "storage",
-    "tabs"
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -33,6 +41,9 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Flow Canvas Task Sync"
+    "default_title": "Flow Canvas"
+  },
+  "side_panel": {
+    "default_path": "capture.html"
   }
 }

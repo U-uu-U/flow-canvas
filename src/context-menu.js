@@ -36,11 +36,18 @@ export class ContextMenu {
             const primaryPath = this.currentItem.filePath;
             const filePaths = this.currentItem.filePaths || [primaryPath];
             const itemIds = this.currentItem.itemIds || null;
+            const nodeId = this.currentItem.itemId || itemIds?.[0] || null;
 
             this.hide();
 
             try {
-                if (action === 'copy') {
+                if (action === 'editNode') {
+                    document.dispatchEvent(new CustomEvent('context-edit-node', { detail: { nodeId } }));
+                } else if (action === 'runNode') {
+                    document.dispatchEvent(new CustomEvent('context-run-node', { detail: { nodeId } }));
+                } else if (action === 'duplicateNode') {
+                    document.dispatchEvent(new CustomEvent('context-duplicate-node', { detail: { itemIds } }));
+                } else if (action === 'copy') {
                     const copyPaths = filePaths.length > 0 ? filePaths : [primaryPath];
                     const res = await window.flowCanvas.clipboard.copy(copyPaths);
                     if (res.success) {
@@ -119,10 +126,20 @@ export class ContextMenu {
     show(e, item) {
         e.evt.preventDefault();
         this.currentItem = item;
+        const isOpNode = item.kind === 'op';
+
+        this.el.querySelectorAll('.context-op-only').forEach(menuItem => {
+            menuItem.style.display = isOpNode ? '' : 'none';
+        });
+        this.el.querySelectorAll('.context-menu-divider:not(.context-op-only)').forEach(divider => {
+            divider.style.display = isOpNode ? 'none' : '';
+        });
 
         // 根据选择数量更新描述文字
         const removeBtnSpan = this.el.querySelector('[data-action="removeFromBoard"] span:nth-child(2)');
-        if (item.filePaths && item.filePaths.length > 1) {
+        if (isOpNode) {
+            removeBtnSpan.textContent = '删除节点';
+        } else if (item.filePaths && item.filePaths.length > 1) {
             removeBtnSpan.textContent = `从白板移除 (${item.filePaths.length} 项)`;
         } else {
             removeBtnSpan.textContent = `从白板移除`;
@@ -160,9 +177,18 @@ export class ContextMenu {
 
         const relinkItem = this.el.querySelector('[data-action="relinkMaterial"]');
         if (relinkItem) {
-            const canRelink = (item.itemIds || []).length === 1 || Boolean(item.itemId);
+            const canRelink = !isOpNode && ((item.itemIds || []).length === 1 || Boolean(item.itemId));
             relinkItem.style.display = canRelink ? '' : 'none';
+            const relinkText = relinkItem.querySelector('span:nth-child(2)');
+            if (relinkText) relinkText.textContent = item.loadError ? '手动重接素材' : (item.filePath ? '替换素材' : '上传素材');
         }
+
+        const hasFiles = (item.filePaths || []).filter(Boolean).length > 0 || Boolean(item.filePath);
+        ['copy', 'copyFilePath', 'copyAiReference', 'showInExplorer', 'openFile', 'copyToFolder', 'copyToExplorer', 'moveToFolder']
+            .forEach(action => {
+                const menuItem = this.el.querySelector(`[data-action="${action}"]`);
+                if (menuItem) menuItem.style.display = hasFiles ? '' : 'none';
+            });
 
         this.el.style.left = `${e.evt.clientX}px`;
         this.el.style.top = `${e.evt.clientY}px`;

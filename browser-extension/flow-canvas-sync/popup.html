@@ -11,7 +11,7 @@
     <header>
       <div class="mark">FC</div>
       <div>
-        <h1>任务同步</h1>
+        <h1>Flow Canvas</h1>
         <p id="connectionText">正在检查本地连接</p>
       </div>
       <i id="connectionDot"></i>
@@ -34,7 +34,13 @@
       <div><b id="downloadCount">0</b><span>下载中</span></div>
     </div>
 
-    <button class="primary" id="scanNow" type="button">立即同步</button>
+    <button class="capture-entry" id="openCapture" type="button">
+      <span class="capture-entry-icon" aria-hidden="true"></span>
+      <span><b>网页素材采集</b><small>扫描当前页面并批量放入素材库</small></span>
+      <i aria-hidden="true">›</i>
+    </button>
+
+    <button class="primary" id="scanNow" type="button">立即同步任务</button>
     <p class="hint">目标目录跟随 Flow Canvas 发起任务时的画板目录。</p>
   </main>
   <script src="popup.js"></script>

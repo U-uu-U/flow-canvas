@@ -3,9 +3,96 @@
 // ============================================================
 
 import Konva from 'konva';
+import { GraphView, viewportFixedScale } from './graph-view.js';
+import { NODE_TYPES } from './node-types.js';
+import { nodeIconSvg } from './node-icons.js';
+import { GraphRunner, STATUS } from './graph-runner.js';
+import {
+    MAX_VIEWPORT_SCALE,
+    MIN_VIEWPORT_SCALE,
+    isCanvasTextContentVisible,
+    normalizeWheelDelta,
+    wheelZoomFactor,
+    zoomViewportAtPoint
+} from './viewport-zoom.js';
+import { getSelectionToolbarPosition } from './selection-toolbar-layout.js';
+import {
+    moveCropRect,
+    normalizeCropRect,
+    resizeCropRect
+} from './image-crop-layout.js';
+import {
+    getGeneratorComposerPosition,
+    getGeneratorPlaceholderSize
+} from './generator-placeholder-layout.js';
+import {
+    appendGeneratorResult,
+    clearGeneratorResults,
+    ensureGeneratorResultEntries,
+    getGeneratorResultEntries,
+    keepFirstGeneratorResult,
+    removeGeneratorResultByFilePath,
+    rotateGeneratorResults
+} from './generator-result-stack.js';
+import {
+    IMAGE_ASPECT_RATIOS,
+    IMAGE_RESOLUTION_TIERS,
+    inferImageAspectRatio,
+    inferImageResolutionTier,
+    resolveGenerationDisplaySize,
+    resolveImageDimensions
+} from './image-node-settings.js';
+import {
+    VIDEO_CONTROL_BUTTON_WIDTH,
+    VIDEO_CONTROL_HEIGHT,
+    VIDEO_CONTROL_PROGRESS_RIGHT_PADDING,
+    VIDEO_CONTROL_PROGRESS_X,
+    getVideoControlLayout
+} from './video-control-layout.js';
+import {
+    DEFAULT_SHORTCUTS,
+    SHORTCUTS_CHANGED_EVENT,
+    loadShortcutBindings,
+    matchesShortcut,
+    normalizeShortcutBindings
+} from './shortcut-settings.js';
+
+const OP_NODE_WIDTH = 300;
+const OP_NODE_HEIGHT = 156;
+const OP_NODE_HEIGHTS = {
+    text: 210,
+    image: 300,
+    video: 236,
+    batch: 156
+};
+const OP_NODE_FOOTER_HEIGHT = 48;
+const OP_NODE_PROMPT_TOP = 43;
+const OP_GENERATOR_REFERENCE_TOP = 42;
+const OP_GENERATOR_PROMPT_TOP = 96;
+const GENERATION_COMPOSER_CARET_ANCHOR = '\u200B';
+const OP_STATUS_COLORS = {
+    error: '#ef4444'
+};
+const OP_STATUS_LABELS = {
+    idle: '待生成',
+    queued: '排队中',
+    running: '生成中',
+    done: '已完成',
+    error: '生成失败'
+};
+const NODE_GLYPH_PATHS = {
+    image: 'M3 4H17V16H3Z M5 13L8 10L10.5 12.5L13 9.5L17 14 M6.5 7.5H6.6',
+    video: 'M3 4H17V16H3Z M7 4V16 M13 4V16 M9 8L13 10L9 12Z',
+    audio: 'M4 8H7L11 5V15L7 12H4Z M14 7C16 9 16 11 14 13',
+    document: 'M5 3H12L16 7V17H5Z M12 3V7H16 M8 10H13 M8 13H13',
+    text: 'M4 5H16 M4 9H14 M4 13H12 M4 17H9',
+    batch: 'M3 6L10 3L17 6L10 9Z M3 10L10 13L17 10 M3 14L10 17L17 14'
+};
 
 const IMAGE_DEFAULT_WIDTH = 300;
 const DOC_DEFAULT_SIZE = 150;
+const AUDIO_NODE_WIDTH = 300;
+const AUDIO_NODE_HEIGHT = 96;
 const CANVAS_BOUNDARY_MIN_WIDTH = 1400;
 const CANVAS_BOUNDARY_MIN_HEIGHT = 1000;
 const CANVAS_BOUNDARY_PADDING = 260;
@@ -62,6 +149,122 @@ const PLAN_HEADER_ROW_HEIGHT = 28;
 const INTERNAL_PROCESS_FILE_PREFIXES = ['flow_source_builtin_', 'flow_builtin_'];
 const DEFAULT_STATUS_OPTIONS = ['未开始', '进行中', '待确认', '已完成'];
 
+function normalizeDroppedText(value) {
+    return String(value || '')
+        .replace(/&amp;/gi, '&')
+        .replace(/\\u002f/gi, '/')
+        .replace(/\\\//g, '/');
+}
+
+function collectDroppedUrls(value) {
+    const text = normalizeDroppedText(value);
+    const urls = text.match(/https?:\/\/[^\s<>"']+/gi) || [];
+    const encodedUrls = text.match(/https?%3a%2f%2f[^\s<>"']+/gi) || [];
+    encodedUrls.forEach(url => {
+        try {
+            urls.push(decodeURIComponent(url));
+        } catch (_) {
+            // Ignore malformed encoded URLs.
+        }
+    });
+    const relativePin = /(?:^|["'\s])(\/pin\/\d+\/?)(?=$|["'\s?#])/i.exec(text)?.[1];
+    if (relativePin) urls.push(`https://www.pinterest.com${relativePin}`);
+    const trimmed = text.trim();
+    if (/^data:image\/[a-z0-9.+-]+[;,]/i.test(trimmed)) urls.push(trimmed);
+    return urls;
+}
+
+function scoreDroppedImageUrl(url, source = '', descriptor = '') {
+    let score = 0;
+    if (/^data:image\//i.test(url)) score += 700;
+    if (/\.pinimg\.com\//i.test(url)) score += 500;
+    if (/\.pinimg\.com\/originals\//i.test(url)) score += 400;
+    const pinWidth = /\.pinimg\.com\/(\d+)x\//i.exec(url)?.[1];
+    if (pinWidth) score += Math.min(300, Number.parseInt(pinWidth, 10) / 3);
+    if (/\.(?:jpe?g|png|webp|gif|bmp|tiff?)(?:[?#]|$)/i.test(url)) score += 180;
+    if (source === 'srcset') score += 80;
+    if (source === 'img') score += 50;
+    const width = Number.parseInt(descriptor, 10);
+    if (Number.isFinite(width)) score += Math.min(100, width / 20);
+    if (/pinterest\.[^/]+\/pin\//i.test(url)) score -= 200;
+    return score;
+}
+
+function collectDroppedImageUrls(dataTransfer, extraPayloads = []) {
+    const candidates = [];
+    const add = (value, source = '', descriptor = '') => {
+        collectDroppedUrls(value).forEach(url => {
+            candidates.push({ url, score: scoreDroppedImageUrl(url, source, descriptor) });
+            const resizedPin = /^(https?:\/\/i\.pinimg\.com\/)(?:\d+x)(\/.*)$/i.exec(url);
+            if (resizedPin && !/\/736x\//i.test(url)) {
+                const largerUrl = `${resizedPin[1]}736x${resizedPin[2]}`;
+                candidates.push({
+                    url: largerUrl,
+                    score: scoreDroppedImageUrl(largerUrl, 'srcset', '736w')
+                });
+            }
+        });
+    };
+
+    const html = dataTransfer?.getData?.('text/html') || '';
+    if (html) {
+        try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            doc.querySelectorAll('img, source, video, image, [style]').forEach(element => {
+                ['src', 'data-src', 'data-original', 'data-lazy-src', 'poster', 'href', 'xlink:href'].forEach(attribute => {
+                    add(element.getAttribute(attribute), 'img');
+                });
+                ['srcset', 'data-srcset'].forEach(attribute => {
+                    String(element.getAttribute(attribute) || '').split(',').forEach(entry => {
+                        const [candidateUrl, descriptor] = entry.trim().split(/\s+/, 2);
+                        add(candidateUrl, 'srcset', descriptor);
+                    });
+                });
+                add(element.getAttribute('style'), 'style');
+            });
+            doc.querySelectorAll('meta[property="og:image"], meta[name="twitter:image"], a[href]').forEach(element => {
+                add(element.getAttribute('content') || element.getAttribute('href'), 'html');
+            });
+        } catch (error) {
+            console.warn('[Canvas] HTML drop parsing failed:', error);
+        }
+        add(html, 'html-raw');
+    }
+
+    const handledTypes = new Set(['text/html']);
+    Array.from(dataTransfer?.types || []).forEach(type => {
+        const normalizedType = String(type || '').toLowerCase();
+        if (!type || normalizedType === 'files' || handledTypes.has(normalizedType)) return;
+        try {
+            add(dataTransfer.getData(type), normalizedType);
+            handledTypes.add(normalizedType);
+        } catch (_) {
+            // Some browser-specific drag formats cannot be read outside their source app.
+        }
+    });
+    ['text/uri-list', 'text/plain', 'text/x-moz-url', 'text/x-moz-url-data', 'url', 'downloadurl'].forEach(type => {
+        if (handledTypes.has(type)) return;
+        try {
+            add(dataTransfer?.getData?.(type), type);
+        } catch (_) {
+            // Try the remaining known formats.
+        }
+    });
+    extraPayloads.forEach(payload => add(payload?.value, payload?.type || 'drag-item'));
+
+    const bestByUrl = new Map();
+    candidates.forEach(candidate => {
+        const normalizedUrl = candidate.url.replace(/[),.;]+$/, '');
+        const previous = bestByUrl.get(normalizedUrl);
+        if (!previous || candidate.score > previous.score) {
+            bestByUrl.set(normalizedUrl, { ...candidate, url: normalizedUrl });
+        }
+    });
+    return [...bestByUrl.values()]
+        .sort((left, right) => right.score - left.score)
+        .map(candidate => candidate.url);
+}
+
 export class CanvasManager {
     constructor(containerId, storeData, contextMenu, planService = null, options = {}) {
         this.options = options;
@@ -74,6 +277,10 @@ export class CanvasManager {
         this.selectedItems = new Set();
         this.currentFilter = 'all';
         this.isAltPressed = false;
+        this.shortcutBindings = loadShortcutBindings();
+        document.addEventListener(SHORTCUTS_CHANGED_EVENT, event => {
+            this.shortcutBindings = normalizeShortcutBindings(event.detail);
+        });
 
         const container = document.getElementById(containerId);
         this.container = container;
@@ -91,12 +298,14 @@ export class CanvasManager {
         });
         if (!container.style.position) container.style.position = 'relative';
         container.style.cursor = 'default';
+        this._createSelectionToolbar();
 
         this.boundaryLayer = new Konva.Layer({ listening: false });
         this.canvasBoundary = new Konva.Rect({
             listening: false,
-            fill: 'rgba(24, 25, 31, 0.24)',
-            stroke: 'rgba(124, 132, 145, 0.36)',
+            visible: false,
+            fill: 'transparent',
+            stroke: 'transparent',
             strokeWidth: 1,
             dash: [10, 8],
             strokeScaleEnabled: false,
@@ -107,12 +316,18 @@ export class CanvasManager {
         this._canvasBounds = null;
         this._minimapDrawPending = false;
         this._minimapTransform = null;
+        this._minimapUserVisible = false;
+        this._gridVisible = true;
+        this._connectionsVisible = true;
+        this._autoSnapEnabled = this.storeData.autoSnapEnabled !== false;
 
         this.layer = new Konva.Layer();
         this.stage.add(this.layer);
 
         this.transientLayer = new Konva.Layer();
         this.stage.add(this.transientLayer);
+
+        this.graphView = new GraphView(this, Konva);
         this.generationPlaceholders = new Map();
         this.pendingGenerationPlacements = new Map();
 
@@ -175,11 +390,25 @@ export class CanvasManager {
         this.planInlineLayer = document.createElement('div');
         this.planInlineLayer.className = 'plan-inline-layer';
         container.appendChild(this.planInlineLayer);
+        this.opInlineLayer = document.createElement('div');
+        this.opInlineLayer.className = 'op-inline-layer';
+        container.appendChild(this.opInlineLayer);
+        this._activeOpPromptEditor = null;
+        this._textNodeEditors = new Map();
+        this._textNodeChangeTimers = new Map();
+        this._activeMediaTitleEditor = null;
+        this._visualExtractingNodeIds = new Set();
+        this._generationComposer = null;
+        this._generationTypeMenu = null;
+        this._activeImageCrop = null;
+        this._imageCropPointerCleanup = null;
+        this._activeNodeReferenceTargetId = null;
         this.planInlineEditors = new Map();
         this._inlinePlanChangeTimers = new Map();
         this._hoveredPlanId = null;
         this._hoveredPlanRowKey = null;
         this._hoveredReferenceItem = null;
+        this._hoveredMediaItemId = null;
         this._hoveredConnectionTargetId = null;
         this._selectedPlanConnection = null;
         this._activePlanReferencePick = null;
@@ -194,14 +423,23 @@ export class CanvasManager {
         this._dragConnectionRefreshTimer = null;
         this._lastDragConnectionRefreshAt = 0;
         this._setupCanvasMinimap();
+        this._setupCanvasViewDock();
+        this._setupCanvasToolRail();
 
         if (storeData.viewport) {
+            const initialScale = Math.max(
+                MIN_VIEWPORT_SCALE,
+                Math.min(MAX_VIEWPORT_SCALE, Number(storeData.viewport.scale) || 1)
+            );
             this.stage.position({ x: storeData.viewport.x, y: storeData.viewport.y });
-            this.stage.scale({ x: storeData.viewport.scale, y: storeData.viewport.scale });
+            this.stage.scale({ x: initialScale, y: initialScale });
         }
 
         // ── 性能优化：rAF 合并高频事件 ──
         this._rafPending = false;
+        this._wheelZoomFrame = 0;
+        this._wheelZoomDelta = 0;
+        this._wheelZoomPointer = null;
         this._bgCachedScale = -1;   // 缓存上次 SVG 对应的 scale
         this._bgCachedSvg = '';     // 缓存的 SVG data URI
         this._bgCachedSize = 0;     // 缓存的 screenSize
@@ -223,10 +461,20 @@ export class CanvasManager {
                 this._rafPending = true;
                 requestAnimationFrame(() => {
                     this._rafPending = false;
+                    this._syncHoveredMediaItemAtPointer();
+                    this._scheduleSelectionToolbarSync();
+                    this._positionImageCropOverlay();
                     this.syncGifs();
                     this.syncBackground();
+                    this._syncViewportFixedControls();
                     this.syncPlanInlineEditors();
+                    this._syncPersistentTextEditors();
+                    this._positionOpPromptEditor();
+                    this._positionMediaTitleEditor();
+                    this._positionGenerationComposer();
+                    this._syncCanvasViewDock();
                     this._scheduleMinimapDraw();
+                    this.graphView?.scheduleVisiblePortsRefresh();
                     this._scheduleCullCheck(this._CULL_IDLE_MS);
                 });
             }
@@ -241,7 +489,14 @@ export class CanvasManager {
             this.stage.width(container.offsetWidth);
             this.stage.height(container.offsetHeight);
             this.syncPlanInlineEditors();
+            this._syncPersistentTextEditors();
+            this._positionOpPromptEditor();
+            this._positionMediaTitleEditor();
+            this._positionGenerationComposer();
+            this._scheduleSelectionToolbarSync();
+            this._positionImageCropOverlay();
             this._refreshCanvasBoundary();
+            this.graphView?.scheduleVisiblePortsRefresh(0);
         });
         ro.observe(container);
 
@@ -263,6 +518,20 @@ export class CanvasManager {
                 changed = true;
             }
             if (changed) this.emit('change');
+        });
+
+        document.addEventListener('context-edit-node', event => {
+            const nodeId = event.detail?.nodeId;
+            if (nodeId) this.openOpNodeEditor(nodeId);
+        });
+
+        document.addEventListener('context-run-node', event => {
+            const nodeId = event.detail?.nodeId;
+            if (nodeId) void this.runFromNode(nodeId);
+        });
+
+        document.addEventListener('context-duplicate-node', event => {
+            this.duplicateItems(event.detail?.itemIds || []);
         });
     }
 
@@ -288,11 +557,15 @@ export class CanvasManager {
     syncBackground() {
         const gridEl = document.getElementById('canvasGrid');
         if (!gridEl) return;
+        if (!this._gridVisible) {
+            gridEl.style.opacity = '0';
+            return;
+        }
 
         const scale = this.stage.scaleX();
         const pos = this.stage.position();
 
-        const GRID_SIZE = 48;
+        const GRID_SIZE = 32;
         const screenSize = GRID_SIZE * scale;
 
         // 自适应透明度
@@ -313,8 +586,8 @@ export class CanvasManager {
             this._bgCachedScale = scale;
             this._bgCachedSize = screenSize;
 
-            const dotR = Math.max(0.5, Math.min(1.2, scale * 0.8));
-            const dotColor = `rgba(255,255,255,${(opacity * 0.07).toFixed(3)})`;
+            const dotR = Math.max(0.55, Math.min(1.05, scale * 0.72));
+            const dotColor = `rgba(255,255,255,${(opacity * 0.11).toFixed(3)})`;
             const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${screenSize}' height='${screenSize}'><circle cx='${screenSize / 2}' cy='${screenSize / 2}' r='${dotR}' fill='${dotColor}'/></svg>`;
             this._bgCachedSvg = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 
@@ -420,6 +693,244 @@ export class CanvasManager {
         });
     }
 
+    _setupCanvasViewDock() {
+        this.canvasMinimapToggle = document.getElementById('canvasMinimapToggle');
+        this.canvasConnectionsToggle = document.getElementById('canvasConnectionsToggle');
+        this.canvasGridToggle = document.getElementById('canvasGridToggle');
+        this.canvasSnapToggle = document.getElementById('canvasSnapToggle');
+        this.canvasFitToggle = document.getElementById('canvasFitToggle');
+
+        const stop = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+
+        this.canvasMinimapToggle?.addEventListener('click', (event) => {
+            stop(event);
+            this._minimapUserVisible = !this._minimapUserVisible;
+            const hasEntries = this._collectCanvasOverviewEntries().length > 0;
+            if (this.minimapPanel) this.minimapPanel.hidden = !this._minimapUserVisible || !hasEntries;
+            this._scheduleMinimapDraw();
+            this._syncCanvasViewDock();
+        });
+
+        this.canvasConnectionsToggle?.addEventListener('click', (event) => {
+            stop(event);
+            this._connectionsVisible = !this._connectionsVisible;
+            this.graphView?.setConnectionsVisible(this._connectionsVisible);
+            this._syncCanvasViewDock();
+        });
+
+        this.canvasGridToggle?.addEventListener('click', (event) => {
+            stop(event);
+            this._gridVisible = !this._gridVisible;
+            this._bgCachedScale = -1;
+            this.syncBackground();
+            this._syncCanvasViewDock();
+        });
+
+        this.canvasSnapToggle?.addEventListener('click', (event) => {
+            stop(event);
+            this._autoSnapEnabled = !this._autoSnapEnabled;
+            this.storeData.autoSnapEnabled = this._autoSnapEnabled;
+            this._syncCanvasViewDock();
+            this._showCanvasStatus(this._autoSnapEnabled ? '已开启自动吸附' : '已关闭自动吸附');
+            this.emit('change');
+        });
+
+        this.canvasFitToggle?.addEventListener('click', (event) => {
+            stop(event);
+            this.fitAll();
+        });
+
+        this._syncCanvasViewDock();
+    }
+
+    _setupCanvasToolRail() {
+        const projectChip = document.getElementById('canvasProjectChip');
+        const addButton = document.getElementById('canvasToolAdd');
+        const searchButton = document.getElementById('canvasToolSearch');
+        const planButton = document.getElementById('canvasToolPlan');
+        const tasksButton = document.getElementById('canvasToolTasks');
+        this.canvasNodeSearch = document.getElementById('canvasNodeSearch');
+        this.canvasNodeSearchInput = document.getElementById('canvasNodeSearchInput');
+        this.canvasNodeSearchResults = document.getElementById('canvasNodeSearchResults');
+
+        projectChip?.addEventListener('click', () => {
+            document.dispatchEvent(new CustomEvent('open-folder-groups'));
+        });
+        planButton?.addEventListener('click', () => document.getElementById('newPlanBtn')?.click());
+        tasksButton?.addEventListener('click', () => document.getElementById('agentTaskHistoryBtn')?.click());
+
+        addButton?.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const rect = addButton.getBoundingClientRect();
+            this._showInsertNodeMenu({
+                clientX: rect.right + 8,
+                clientY: rect.top,
+                insertAt: this._getViewportCenter()
+            });
+        });
+
+        searchButton?.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            document.dispatchEvent(new CustomEvent('close-asset-library'));
+            this._toggleCanvasNodeSearch();
+        });
+        this.canvasNodeSearchInput?.addEventListener('input', () => this._renderCanvasNodeSearchResults());
+        this.canvasNodeSearchInput?.addEventListener('keydown', event => {
+            if (event.key === 'Escape') this._toggleCanvasNodeSearch(false);
+            if (event.key === 'Enter') this.canvasNodeSearchResults?.querySelector('button')?.click();
+        });
+
+        document.addEventListener('mousedown', event => {
+            if (this.canvasNodeSearch?.hidden) return;
+            if (this.canvasNodeSearch.contains(event.target) || searchButton?.contains(event.target)) return;
+            this._toggleCanvasNodeSearch(false);
+        });
+
+        const groupList = document.getElementById('folderGroupList');
+        if (groupList) {
+            this._canvasProjectObserver = new MutationObserver(() => this._syncCanvasProjectName());
+            this._canvasProjectObserver.observe(groupList, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: ['class']
+            });
+        }
+        this._syncCanvasProjectName();
+    }
+
+    _syncCanvasProjectName() {
+        const label = document.getElementById('canvasProjectName');
+        if (!label) return;
+        const activeName = document.querySelector('.folder-group-item.active .group-name')?.textContent?.trim();
+        label.textContent = activeName || 'Flow Canvas';
+    }
+
+    _toggleCanvasNodeSearch(force) {
+        if (!this.canvasNodeSearch) return;
+        const shouldOpen = typeof force === 'boolean' ? force : this.canvasNodeSearch.hidden;
+        this.canvasNodeSearch.hidden = !shouldOpen;
+        document.getElementById('canvasToolSearch')?.classList.toggle('active', shouldOpen);
+        if (!shouldOpen) return;
+        this.canvasNodeSearchInput.value = '';
+        this._renderCanvasNodeSearchResults();
+        requestAnimationFrame(() => this.canvasNodeSearchInput?.focus());
+    }
+
+    _renderCanvasNodeSearchResults() {
+        const host = this.canvasNodeSearchResults;
+        if (!host) return;
+        const query = String(this.canvasNodeSearchInput?.value || '').trim().toLowerCase();
+        const results = [];
+        this.items.forEach((entry, id) => {
+            if (!entry?.group?.isVisible?.()) return;
+            const data = entry.data || {};
+            const mediaType = data.kind === 'op' ? data.nodeType : this._getItemMediaType(data);
+            const title = data.kind === 'op'
+                ? (data.title || NODE_TYPES[data.nodeType]?.title || '节点')
+                : (mediaType === 'image'
+                    ? this._mediaDisplayName(data, mediaType)
+                    : (this._fileNameFromPath(data.filePath) || `空${this._nodeTypeLabel(mediaType, data)}节点`));
+            const haystack = `${title} ${mediaType} ${data.filePath || ''}`.toLowerCase();
+            if (query && !haystack.includes(query)) return;
+            results.push({ id, title, mediaType, entry });
+        });
+
+        results.sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'));
+        host.replaceChildren();
+        if (!results.length) {
+            const empty = document.createElement('div');
+            empty.className = 'canvas-node-search-empty';
+            empty.textContent = '没有匹配的节点或素材';
+            host.appendChild(empty);
+            return;
+        }
+
+        results.slice(0, 80).forEach(result => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'canvas-node-search-result';
+            const iconId = result.mediaType === 'video'
+                ? 'icon-video'
+                : result.mediaType === 'audio'
+                    ? 'icon-audio'
+                    : result.mediaType === 'image'
+                        ? 'icon-image'
+                        : 'icon-canvas';
+            button.innerHTML = `<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#${iconId}"></use></svg><span></span>`;
+            button.querySelector('span').textContent = result.title;
+            button.addEventListener('click', () => {
+                this._focusCanvasNode(result.id);
+                this._toggleCanvasNodeSearch(false);
+            });
+            host.appendChild(button);
+        });
+    }
+
+    _focusCanvasNode(nodeId) {
+        const entry = this._getNodeEntry(nodeId);
+        if (!entry?.group) return;
+        const node = entry.group.findOne('.displayNode')
+            || entry.group.findOne('.fallbackBg')
+            || entry.group.findOne('.planHitArea');
+        const width = Number(entry.data?.width) || Number(node?.width?.()) || 1;
+        const height = Number(entry.data?.height) || Number(node?.height?.()) || 1;
+        const scale = Math.max(0.35, Math.min(1.5, this.stage.scaleX()));
+        this.stage.scale({ x: scale, y: scale });
+        this.stage.position({
+            x: this.stage.width() / 2 - (entry.group.x() + width / 2) * scale,
+            y: this.stage.height() / 2 - (entry.group.y() + height / 2) * scale
+        });
+        this.selectItem(nodeId, false);
+        this.stage.batchDraw();
+        this.syncBackground();
+        this.syncGifs();
+        this.syncPlanInlineEditors();
+        this.graphView?.sync();
+        this._syncCanvasViewDock();
+        this.emit('change');
+    }
+
+    _setCanvasScale(nextScale) {
+        const oldScale = this.stage.scaleX();
+        const scale = Math.max(
+            MIN_VIEWPORT_SCALE,
+            Math.min(MAX_VIEWPORT_SCALE, Number(nextScale) || 1)
+        );
+        if (Math.abs(scale - oldScale) < 0.0001) return;
+        const center = { x: this.stage.width() / 2, y: this.stage.height() / 2 };
+        const worldCenter = {
+            x: (center.x - this.stage.x()) / oldScale,
+            y: (center.y - this.stage.y()) / oldScale
+        };
+        this.stage.scale({ x: scale, y: scale });
+        this.stage.position({
+            x: center.x - worldCenter.x * scale,
+            y: center.y - worldCenter.y * scale
+        });
+        this.stage.batchDraw();
+        this.emit('change');
+    }
+
+    _syncCanvasViewDock() {
+        const syncToggle = (button, active, labels) => {
+            if (!button) return;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', String(active));
+            button.title = active ? labels.on : labels.off;
+            button.setAttribute('aria-label', button.title);
+        };
+        syncToggle(this.canvasMinimapToggle, this._minimapUserVisible, { on: '隐藏小地图', off: '显示小地图' });
+        syncToggle(this.canvasConnectionsToggle, this._connectionsVisible, { on: '隐藏节点连线', off: '显示节点连线' });
+        syncToggle(this.canvasGridToggle, this._gridVisible, { on: '隐藏画布点阵', off: '显示画布点阵' });
+        syncToggle(this.canvasSnapToggle, this._autoSnapEnabled, { on: '关闭自动吸附', off: '开启自动吸附' });
+    }
+
     _getEntryCanvasRect(entry) {
         const group = entry?.group;
         if (!group || group.isDestroyed?.()) return null;
@@ -451,7 +962,7 @@ export class CanvasManager {
             const rect = this._getEntryCanvasRect(entry);
             if (rect) entries.push({
                 ...rect,
-                kind: this._getFileType(entry.data.filePath),
+                kind: entry.data?.kind === 'op' ? entry.data.nodeType : this._getItemMediaType(entry.data),
                 selected: this.selectedItems.has(entry.data.id)
             });
         });
@@ -506,7 +1017,9 @@ export class CanvasManager {
 
         this.canvasBoundary?.setAttrs(this._canvasBounds);
         this.boundaryLayer?.batchDraw();
-        if (this.minimapPanel) this.minimapPanel.hidden = entries.length === 0;
+        if (this.minimapPanel) {
+            this.minimapPanel.hidden = entries.length === 0 || !this._minimapUserVisible;
+        }
         this._scheduleMinimapDraw();
     }
 
@@ -630,6 +1143,605 @@ export class CanvasManager {
         if (this.listeners[event]) this.listeners[event].forEach(cb => cb(data));
     }
 
+    _createSelectionToolbar() {
+        const toolbar = document.createElement('div');
+        toolbar.className = 'canvas-selection-toolbar';
+        toolbar.hidden = true;
+        toolbar.setAttribute('role', 'toolbar');
+        toolbar.setAttribute('aria-label', '素材操作');
+        toolbar.innerHTML = `
+            <button type="button" data-action="crop" title="裁切图片" aria-label="裁切图片"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-crop"></use></svg></button>
+            <button type="button" data-action="duplicate" title="创建副本" aria-label="创建副本"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg></button>
+            <button type="button" data-action="replace" title="替换素材" aria-label="替换素材"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-replace"></use></svg></button>
+            <button type="button" data-action="reference" title="加入创作参考" aria-label="加入创作参考"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg></button>
+            <button type="button" data-action="more" title="更多操作" aria-label="更多操作"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-more"></use></svg></button>
+            <span class="canvas-selection-toolbar-divider" aria-hidden="true"></span>
+            <button type="button" data-action="tag" title="分类与收藏" aria-label="分类与收藏"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-tag"></use></svg></button>
+            <span class="canvas-selection-toolbar-divider" aria-hidden="true"></span>
+            <button type="button" data-action="folder" title="复制到文件夹" aria-label="复制到文件夹"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder-add"></use></svg></button>
+            <button type="button" data-action="export" title="另存为" aria-label="另存为"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-download"></use></svg></button>
+            <button type="button" data-action="preview" title="全屏预览" aria-label="全屏预览"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-expand"></use></svg></button>
+        `;
+        toolbar.addEventListener('pointerdown', event => {
+            event.stopPropagation();
+        });
+        toolbar.addEventListener('click', event => {
+            const button = event.target.closest('button[data-action]');
+            if (!button || button.disabled) return;
+            event.preventDefault();
+            event.stopPropagation();
+            void this._handleSelectionToolbarAction(button.dataset.action, button);
+        });
+        this.container.appendChild(toolbar);
+        this.selectionToolbar = toolbar;
+        document.addEventListener('canvas-reference-feedback', event => {
+            if (event.detail?.message) this._showCanvasStatus(event.detail.message, 2600);
+        });
+    }
+
+    _getSelectionToolbarItem() {
+        if (this.selectedItems.size !== 1) return null;
+        const item = this.items.get([...this.selectedItems][0]);
+        if (!item || item.data?.kind === 'op' || !item.group?.isVisible()) return null;
+        return item;
+    }
+
+    _scheduleSelectionToolbarSync() {
+        if (this._selectionToolbarRaf) return;
+        this._selectionToolbarRaf = requestAnimationFrame(() => {
+            this._selectionToolbarRaf = null;
+            this._syncSelectionToolbar();
+        });
+    }
+
+    _syncSelectionToolbar() {
+        const toolbar = this.selectionToolbar;
+        if (this._activeImageCrop) {
+            if (toolbar) toolbar.hidden = true;
+            return;
+        }
+        const item = this._getSelectionToolbarItem();
+        const itemRect = item ? this._getEntryContentRect(item) : null;
+        if (!toolbar || !item || !itemRect) {
+            if (toolbar) toolbar.hidden = true;
+            return;
+        }
+
+        toolbar.hidden = false;
+        toolbar.style.visibility = 'hidden';
+        const toolbarRect = toolbar.getBoundingClientRect();
+        const position = getSelectionToolbarPosition({
+            stage: {
+                x: this.stage.x(),
+                y: this.stage.y(),
+                scale: this.stage.scaleX()
+            },
+            itemRect,
+            viewport: {
+                width: this.stage.width(),
+                height: this.stage.height()
+            },
+            toolbar: {
+                width: toolbarRect.width,
+                height: toolbarRect.height
+            }
+        });
+
+        if (!position.visible) {
+            toolbar.hidden = true;
+            toolbar.style.visibility = '';
+            return;
+        }
+        toolbar.style.left = `${position.left}px`;
+        toolbar.style.top = `${position.top}px`;
+        toolbar.style.visibility = '';
+        toolbar.dataset.placement = position.placement;
+
+        const mediaType = this._getItemMediaType(item.data);
+        const cropButton = toolbar.querySelector('[data-action="crop"]');
+        if (cropButton) {
+            cropButton.disabled = mediaType !== 'image'
+                || !item.data.filePath
+                || !item.group.findOne('.displayNode');
+        }
+        const referenceButton = toolbar.querySelector('[data-action="reference"]');
+        if (referenceButton) referenceButton.disabled = !['image', 'video', 'audio'].includes(mediaType);
+    }
+
+    _getSelectionActionPayload(primaryId = null) {
+        const entries = [...this.selectedItems]
+            .map(id => this.items.get(id))
+            .filter(Boolean)
+            .sort((left, right) => (left.group.x() - right.group.x()) || (left.group.y() - right.group.y()));
+        const primary = this.items.get(primaryId) || entries[0] || null;
+        return {
+            itemId: primary?.data?.id || null,
+            itemIds: entries.map(entry => entry.data.id),
+            filePath: primary?.data?.filePath || '',
+            filePaths: entries.map(entry => entry.data.filePath).filter(Boolean),
+            loadError: Boolean(primary?.loadError),
+            mediaType: primary ? this._getItemMediaType(primary.data) : null
+        };
+    }
+
+    _copyableFilePath(data) {
+        if (data?.filePath) return data.filePath;
+        if (data?.kind !== 'op' || !['image', 'video'].includes(data.nodeType)) return '';
+        return getGeneratorResultEntries(data)[0]?.filePath || '';
+    }
+
+    async _handleSelectionToolbarAction(action, button) {
+        const item = this._getSelectionToolbarItem();
+        if (!item) return;
+        const payload = this._getSelectionActionPayload(item.data.id);
+        try {
+            if (action === 'crop') {
+                this._startImageCrop(item);
+            } else if (action === 'duplicate') {
+                this.duplicateItems(payload.itemIds);
+            } else if (action === 'replace') {
+                this._requestMediaReplacement(item.data);
+            } else if (action === 'reference') {
+                this._showGenerationTypeMenuForMedia(item.data.id, button);
+            } else if (action === 'more') {
+                const rect = button.getBoundingClientRect();
+                this.contextMenu.show({
+                    evt: {
+                        preventDefault() {},
+                        clientX: rect.left,
+                        clientY: rect.bottom + 8
+                    }
+                }, payload);
+            } else if (action === 'tag') {
+                const rect = button.getBoundingClientRect();
+                document.dispatchEvent(new CustomEvent('show-asset-classification-menu', {
+                    detail: {
+                        filePath: item.data.filePath,
+                        clientX: rect.left,
+                        clientY: rect.bottom + 8
+                    }
+                }));
+            } else if (action === 'folder') {
+                document.dispatchEvent(new CustomEvent('context-copy-to-folder', { detail: payload }));
+            } else if (action === 'export') {
+                const result = await window.flowCanvas?.file?.saveCopy?.(item.data.filePath);
+                if (result?.success) this._showCanvasStatus('素材已另存为');
+                else if (!result?.canceled) this._showCanvasStatus(`另存失败：${result?.error || '未知错误'}`, 3200);
+            } else if (action === 'preview') {
+                this._openMediaPreview(item);
+            }
+        } catch (error) {
+            console.error('[Canvas] selection toolbar action failed:', action, error);
+            this._showCanvasStatus(`操作失败：${error?.message || error}`, 3200);
+        }
+    }
+
+    _startImageCrop(item) {
+        if (!item?.data?.filePath || this._getItemMediaType(item.data) !== 'image') return false;
+        if (!window.flowCanvas?.image?.crop) {
+            this._showCanvasStatus('裁切功能需要在 Flow Canvas 桌面版中使用', 3200);
+            return false;
+        }
+        const displayNode = item.group?.findOne('.displayNode');
+        if (!displayNode || item.loadError) {
+            this._showCanvasStatus('图片尚未加载完成，暂时不能裁切', 3200);
+            return false;
+        }
+
+        this._closeImageCrop({ silent: true });
+        this._closeGenerationTypeMenu();
+        this.contextMenu?.hide?.();
+
+        const root = document.createElement('div');
+        root.className = 'image-crop-overlay';
+        root.innerHTML = `
+            <div class="image-crop-frame" aria-label="图片裁切区域">
+                <div class="image-crop-mask" data-crop-mask="top"></div>
+                <div class="image-crop-mask" data-crop-mask="right"></div>
+                <div class="image-crop-mask" data-crop-mask="bottom"></div>
+                <div class="image-crop-mask" data-crop-mask="left"></div>
+                <div class="image-crop-selection" data-crop-drag>
+                    <i class="image-crop-grid-line vertical first" aria-hidden="true"></i>
+                    <i class="image-crop-grid-line vertical second" aria-hidden="true"></i>
+                    <i class="image-crop-grid-line horizontal first" aria-hidden="true"></i>
+                    <i class="image-crop-grid-line horizontal second" aria-hidden="true"></i>
+                    <button type="button" data-crop-handle="nw" aria-label="调整左上角"></button>
+                    <button type="button" data-crop-handle="n" aria-label="调整上边"></button>
+                    <button type="button" data-crop-handle="ne" aria-label="调整右上角"></button>
+                    <button type="button" data-crop-handle="e" aria-label="调整右边"></button>
+                    <button type="button" data-crop-handle="se" aria-label="调整右下角"></button>
+                    <button type="button" data-crop-handle="s" aria-label="调整下边"></button>
+                    <button type="button" data-crop-handle="sw" aria-label="调整左下角"></button>
+                    <button type="button" data-crop-handle="w" aria-label="调整左边"></button>
+                </div>
+            </div>
+            <div class="image-crop-actions">
+                <span class="image-crop-size" aria-live="polite"></span>
+                <button type="button" class="image-crop-cancel" title="取消裁切">取消</button>
+                <button type="button" class="image-crop-confirm">完成裁切</button>
+            </div>
+        `;
+        root.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            this._beginImageCropPointer(event);
+        });
+        root.addEventListener('contextmenu', event => event.preventDefault());
+        root.addEventListener('wheel', event => event.preventDefault(), { passive: false });
+        root.querySelector('.image-crop-cancel')?.addEventListener('click', event => {
+            event.stopPropagation();
+            this._closeImageCrop();
+        });
+        root.querySelector('.image-crop-confirm')?.addEventListener('click', event => {
+            event.stopPropagation();
+            void this._confirmImageCrop();
+        });
+
+        this.container.appendChild(root);
+        this._activeImageCrop = {
+            itemId: item.data.id,
+            sourcePath: item.data.filePath,
+            crop: { x: 0, y: 0, width: 1, height: 1 },
+            root,
+            frame: root.querySelector('.image-crop-frame'),
+            selection: root.querySelector('.image-crop-selection'),
+            actions: root.querySelector('.image-crop-actions'),
+            sizeLabel: root.querySelector('.image-crop-size'),
+            wasStageDraggable: this.stage.draggable(),
+            wasItemDraggable: item.group.draggable(),
+            gifDisplay: item.gifDomElement?.style?.display || '',
+            busy: false
+        };
+        this.stage.draggable(false);
+        item.group.draggable(false);
+        if (item.gifDomElement) item.gifDomElement.style.display = 'none';
+        this.imageTransformer?.nodes([]);
+        if (this.selectionToolbar) this.selectionToolbar.hidden = true;
+        document.body.classList.add('image-crop-active');
+        this._positionImageCropOverlay();
+        this.layer.batchDraw();
+        this._showCanvasStatus('拖动边角裁切；Enter 完成，Esc 取消', 3200);
+        return true;
+    }
+
+    _beginImageCropPointer(event) {
+        const active = this._activeImageCrop;
+        if (!active || active.busy || event.button !== 0) return;
+        const handle = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle || '';
+        const isMove = Boolean(event.target.closest?.('[data-crop-drag]')) && !handle;
+        if (!handle && !isMove) return;
+
+        this._imageCropPointerCleanup?.();
+        const frameRect = active.frame.getBoundingClientRect();
+        if (frameRect.width < 2 || frameRect.height < 2) return;
+        const startCrop = { ...active.crop };
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const minWidth = Math.min(1, Math.max(0.01, 24 / frameRect.width));
+        const minHeight = Math.min(1, Math.max(0.01, 24 / frameRect.height));
+        active.root.classList.add('is-adjusting');
+
+        const move = moveEvent => {
+            const dx = (moveEvent.clientX - startX) / frameRect.width;
+            const dy = (moveEvent.clientY - startY) / frameRect.height;
+            active.crop = handle
+                ? resizeCropRect(startCrop, handle, dx, dy, { minWidth, minHeight })
+                : moveCropRect(startCrop, dx, dy);
+            this._renderImageCropOverlay();
+        };
+        const stop = () => {
+            active.root.classList.remove('is-adjusting');
+            document.removeEventListener('pointermove', move, true);
+            document.removeEventListener('pointerup', stop, true);
+            document.removeEventListener('pointercancel', stop, true);
+            window.removeEventListener('blur', stop);
+            this._imageCropPointerCleanup = null;
+        };
+        this._imageCropPointerCleanup = stop;
+        document.addEventListener('pointermove', move, true);
+        document.addEventListener('pointerup', stop, true);
+        document.addEventListener('pointercancel', stop, true);
+        window.addEventListener('blur', stop);
+    }
+
+    _positionImageCropOverlay() {
+        const active = this._activeImageCrop;
+        if (!active) return;
+        const item = this.items.get(active.itemId);
+        const itemRect = item ? this._getEntryContentRect(item) : null;
+        if (!item || !itemRect) {
+            this._closeImageCrop({ silent: true });
+            return;
+        }
+        const scale = this.stage.scaleX();
+        active.screenRect = {
+            left: this.stage.x() + itemRect.x * scale,
+            top: this.stage.y() + itemRect.y * scale,
+            width: Math.max(1, itemRect.width * scale),
+            height: Math.max(1, itemRect.height * scale)
+        };
+        Object.assign(active.frame.style, {
+            left: `${active.screenRect.left}px`,
+            top: `${active.screenRect.top}px`,
+            width: `${active.screenRect.width}px`,
+            height: `${active.screenRect.height}px`
+        });
+        this._renderImageCropOverlay();
+    }
+
+    _renderImageCropOverlay() {
+        const active = this._activeImageCrop;
+        if (!active?.screenRect) return;
+        active.crop = normalizeCropRect(active.crop);
+        const crop = active.crop;
+        const percent = value => `${value * 100}%`;
+        const setBox = (name, box) => {
+            const node = active.frame.querySelector(`[data-crop-mask="${name}"]`);
+            if (!node) return;
+            Object.assign(node.style, {
+                left: percent(box.x),
+                top: percent(box.y),
+                width: percent(box.width),
+                height: percent(box.height)
+            });
+        };
+        setBox('top', { x: 0, y: 0, width: 1, height: crop.y });
+        setBox('right', { x: crop.x + crop.width, y: crop.y, width: 1 - crop.x - crop.width, height: crop.height });
+        setBox('bottom', { x: 0, y: crop.y + crop.height, width: 1, height: 1 - crop.y - crop.height });
+        setBox('left', { x: 0, y: crop.y, width: crop.x, height: crop.height });
+        Object.assign(active.selection.style, {
+            left: percent(crop.x),
+            top: percent(crop.y),
+            width: percent(crop.width),
+            height: percent(crop.height)
+        });
+
+        if (active.sizeLabel) {
+            active.sizeLabel.textContent = `保留 ${Math.round(crop.width * 100)}% × ${Math.round(crop.height * 100)}%`;
+        }
+        const actionsRect = active.actions.getBoundingClientRect();
+        const cropRight = active.screenRect.left + (crop.x + crop.width) * active.screenRect.width;
+        const cropTop = active.screenRect.top + crop.y * active.screenRect.height;
+        const cropBottom = active.screenRect.top + (crop.y + crop.height) * active.screenRect.height;
+        const actionsWidth = actionsRect.width || 240;
+        const actionsHeight = actionsRect.height || 44;
+        const maxLeft = Math.max(8, this.container.clientWidth - actionsWidth - 8);
+        let top = cropBottom + 12;
+        if (top + actionsHeight > this.container.clientHeight - 8) top = cropTop - actionsHeight - 12;
+        Object.assign(active.actions.style, {
+            left: `${Math.max(8, Math.min(maxLeft, cropRight - actionsWidth))}px`,
+            top: `${Math.max(8, Math.min(this.container.clientHeight - actionsHeight - 8, top))}px`
+        });
+    }
+
+    _closeImageCrop(options = {}) {
+        const active = this._activeImageCrop;
+        if (!active) return;
+        this._imageCropPointerCleanup?.();
+        this._imageCropPointerCleanup = null;
+        active.root?.remove();
+        const item = this.items.get(active.itemId);
+        if (item?.group) {
+            item.group.draggable(active.wasItemDraggable);
+            if (item.gifDomElement) item.gifDomElement.style.display = active.gifDisplay;
+        }
+        this.stage.draggable(active.wasStageDraggable);
+        this._activeImageCrop = null;
+        document.body.classList.remove('image-crop-active');
+        this._syncImageTransformer();
+        this._scheduleSelectionToolbarSync();
+        this.layer.batchDraw();
+        if (!options.silent) this._showCanvasStatus('已取消裁切');
+    }
+
+    async _confirmImageCrop() {
+        const active = this._activeImageCrop;
+        if (!active || active.busy) return;
+        const sourceEntry = this.items.get(active.itemId);
+        const displayNode = sourceEntry?.group?.findOne('.displayNode');
+        if (!sourceEntry || !displayNode) {
+            this._closeImageCrop({ silent: true });
+            return;
+        }
+
+        active.busy = true;
+        active.root.classList.add('is-busy');
+        active.root.querySelectorAll('button').forEach(button => { button.disabled = true; });
+        try {
+            const crop = normalizeCropRect(active.crop);
+            const result = await window.flowCanvas.image.crop({
+                filePath: active.sourcePath,
+                crop
+            });
+            if (!result?.success || !result.filePath) {
+                throw new Error(result?.error || '图片裁切失败');
+            }
+
+            const sourceData = sourceEntry.data;
+            const at = this._findResultSlot(sourceData);
+            const childData = {
+                id: `crop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                kind: 'media',
+                mediaType: 'image',
+                filePath: result.filePath,
+                x: at.x,
+                y: at.y,
+                width: Math.max(1, displayNode.width() * crop.width),
+                height: Math.max(1, displayNode.height() * crop.height),
+                addedAt: Date.now(),
+                fromNodeId: sourceData.id,
+                sourceOperation: 'crop'
+            };
+            await this._createCard(childData);
+            this._scheduleCullCheck();
+            this.emit('capturedFile', childData);
+            this._connectResultHistory(sourceData, { image: result.filePath }, childData.id);
+            this._closeImageCrop({ silent: true });
+            this.clearSelection();
+            this.selectItem(childData.id, true);
+            this.graphView?.sync();
+            this._showCanvasStatus(`裁切完成并已连接原图 · ${result.width} × ${result.height}`, 3600);
+        } catch (error) {
+            console.error('[Canvas] image crop failed:', error);
+            if (this._activeImageCrop === active) {
+                active.busy = false;
+                active.root.classList.remove('is-busy');
+                active.root.querySelectorAll('button').forEach(button => { button.disabled = false; });
+            }
+            this._showCanvasStatus(`裁切失败：${error?.message || error}`, 4200);
+        }
+    }
+
+    _showGenerationTypeMenuForMedia(itemId, anchor) {
+        const source = this.items.get(itemId)?.data;
+        if (!source?.filePath) return;
+        const mediaType = this._getItemMediaType(source);
+        const choices = mediaType === 'image'
+            ? [
+                { nodeType: 'image', label: '生成图片', description: '把当前图片作为参考图' },
+                { nodeType: 'video', label: '生成视频', description: '把当前图片作为首帧参考' }
+            ]
+            : mediaType === 'video'
+                ? [{ nodeType: 'video', label: '生成视频', description: '把当前视频作为动态参考' }]
+                : mediaType === 'audio'
+                    ? [{ nodeType: 'video', label: '生成视频', description: '把当前音频作为声音参考' }]
+                    : [];
+        if (!choices.length) return;
+
+        this._closeGenerationTypeMenu();
+        const menu = document.createElement('section');
+        menu.className = 'generation-type-menu';
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', '选择生成类型');
+        choices.forEach(choice => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('role', 'menuitem');
+            const iconId = choice.nodeType === 'video' ? 'icon-video' : 'icon-image';
+            button.innerHTML = `
+                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#${iconId}"></use></svg>
+                <span><strong></strong><small></small></span>
+            `;
+            button.querySelector('strong').textContent = choice.label;
+            button.querySelector('small').textContent = choice.description;
+            button.addEventListener('click', () => {
+                this._closeGenerationTypeMenu();
+                this._createGeneratorFromMedia(itemId, choice.nodeType);
+            });
+            menu.appendChild(button);
+        });
+        document.body.appendChild(menu);
+
+        const anchorRect = anchor?.getBoundingClientRect?.() || { left: 12, right: 12, top: 12, bottom: 12 };
+        const rect = menu.getBoundingClientRect();
+        let left = anchorRect.left + (anchorRect.width - rect.width) / 2;
+        let top = anchorRect.bottom + 8;
+        left = Math.max(10, Math.min(window.innerWidth - rect.width - 10, left));
+        if (top + rect.height > window.innerHeight - 10) top = anchorRect.top - rect.height - 8;
+        menu.style.left = `${Math.round(left)}px`;
+        menu.style.top = `${Math.max(10, Math.round(top))}px`;
+
+        const closeOutside = event => {
+            if (!menu.contains(event.target)) this._closeGenerationTypeMenu();
+        };
+        const closeOnKey = event => {
+            if (event.key === 'Escape') this._closeGenerationTypeMenu();
+        };
+        this._generationTypeMenu = { menu, closeOutside, closeOnKey };
+        setTimeout(() => document.addEventListener('pointerdown', closeOutside, true), 0);
+        document.addEventListener('keydown', closeOnKey, true);
+        requestAnimationFrame(() => menu.querySelector('button')?.focus({ preventScroll: true }));
+    }
+
+    _closeGenerationTypeMenu() {
+        const active = this._generationTypeMenu;
+        if (!active) return;
+        document.removeEventListener('pointerdown', active.closeOutside, true);
+        document.removeEventListener('keydown', active.closeOnKey, true);
+        active.menu?.remove();
+        this._generationTypeMenu = null;
+    }
+
+    _createGeneratorFromMedia(itemId, nodeType) {
+        const sourceEntry = this.items.get(itemId);
+        const source = sourceEntry?.data;
+        if (!sourceEntry || !source) return null;
+        const size = getGeneratorPlaceholderSize(nodeType, {}, source);
+        const sourceX = Number.isFinite(Number(source.x)) ? Number(source.x) : sourceEntry.group.x();
+        const sourceY = Number.isFinite(Number(source.y)) ? Number(source.y) : sourceEntry.group.y();
+        const left = sourceX + Number(source.width || IMAGE_DEFAULT_WIDTH) + 64;
+        const top = sourceY + Math.max(0, (Number(source.height || size.height) - size.height) / 2);
+        const created = this.addOpNode(nodeType, {
+            x: left + size.width / 2,
+            y: top + size.height / 2
+        });
+        if (!created) return null;
+
+        const connection = this.graphView?.connect(
+            { nodeId: itemId, port: 'out' },
+            { nodeId: created.id, port: 'source' }
+        );
+        if (!connection) return created;
+        requestAnimationFrame(() => this.openGenerationComposer(created.id));
+        return created;
+    }
+
+    _openMediaPreview(item) {
+        const filePath = resolveCanvasFilePath(item?.data?.filePath);
+        if (!filePath) return;
+        const mediaType = this._getItemMediaType(item.data);
+        if (!['image', 'video', 'audio'].includes(mediaType)) {
+            void window.flowCanvas?.shell?.openFile?.(filePath);
+            return;
+        }
+
+        this._closeMediaPreview?.();
+        const preview = document.createElement('div');
+        preview.className = 'canvas-media-preview';
+        preview.setAttribute('role', 'dialog');
+        preview.setAttribute('aria-modal', 'true');
+        preview.setAttribute('aria-label', '素材预览');
+        const source = `local-res://${encodeURIComponent(filePath)}`;
+        const media = mediaType === 'image'
+            ? document.createElement('img')
+            : mediaType === 'video'
+                ? document.createElement('video')
+                : document.createElement('audio');
+        media.src = source;
+        media.draggable = false;
+        if (mediaType !== 'image') media.controls = true;
+        if (mediaType === 'video') media.autoplay = true;
+
+        const closeButton = document.createElement('button');
+        closeButton.type = 'button';
+        closeButton.className = 'canvas-media-preview-close';
+        closeButton.title = '关闭预览';
+        closeButton.setAttribute('aria-label', '关闭预览');
+        closeButton.innerHTML = '<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>';
+        preview.append(media, closeButton);
+        document.body.appendChild(preview);
+        void window.flowCanvas?.win?.setMediaPreviewFullscreen?.(true);
+
+        const close = () => {
+            if (!preview.isConnected) return;
+            if (media instanceof HTMLMediaElement) media.pause();
+            preview.remove();
+            document.removeEventListener('keydown', onKeyDown, true);
+            if (this._closeMediaPreview === close) this._closeMediaPreview = null;
+            void window.flowCanvas?.win?.setMediaPreviewFullscreen?.(false);
+        };
+        const onKeyDown = event => {
+            if (event.key === 'Escape') close();
+        };
+        closeButton.addEventListener('click', close);
+        preview.addEventListener('pointerdown', event => {
+            if (event.target === preview) close();
+        });
+        this._closeMediaPreview = close;
+        document.addEventListener('keydown', onKeyDown, true);
+        requestAnimationFrame(() => preview.classList.add('show'));
+    }
+
     beginMediaReferencePick(type, entries = [], maxItems = 1, allSelections = {}) {
         const normalizedType = type === 'mixed'
             ? 'mixed'
@@ -669,15 +1781,37 @@ export class CanvasManager {
         return true;
     }
 
+    beginNodeReferencePick(nodeId) {
+        const target = this.items.get(nodeId)?.data;
+        if (!target || target.kind !== 'op' || !['image', 'video'].includes(target.nodeType)) return false;
+
+        const selections = { image: [], video: [], audio: [] };
+        (this.graphView?.connections || []).forEach(connection => {
+            if (!this._isGeneratorInputConnection(target, connection)) return;
+            const source = this.items.get(connection.from.nodeId)?.data;
+            const entry = this._normalizeMediaReferenceEntry({ id: source?.id, filePath: source?.filePath });
+            if (entry && selections[entry.mediaType]) selections[entry.mediaType].push(entry);
+        });
+
+        this.beginMediaReferencePick('mixed', [], target.nodeType === 'image'
+            ? { image: 9, video: 0, audio: 0 }
+            : { image: 9, video: 3, audio: 3 }, selections);
+        this._activeNodeReferenceTargetId = nodeId;
+        this._showCanvasStatus('点击画布素材连接到当前节点；再次点击可断开，Esc 完成', 4600);
+        return true;
+    }
+
     endMediaReferencePick(options = {}) {
         const pick = this._activeMediaReferencePick;
         if (!pick && !options.clearHighlights) return false;
+        const clearNodeReferenceHighlights = Boolean(this._activeNodeReferenceTargetId);
         const type = pick?.type || null;
         if (pick && pick.type !== 'mixed') {
             this._mediaReferenceSelections[pick.type] = pick.entries.map(entry => ({ ...entry }));
         }
         this._activeMediaReferencePick = null;
-        if (options.clearHighlights) {
+        this._activeNodeReferenceTargetId = null;
+        if (options.clearHighlights || clearNodeReferenceHighlights) {
             this._mediaReferenceSelections = { image: [], video: [], audio: [] };
         }
         this._renderMediaReferencePickHighlights();
@@ -792,6 +1926,13 @@ export class CanvasManager {
         } else {
             entries.push(entry);
         }
+        if (this._activeNodeReferenceTargetId) {
+            this._syncNodeReferenceConnection(
+                this._activeNodeReferenceTargetId,
+                entry,
+                existingIndex < 0
+            );
+        }
         this._mediaReferenceSelections[targetType] = entries.map(candidate => ({ ...candidate }));
         this._renderMediaReferencePickHighlights();
         this.emit('mediaReferenceSelectionChanged', {
@@ -803,6 +1944,27 @@ export class CanvasManager {
         }
     }
 
+    _syncNodeReferenceConnection(nodeId, entry, selected) {
+        const target = this.items.get(nodeId)?.data;
+        if (!target || !entry?.id) return;
+        if (target.nodeType === 'image' && entry.mediaType !== 'image') return;
+
+        const existing = (this.graphView?.connections || []).find(connection =>
+            connection.from.nodeId === entry.id
+            && connection.from.port === 'out'
+            && connection.to.nodeId === nodeId
+            && this._isGeneratorInputConnection(target, connection)
+        );
+        if (selected && !existing) {
+            this.graphView?.connect(
+                { nodeId: entry.id, port: 'out' },
+                { nodeId, port: 'source' }
+            );
+        } else if (!selected && existing) {
+            this.graphView?.disconnect(existing.id);
+        }
+    }
+
     _renderMediaReferencePickHighlights() {
         Array.from(this._mediaReferenceHighlightIds).forEach(id => this._setItemReferenceHighlight(id, false));
         this._mediaReferenceHighlightIds.clear();
@@ -811,6 +1973,7 @@ export class CanvasManager {
                 this._mediaReferenceHighlightIds.add(entry.id);
                 this._setItemReferenceHighlight(entry.id, true, {
                     mode: 'media',
+                    referenceIndex: index,
                     labelText: `${{ image: '图片', video: '视频', audio: '音频' }[type]} ${index + 1}`
                 });
             });
@@ -821,18 +1984,40 @@ export class CanvasManager {
         return { x: this.stage.x(), y: this.stage.y(), scale: this.stage.scaleX() };
     }
 
+    _getGenerationReferenceSize(references = []) {
+        const firstReference = Array.isArray(references) ? references[0] : null;
+        if (!firstReference) return null;
+        const referenceId = String(firstReference?.itemId || firstReference?.id || '').trim();
+        const referencePath = String(
+            typeof firstReference === 'string' ? firstReference : firstReference?.filePath || ''
+        ).trim();
+        let item = referenceId ? this.items.get(referenceId) : null;
+        if (!item && referencePath) {
+            const pathKey = referencePath.replaceAll('/', '\\').toLowerCase();
+            this.items.forEach(candidate => {
+                if (item) return;
+                const candidatePath = String(candidate?.data?.filePath || '').replaceAll('/', '\\').toLowerCase();
+                if (candidatePath === pathKey) item = candidate;
+            });
+        }
+        if (!item) return null;
+
+        const displayNode = item.group?.findOne?.('.displayNode');
+        const width = Number(item.data?.width) || Number(displayNode?.width?.()) || 0;
+        const height = Number(item.data?.height) || Number(displayNode?.height?.()) || 0;
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+        return { width, height };
+    }
+
     addGenerationPlaceholder(options = {}) {
-        const ratioMatch = String(options.ratio || '').match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
-        const sizeMatch = String(options.size || '').match(/^(\d+(?:\.\d+)?)\s*[x\u00d7]\s*(\d+(?:\.\d+)?)$/i);
-        const fallbackRatio = options.kind === 'image' ? 1 : VIDEO_PLACEHOLDER_DEFAULT_RATIO;
-        const ratio = ratioMatch
-            ? Number(ratioMatch[1]) / Number(ratioMatch[2])
-            : sizeMatch
-                ? Number(sizeMatch[1]) / Number(sizeMatch[2])
-                : fallbackRatio;
-        const aspect = Number.isFinite(ratio) && ratio > 0 ? ratio : fallbackRatio;
-        const width = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE : VIDEO_PLACEHOLDER_LONG_EDGE * aspect);
-        const height = Math.round(aspect >= 1 ? VIDEO_PLACEHOLDER_LONG_EDGE / aspect : VIDEO_PLACEHOLDER_LONG_EDGE);
+        const referenceSize = this._getGenerationReferenceSize(options.sourceReferences);
+        const { width, height } = resolveGenerationDisplaySize({
+            kind: options.kind,
+            referenceSize,
+            ratio: options.ratio,
+            size: options.size,
+            longEdge: VIDEO_PLACEHOLDER_LONG_EDGE
+        });
         const stagePos = this.stage.position();
         const scale = this.stage.scaleX();
         const container = this.stage.container();
@@ -870,11 +2055,13 @@ export class CanvasManager {
             event.cancelBubble = true;
             placement.x = group.x();
             placement.y = group.y();
+            this.graphView?.scheduleSync(placement.id);
         });
         group.on('dragend', (event) => {
             event.cancelBubble = true;
             placement.x = group.x();
             placement.y = group.y();
+            this.graphView?.sync();
             this.stage.draggable(true);
             document.body.style.cursor = 'grab';
         });
@@ -940,16 +2127,56 @@ export class CanvasManager {
         if (!itemId || !position) return false;
         const item = this.items.get(itemId);
         if (!item) {
-            this.pendingGenerationPlacements.set(itemId, { x: position.x, y: position.y });
+            this.pendingGenerationPlacements.set(itemId, {
+                x: position.x,
+                y: position.y,
+                width: position.width,
+                height: position.height
+            });
             return false;
         }
 
         item.group.position({ x: position.x, y: position.y });
         item.data.x = position.x;
         item.data.y = position.y;
+        this._applyGeneratedDisplaySize(item, position.width, position.height);
         this.pendingGenerationPlacements.delete(itemId);
         this.layer.batchDraw();
         setTimeout(() => this.emit('change'), 0);
+        return true;
+    }
+
+    _applyGeneratedDisplaySize(item, width, height) {
+        const targetWidth = Number(width) || 0;
+        const targetHeight = Number(height) || 0;
+        if (!item?.data || targetWidth <= 0 || targetHeight <= 0) return false;
+
+        item.data.width = targetWidth;
+        item.data.height = targetHeight;
+        const displayNode = item.group?.findOne?.('.displayNode');
+        if (displayNode) displayNode.size({ width: targetWidth, height: targetHeight });
+
+        const fallback = item.group?.findOne?.('.fallbackIcon');
+        if (fallback && !displayNode) {
+            fallback.destroy();
+            item.group.add(this._createFallbackGroup(
+                this._getItemMediaType(item.data),
+                targetWidth,
+                targetHeight,
+                item.data.filePath
+            ));
+        }
+        if (item.gifDomElement) {
+            item.gifDomElement.style.width = `${targetWidth}px`;
+            item.gifDomElement.style.height = `${targetHeight}px`;
+        }
+        const controls = item.group?.findOne?.('.videoControls');
+        const coverControls = item.group?.findOne?.('.videoCoverControls');
+        if (controls) this._layoutVideoControlGroup(controls, targetWidth, targetHeight);
+        if (coverControls) this._layoutVideoControlGroup(coverControls, targetWidth, targetHeight);
+        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
+        this.graphView?.scheduleSync(item.data.id);
+        if (this.imageTransformer?.nodes?.()[0] === displayNode) this.imageTransformer.forceUpdate();
         return true;
     }
 
@@ -958,7 +2185,9 @@ export class CanvasManager {
         if (!placeholder) return false;
         const position = {
             x: placeholder.group?.x() ?? placeholder.placement?.x,
-            y: placeholder.group?.y() ?? placeholder.placement?.y
+            y: placeholder.group?.y() ?? placeholder.placement?.y,
+            width: placeholder.placement?.width,
+            height: placeholder.placement?.height
         };
         if (itemId && Number.isFinite(position.x) && Number.isFinite(position.y)) {
             this._applyGenerationPlacement(itemId, position);
@@ -1043,9 +2272,14 @@ export class CanvasManager {
             const wasAltPressed = this.isAltPressed;
             this.isAltPressed = false;
             this._setNativeDragProxyActive(false);
+            this._setHoveredMediaItem(null);
             if (wasAltPressed && this._hoveredPlanId) {
                 this._refreshConnectionInteractionState();
             }
+        });
+
+        this.stage.container().addEventListener('pointerleave', () => {
+            this._setHoveredMediaItem(null);
         });
 
         document.addEventListener('pointerdown', (event) => {
@@ -1075,6 +2309,7 @@ export class CanvasManager {
         let isSelecting = false;
         let isPanning = false;
         let lastPanX = 0, lastPanY = 0;
+        let panMoved = false;
 
         const setCanvasDragEnabled = (enabled) => {
             this.stage.draggable(enabled);
@@ -1094,6 +2329,9 @@ export class CanvasManager {
         const finishPanning = () => {
             if (!isPanning) return;
             isPanning = false;
+            // 右键按下即开始平移，松手后 contextmenu 才触发。移动过就算平移，
+            // 不弹菜单；原地点一下（位移为 0）才认作右键点击。
+            this._suppressStageMenu = panMoved;
             document.body.style.cursor = 'default';
             setCanvasDragEnabled(true);
             detachPanningEndListeners();
@@ -1156,10 +2394,21 @@ export class CanvasManager {
         };
 
         this.stage.on('mousedown', (e) => {
+            if (e.evt.button === 2) {
+                let current = e.target;
+                while (current && current !== this.stage && current.name?.() !== 'nodeGroup') {
+                    current = current.getParent?.();
+                }
+                if (current?.name?.() === 'nodeGroup') {
+                    e.evt.preventDefault();
+                    return;
+                }
+            }
             if (e.evt.button === 1 || e.evt.button === 2) {
                 // Middle or Right click: 只平移画布，不拖动图片
                 e.evt.preventDefault();
                 isPanning = true;
+                panMoved = false;
 
                 // ── 关键：临时禁用 stage 和所有图片的 draggable ──
                 setCanvasDragEnabled(false);
@@ -1289,7 +2538,26 @@ export class CanvasManager {
             this.selectionRect.moveToTop();
         });
 
+        // 空白处右键：插入节点。卡片/规划表自己的 contextmenu 已 cancelBubble，
+        // 冒泡到 stage 的只剩空白区域。
+        this.stage.on('contextmenu', (e) => {
+            e.evt.preventDefault();
+            const suppressed = this._suppressStageMenu;
+            this._suppressStageMenu = false;
+            if (suppressed) return;
+            if (this.graphView?.pending) return;
+            this._showInsertNodeMenu(e.evt);
+        });
+
         this.stage.on('mousemove', (e) => {
+            const hoveredItem = this._findMediaReferenceItemFromNode(e.target);
+            this._setHoveredMediaItem(
+                hoveredItem?.data?.kind === 'op' ? null : hoveredItem?.data?.id || null
+            );
+            if (this.graphView?.pending) {
+                this.graphView._syncPending();
+                return;
+            }
             if (isPanning) {
                 e.evt.preventDefault();
                 const pos = this.stage.getPointerPosition();
@@ -1297,6 +2565,7 @@ export class CanvasManager {
                 const dy = pos.y - lastPanY;
                 lastPanX = pos.x;
                 lastPanY = pos.y;
+                if (dx || dy) panMoved = true;
 
                 this.stage.position({
                     x: this.stage.x() + dx,
@@ -1326,6 +2595,11 @@ export class CanvasManager {
         });
 
         this.stage.on('mouseup', (e) => {
+            // 连线结束由 graphView 的 document 级 mouseup 统一处理（单一驱动路径）。
+            // 这里只需在拖拽连线时拦住平移/框选的收尾逻辑。
+            if (this.graphView?.pending) {
+                return;
+            }
             if (isPanning) {
                 finishPanning();
                 return;
@@ -1361,6 +2635,7 @@ export class CanvasManager {
             }
             this._flushDragConnectionRefresh();
             this._refreshVisiblePlanConnections();
+            this.graphView?.sync();
             this.emit('change');
         });
 
@@ -1371,7 +2646,7 @@ export class CanvasManager {
                 if (!this.selectedItems.has(group.attrs.id)) return;
 
                 const movingEntry = this._getNodeEntry(group.attrs.id);
-                if (movingEntry?.kind !== 'plan' && this.selectedItems.size === 1 && (!e.evt || !e.evt.shiftKey)) {
+                if (this._autoSnapEnabled && movingEntry?.kind !== 'plan' && this.selectedItems.size === 1 && (!e.evt || !e.evt.shiftKey)) {
                     this._applyMagneticSnapping(group);
                 }
 
@@ -1397,6 +2672,11 @@ export class CanvasManager {
                     this._positionPlanInlineEditor(group.attrs.id);
                 }
                 this._scheduleDragConnectionRefresh(movingEntry);
+                if (this.graphView) {
+                    const scope = this.selectedItems.size ? this.selectedItems : [group.attrs.id];
+                    this.graphView.scheduleSync(scope);
+                }
+                this._scheduleSelectionToolbarSync();
             }
         });
 
@@ -1427,6 +2707,8 @@ export class CanvasManager {
                         if (!item) return;
                         const cloneData = {
                             id: Date.now().toString() + '_c' + (cloneIdx++) + Math.random().toString(36).substr(2, 5),
+                            kind: item.data.kind,
+                            mediaType: item.data.mediaType,
                             filePath: item.data.filePath,
                             x: item.group.x(),
                             y: item.group.y(),
@@ -1454,6 +2736,16 @@ export class CanvasManager {
 
         // Keyboard Shortcuts
         document.addEventListener('keydown', (e) => {
+            if (this._activeImageCrop) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this._closeImageCrop();
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void this._confirmImageCrop();
+                }
+                return;
+            }
             if (this._activePlanReferencePick && e.key === 'Escape') {
                 e.preventDefault();
                 this._cancelPlanReferencePick('已取消连接参考图');
@@ -1468,19 +2760,37 @@ export class CanvasManager {
 
             const key = e.key.toLowerCase();
             const commandKey = e.ctrlKey || e.metaKey;
+            const shortcuts = this.shortcutBindings;
+            const usesDefaultShiftRedo = shortcuts.undo === DEFAULT_SHORTCUTS.undo
+                && commandKey && e.shiftKey && !e.altKey && key === 'z';
+            const usesDefaultBackspace = shortcuts.delete === DEFAULT_SHORTCUTS.delete
+                && e.key === 'Backspace';
 
-            if (commandKey && !e.altKey && key === 'z') {
-                e.preventDefault();
-                document.dispatchEvent(new CustomEvent(e.shiftKey ? 'history-redo' : 'history-undo'));
-            } else if (commandKey && !e.shiftKey && !e.altKey && key === 'y') {
+            if (matchesShortcut(e, shortcuts.redo) || usesDefaultShiftRedo) {
                 e.preventDefault();
                 document.dispatchEvent(new CustomEvent('history-redo'));
+            } else if (matchesShortcut(e, shortcuts.undo)) {
+                e.preventDefault();
+                document.dispatchEvent(new CustomEvent('history-undo'));
+            } else if (matchesShortcut(e, shortcuts.duplicate)) {
+                if (this.selectedItems.size > 0) {
+                    e.preventDefault();
+                    this.duplicateItems([...this.selectedItems]);
+                }
+            } else if (matchesShortcut(e, shortcuts.run)) {
+                const opNodes = [...this.selectedItems]
+                    .map(id => this.items.get(id)?.data)
+                    .filter(item => item?.kind === 'op');
+                if (opNodes.length === 1) {
+                    e.preventDefault();
+                    void this.runFromNode(opNodes[0].id);
+                }
             } else if (commandKey && !e.shiftKey && !e.altKey && key === 'c') {
                 if (this.selectedItems.size > 0) {
                     e.preventDefault();
                     this.copySelectionToClipboard();
                 }
-            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            } else if (matchesShortcut(e, shortcuts.delete) || usesDefaultBackspace) {
                 if (this._selectedPlanConnection) {
                     e.preventDefault();
                     this._removeSelectedPlanConnection();
@@ -1502,6 +2812,9 @@ export class CanvasManager {
             } else if (key === 'a' && commandKey) {
                 e.preventDefault();
                 this.selectAll();
+            } else if (matchesShortcut(e, shortcuts.fit)) {
+                e.preventDefault();
+                this.fitAll();
             } else if (key === 'v' && commandKey) {
                 // Ctrl+V 粘贴网页图片
                 e.preventDefault();
@@ -1519,67 +2832,110 @@ export class CanvasManager {
         window.addEventListener('drop', async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            console.log('[Canvas] 触发全局 drop 事件, types:', Array.from(e.dataTransfer.types));
-
-            // 1. 尝试获取拖拽的图片 URL
-            const uriList = e.dataTransfer.getData('text/uri-list') || '';
-            const plainText = e.dataTransfer.getData('text/plain') || '';
-            const url = uriList || plainText;
-
-            // 2. 尝试获取拖拽的 HTML（<img src="...">）
-            const html = e.dataTransfer.getData('text/html') || '';
-            let parsedImgUrl = null;
-            if (html) {
-                try {
-                    const parser = new DOMParser();
-                    const doc = parser.parseFromString(html, 'text/html');
-                    const img = doc.querySelector('img');
-                    if (img) {
-                        parsedImgUrl = img.getAttribute('src') || img.src;
+            const dropTypes = Array.from(e.dataTransfer.types || []);
+            const libraryFilePath = e.dataTransfer.getData('application/x-flow-asset');
+            if (libraryFilePath) {
+                const rect = this.container.getBoundingClientRect();
+                const insideCanvas = e.clientX >= rect.left && e.clientX <= rect.right &&
+                    e.clientY >= rect.top && e.clientY <= rect.bottom;
+                if (insideCanvas) {
+                    const scale = this.stage.scaleX();
+                    const stagePosition = this.stage.position();
+                    document.dispatchEvent(new CustomEvent('library-asset-drop', {
+                        detail: {
+                            filePath: libraryFilePath,
+                            position: {
+                                x: (e.clientX - rect.left - stagePosition.x) / scale,
+                                y: (e.clientY - rect.top - stagePosition.y) / scale
+                            }
+                        }
+                    }));
+                }
+                return;
+            }
+            console.log('[Canvas] 触发全局 drop 事件, types:', dropTypes);
+            const stringItemPromises = Array.from(e.dataTransfer.items || [])
+                .filter(item => item.kind === 'string')
+                .map(item => new Promise(resolve => {
+                    let settled = false;
+                    const finish = (value = '') => {
+                        if (settled) return;
+                        settled = true;
+                        resolve({ type: item.type, value });
+                    };
+                    try {
+                        item.getAsString(finish);
+                    } catch (_) {
+                        finish();
                     }
-                } catch (err) {
-                    console.warn('[Canvas] HTML解析失败', err);
+                    setTimeout(() => finish(), 350);
+                }));
+            let imageUrls = collectDroppedImageUrls(e.dataTransfer);
+            const files = Array.from(e.dataTransfer.files || []);
+            const dropPosition = { offsetX: e.offsetX, offsetY: e.offsetY };
+            const inMemoryFiles = files
+                .filter(file => !file.path && file.size > 0 && /^image\//i.test(file.type))
+                .map(file => ({
+                    name: file.name,
+                    type: file.type,
+                    dataPromise: file.arrayBuffer()
+                }));
+            const targetDir = this._getDefaultSaveFolder();
+            if (stringItemPromises.length > 0) {
+                const stringPayloads = await Promise.all(stringItemPromises);
+                imageUrls = [...new Set([
+                    ...imageUrls,
+                    ...collectDroppedImageUrls(null, stringPayloads)
+                ])];
+            }
+            console.log('[Canvas] drop candidates:', imageUrls, 'files:', files.length);
+
+            let lastRemoteError = '';
+            if (imageUrls.length > 0) {
+                this._showCanvasStatus('正在导入网页图片...');
+                for (const imageUrl of imageUrls.slice(0, 12)) {
+                    const result = await window.flowCanvas.image.downloadFromUrl(imageUrl, targetDir);
+                    if (result?.success) {
+                        this._addCapturedFile(result.filePath, dropPosition);
+                        this._showCanvasStatus('网页图片已加入画板');
+                        return;
+                    }
+                    lastRemoteError = result?.error || '下载失败';
+                    console.warn('[Canvas] Dropped image candidate failed:', imageUrl, lastRemoteError);
                 }
             }
 
-            // 3. 尝试获取拖拽的本地文件
-            const files = e.dataTransfer.files;
-
-            console.log('[Canvas] drop 数据: url=', url, '解析出的图片URL=', parsedImgUrl, '本地文件数=', files?.length);
-
-            let imageUrl = null;
-
-            if (parsedImgUrl && /^https?:\/\//i.test(parsedImgUrl)) {
-                imageUrl = parsedImgUrl;
-            } else if (url && /^https?:\/\/.+/i.test(url)) {
-                imageUrl = url;
-            }
-
-            if (imageUrl) {
-                console.log('[Canvas] 拖拽图片 URL:', imageUrl);
-                const targetDir = this._getDefaultSaveFolder();
-                const result = await window.flowCanvas.image.downloadFromUrl(imageUrl, targetDir);
-                if (result.success) {
-                    this._addCapturedFile(result.filePath, e);
-                } else {
-                    console.error('[Canvas] 下载失败:', result.error);
-                }
-            } else if (files && files.length > 0) {
-                // 本地文件拖入（直接用路径）
-                const targetDir = this._getDefaultSaveFolder();
+            if (files.length > 0) {
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
                     if (file.path) {
                         const result = await this._archiveLocalDroppedFile(file.path, targetDir);
                         if (result?.success) {
-                            this._addCapturedFile(result.filePath, e);
+                            this._addCapturedFile(result.filePath, dropPosition);
                         } else {
                             console.error('[Canvas] 归档本地文件失败:', result?.error);
-                            this._addCapturedFile(file.path, e);
+                            this._addCapturedFile(file.path, dropPosition);
                         }
                     }
                 }
+                for (const file of inMemoryFiles) {
+                    if (window.flowCanvas?.image?.saveDroppedFile) {
+                        const result = await window.flowCanvas.image.saveDroppedFile({
+                            name: file.name,
+                            type: file.type,
+                            data: await file.dataPromise
+                        }, targetDir);
+                        if (result?.success) {
+                            this._addCapturedFile(result.filePath, dropPosition);
+                            this._showCanvasStatus('网页图片已加入画板');
+                            return;
+                        }
+                        lastRemoteError = result?.error || lastRemoteError;
+                    }
+                }
             }
+            const typeHint = dropTypes.length > 0 ? `（${dropTypes.join(', ')}）` : '';
+            this._showCanvasStatus(`网页图片导入失败${lastRemoteError ? `：${lastRemoteError}` : `：拖拽数据中没有可用图片${typeHint}`}`);
         });
     }
 
@@ -1613,6 +2969,7 @@ export class CanvasManager {
     }
 
     _applyMagneticSnapping(movedGroup) {
+        if (!this._autoSnapEnabled) return;
         // Keep the snap range stable on screen even when the canvas is zoomed far out.
         const SNAP_DIST = 14 / Math.max(0.08, this.stage.scaleX());
         const movedNode = movedGroup.findOne('.displayNode') || movedGroup.findOne('.fallbackBg');
@@ -1723,16 +3080,13 @@ export class CanvasManager {
                     }
                 }
 
-                // If video, update control group size
+                // Keep video controls screen-sized after snap resizing.
                 const controlsGroup = movedGroup.findOne('.videoControls');
                 const coverControls = movedGroup.findOne('.videoCoverControls');
                 if (controlsGroup && movedGroup.attrs.filePath.match(/\.(mp4|mov|avi|mkv|wmv|flv|webm)$/i)) {
-                    controlsGroup.y(snappedH - 30);
-                    controlsGroup.findOne('.videoControlBg')?.width(snappedW);
-                    controlsGroup.findOne('.videoProgressBg')?.width(Math.max(0, snappedW - 45));
-                    controlsGroup.findOne('.videoProgressHotspot')?.width(Math.max(0, snappedW - 45));
+                    this._layoutVideoControlGroup(controlsGroup, snappedW, snappedH);
                 }
-                if (coverControls) coverControls.y(snappedH - 30);
+                if (coverControls) this._layoutVideoControlGroup(coverControls, snappedW, snappedH);
                 if (this.imageTransformer?.nodes?.()[0] === movedNode) {
                     this.imageTransformer.forceUpdate();
                 }
@@ -1826,9 +3180,10 @@ export class CanvasManager {
         const entries = [];
         this.selectedItems.forEach(id => {
             const item = this.items.get(id);
-            if (item?.data?.filePath && item.group.isVisible()) {
+            const filePath = this._copyableFilePath(item?.data);
+            if (filePath && item.group.isVisible()) {
                 entries.push({
-                    filePath: item.data.filePath,
+                    filePath,
                     x: item.group.x(),
                     y: item.group.y()
                 });
@@ -1928,6 +3283,41 @@ export class CanvasManager {
         this.emit('selectionChanged', this.getSelectedCanvasEntries());
     }
 
+    focusItemById(id, worldPoint = null) {
+        const item = this.items.get(id);
+        if (!item) return false;
+
+        const displayNode = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
+        const width = Math.max(1, Number(displayNode?.width?.()) || Number(item.data.width) || IMAGE_DEFAULT_WIDTH);
+        const height = Math.max(1, Number(displayNode?.height?.()) || Number(item.data.height) || IMAGE_DEFAULT_WIDTH);
+
+        if (Number.isFinite(worldPoint?.x) && Number.isFinite(worldPoint?.y)) {
+            item.group.position({
+                x: worldPoint.x - width / 2,
+                y: worldPoint.y - height / 2
+            });
+            item.data.x = item.group.x();
+            item.data.y = item.group.y();
+        } else {
+            const scale = this.stage.scaleX();
+            const container = this.stage.container();
+            this.stage.position({
+                x: container.offsetWidth / 2 - (item.group.x() + width / 2) * scale,
+                y: container.offsetHeight / 2 - (item.group.y() + height / 2) * scale
+            });
+        }
+
+        this.selectItem(id, false);
+        this.stage.batchDraw();
+        this.syncBackground();
+        this.syncGifs();
+        this.syncPlanInlineEditors();
+        this.graphView?.sync();
+        this._scheduleMinimapDraw();
+        this.emit('change');
+        return true;
+    }
+
     selectItems(ids = []) {
         const previousSelection = new Set(this.selectedItems);
         const hadSelectedConnection = Boolean(this._selectedPlanConnection);
@@ -1977,9 +3367,10 @@ export class CanvasManager {
         const selectedEntries = [];
         this.selectedItems.forEach(id => {
             const item = this.items.get(id);
-            if (item?.data?.filePath && item.group.isVisible()) {
+            const filePath = this._copyableFilePath(item?.data);
+            if (filePath && item.group.isVisible()) {
                 selectedEntries.push({
-                    filePath: item.data.filePath,
+                    filePath,
                     x: item.group.x(),
                     y: item.group.y()
                 });
@@ -2025,14 +3416,18 @@ export class CanvasManager {
             const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
             if (node) {
                 if (isSelected) {
-                    node.stroke('#b9bcc2');
-                    node.strokeWidth(3);
+                    node.stroke('#d5d7db');
+                    node.strokeWidth(item.data.kind === 'op' ? 2 : 2.5);
                 } else {
-                    node.stroke(null);
-                    node.strokeWidth(0);
+                    const status = item.data.runStatus || 'idle';
+                    node.stroke(item.data.kind === 'op'
+                        ? (status === 'error' ? OP_STATUS_COLORS.error : 'rgba(255,255,255,0.13)')
+                        : 'rgba(255,255,255,0.14)');
+                    node.strokeWidth(item.data.kind === 'op' && status === 'error' ? 1.5 : 1);
                 }
             }
         });
+        this.graphView?.refreshPortVisibility();
         this.plans.forEach(plan => {
             const isSelected = this.selectedItems.has(plan.data.id);
             const node = plan.group.findOne('.planHitArea');
@@ -2047,6 +3442,7 @@ export class CanvasManager {
         });
         this._scheduleMinimapDraw();
         this._syncImageTransformer();
+        this._scheduleSelectionToolbarSync();
     }
 
     _getImageTransformerTarget() {
@@ -2059,6 +3455,10 @@ export class CanvasManager {
 
     _syncImageTransformer() {
         if (!this.imageTransformer) return;
+        if (this._activeImageCrop) {
+            if (this.imageTransformer.nodes().length) this.imageTransformer.nodes([]);
+            return;
+        }
         const selectedIds = Array.from(this.selectedItems);
         const item = selectedIds.length === 1 ? this.items.get(selectedIds[0]) : null;
         const isImage = item && this._getFileType(item.data.filePath) === 'image';
@@ -2114,6 +3514,7 @@ export class CanvasManager {
         item.data.y = group.y();
         item.data.width = width;
         item.data.height = height;
+        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
         item.isResizing = false;
         group.draggable(true);
 
@@ -2124,6 +3525,7 @@ export class CanvasManager {
         }
 
         this.imageTransformer.forceUpdate();
+        this._scheduleSelectionToolbarSync();
         this._flushDragConnectionRefresh();
         this._refreshVisiblePlanConnections();
         this.layer.batchDraw();
@@ -2133,7 +3535,14 @@ export class CanvasManager {
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
     clearAll(options = {}) {
+        this._closeImageCrop({ silent: true });
         if (!options.preserveTransients) this.clearVideoGenerationPlaceholders();
+        this.graphView?.closeConnectionNodeMenu?.();
+        this._closeInlineOpPromptEditor({ commit: false });
+        this._removeAllPersistentTextEditors();
+        this._closeMediaTitleEditor({ commit: false });
+        this._closeOpPromptPresetMenu();
+        this.endMediaReferencePick({ silent: true, clearHighlights: true });
         console.log('[Canvas] clearAll: 清除', this.items.size, '个卡片');
         this._flushDragConnectionRefresh();
         this._cancelPlanReferencePick('', { refresh: false });
@@ -2164,12 +3573,18 @@ export class CanvasManager {
     // ── 设置视口位置和缩放 ──
     setViewport(viewport) {
         if (viewport) {
+            const scale = Math.max(
+                MIN_VIEWPORT_SCALE,
+                Math.min(MAX_VIEWPORT_SCALE, Number(viewport.scale) || 1)
+            );
             this.stage.position({ x: viewport.x || 0, y: viewport.y || 0 });
-            this.stage.scale({ x: viewport.scale || 1, y: viewport.scale || 1 });
+            this.stage.scale({ x: scale, y: scale });
             this.stage.batchDraw();
             this.syncGifs();
             this.syncBackground();
             this.syncPlanInlineEditors();
+            this._syncPersistentTextEditors();
+            this._syncCanvasViewDock();
             this._scheduleMinimapDraw();
         }
     }
@@ -2186,9 +3601,17 @@ export class CanvasManager {
 
             const end = Math.min(index + batchSize, items.length);
             for (; index < end; index++) {
-                if (this._isInternalProcessFile(items[index]?.filePath)) continue;
-                if (items[index]?.id && this.items.has(items[index].id)) continue;
-                this._createCard(items[index]);
+                const raw = items[index];
+                if (raw?.kind === 'op') {
+                    if (raw.id && this.items.has(raw.id)) continue;
+                    raw.runStatus = 'idle';
+                    raw.runError = '';
+                    this._createOpNode(raw);
+                    continue;
+                }
+                if (this._isInternalProcessFile(raw?.filePath)) continue;
+                if (raw?.id && this.items.has(raw.id)) continue;
+                this._createCard(raw);
             }
 
             this.layer.batchDraw();
@@ -2246,12 +3669,168 @@ export class CanvasManager {
     }
 
     _getFileType(filePath) {
-        const ext = filePath.split('.').pop().toLowerCase();
-        if (['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif'].includes(ext)) return 'image';
-        if (['gif', 'mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'webm'].includes(ext)) return 'video';
-        if (['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext)) return 'audio';
+        const ext = String(filePath || '').split('.').pop().toLowerCase();
+        if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'svg', 'ico'].includes(ext)) return 'image';
+        if (['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'webm', 'm4v'].includes(ext)) return 'video';
+        if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'wma', 'm4a'].includes(ext)) return 'audio';
         if (['pdf', 'doc', 'docx', 'txt', 'ppt', 'pptx', 'xls', 'xlsx'].includes(ext)) return 'document';
         return 'other';
+    }
+
+    _getItemMediaType(data = {}) {
+        const explicitType = String(data.mediaType || '').toLowerCase();
+        if (['image', 'video', 'audio', 'document', 'other'].includes(explicitType)) return explicitType;
+        return this._getFileType(data.filePath);
+    }
+
+    _mediaPlaceholderSize(fileType, data = {}) {
+        const savedWidth = Number(data.width) > 0 ? Number(data.width) : 0;
+        const savedHeight = Number(data.height) > 0 ? Number(data.height) : 0;
+        const defaults = fileType === 'image'
+            ? { width: IMAGE_DEFAULT_WIDTH, height: IMAGE_DEFAULT_WIDTH }
+            : fileType === 'video'
+                ? { width: IMAGE_DEFAULT_WIDTH, height: Math.round(IMAGE_DEFAULT_WIDTH / VIDEO_PLACEHOLDER_DEFAULT_RATIO) }
+                : fileType === 'audio'
+                    ? { width: AUDIO_NODE_WIDTH, height: AUDIO_NODE_HEIGHT }
+                    : { width: DOC_DEFAULT_SIZE, height: DOC_DEFAULT_SIZE };
+        const width = savedWidth || defaults.width;
+        const height = savedHeight || (savedWidth ? Math.round(savedWidth * defaults.height / defaults.width) : defaults.height);
+        return { width, height };
+    }
+
+    _nodeTypeLabel(type, data = {}) {
+        if (data.kind === 'op') return data.title || NODE_TYPES[data.nodeType]?.title || '节点';
+        const labels = {
+            image: '图片',
+            video: '视频',
+            audio: '音频',
+            document: '文件',
+            other: '素材'
+        };
+        return labels[type] || labels.other;
+    }
+
+    _mediaDisplayName(data = {}, type = this._getItemMediaType(data)) {
+        if (type !== 'image') return this._nodeTypeLabel(type, data);
+        const customName = String(data.displayName || '').trim();
+        if (customName) return customName;
+        const fileName = this._fileNameFromPath(data.filePath);
+        const extensionIndex = fileName.lastIndexOf('.');
+        const stem = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+        return stem || '未命名图片';
+    }
+
+    _truncateExternalTitle(value, maxWidth, fontSize = 13) {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        const suffix = '..';
+        const canvas = this._externalTitleMeasureCanvas || document.createElement('canvas');
+        this._externalTitleMeasureCanvas = canvas;
+        const context = canvas.getContext('2d');
+        if (!context) return text;
+        context.font = `400 ${fontSize}px "Segoe UI", sans-serif`;
+        if (context.measureText(text).width <= maxWidth) return text;
+        if (context.measureText(suffix).width >= maxWidth) return suffix;
+
+        const characters = Array.from(text);
+        let low = 0;
+        let high = characters.length;
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            const candidate = `${characters.slice(0, middle).join('').trimEnd()}${suffix}`;
+            if (context.measureText(candidate).width <= maxWidth) low = middle;
+            else high = middle - 1;
+        }
+        return `${characters.slice(0, low).join('').trimEnd()}${suffix}`;
+    }
+
+    _syncExternalNodeTitle(group, data, type) {
+        if (!group || !data) return;
+        group.findOne('.externalNodeTitle')?.destroy();
+
+        const nodeType = data.kind === 'op' ? data.nodeType : type;
+        const editableImageTitle = data.kind !== 'op' && type === 'image';
+        const label = editableImageTitle
+            ? this._mediaDisplayName(data, type)
+            : this._nodeTypeLabel(type, data);
+        const titleWidth = Math.max(40, Number(data.width) || OP_NODE_WIDTH);
+        const textWidth = Math.max(20, titleWidth - 20);
+        const visibleLabel = editableImageTitle
+            ? this._truncateExternalTitle(label, textWidth)
+            : label;
+        const title = new Konva.Group({
+            name: editableImageTitle ? 'externalNodeTitle editableMediaTitle' : 'externalNodeTitle',
+            x: 0,
+            y: -27,
+            listening: editableImageTitle
+        });
+        if (editableImageTitle) {
+            title.add(new Konva.Rect({
+                name: 'externalNodeTitleHit',
+                width: titleWidth,
+                height: 24,
+                fill: 'rgba(0,0,0,0.001)',
+                listening: true
+            }));
+        }
+        title.add(new Konva.Path({
+            data: NODE_GLYPH_PATHS[nodeType] || NODE_GLYPH_PATHS.document,
+            x: 0,
+            y: 3,
+            scaleX: 0.72,
+            scaleY: 0.72,
+            stroke: '#989ba1',
+            strokeWidth: 1.35,
+            lineCap: 'round',
+            lineJoin: 'round',
+            fill: null,
+            perfectDrawEnabled: false,
+            listening: false
+        }));
+        title.add(new Konva.Text({
+            name: 'externalNodeTitleText',
+            x: 20,
+            y: 3,
+            width: textWidth,
+            height: 18,
+            text: visibleLabel,
+            fontFamily: 'Segoe UI, sans-serif',
+            fontSize: 13,
+            fontStyle: 'normal',
+            fill: '#b8bbc0',
+            wrap: 'none',
+            listening: false
+        }));
+
+        if (editableImageTitle) {
+            title.on('mouseenter', () => {
+                document.body.style.cursor = 'text';
+            });
+            title.on('mouseleave', () => {
+                document.body.style.cursor = 'default';
+            });
+            title.on('dblclick dbltap', event => {
+                event.cancelBubble = true;
+                this.openMediaTitleEditor(data.id);
+            });
+        }
+        group.add(title);
+        title.moveToTop();
+    }
+
+    _styleMediaDisplayNode(item, node) {
+        if (!item || !node) return;
+        node.cornerRadius?.(8);
+        node.stroke(this.selectedItems.has(item.data.id) ? '#d5d7db' : 'rgba(255,255,255,0.14)');
+        node.strokeWidth(this.selectedItems.has(item.data.id) ? 2.5 : 1);
+        node.shadowColor?.('rgba(0,0,0,0.32)');
+        node.shadowBlur?.(10);
+        node.shadowOffsetY?.(3);
+        node.shadowOpacity?.(0.42);
+        node.perfectDrawEnabled?.(false);
+        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
+        this.graphView?.renderPorts(item.data.id);
+        this.graphView?.scheduleSync(item.data.id);
     }
 
     _createFallbackGroup(fileType, width = DOC_DEFAULT_SIZE, height = DOC_DEFAULT_SIZE, filePath = '') {
@@ -2265,15 +3844,39 @@ export class CanvasManager {
             name: 'fallbackBg',
             width,
             height,
-            fill: '#242430',
-            stroke: '#303240',
+            fill: '#202123',
+            stroke: 'rgba(255,255,255,0.14)',
             strokeWidth: 1,
             cornerRadius: 8,
+            shadowColor: 'rgba(0,0,0,0.32)',
+            shadowBlur: 10,
+            shadowOffsetY: 3,
+            shadowOpacity: 0.42,
             perfectDrawEnabled: false
         }));
 
         const documentTitle = fileType === 'document' ? this._fileNameFromPath(filePath) : '';
-        group.add(this._createFallbackGlyph(fileType, width, height, documentTitle ? 46 : 0));
+        if (fileType === 'audio') {
+            group.add(this._createAudioWaveform(width, height, filePath));
+        } else {
+            const emptyImage = fileType === 'image' && !filePath;
+            group.add(this._createFallbackGlyph(fileType, width, height, documentTitle ? 46 : (emptyImage ? 34 : 0)));
+            if (emptyImage) {
+                group.add(new Konva.Text({
+                    name: 'emptyMediaLabel',
+                    x: 12,
+                    y: Math.max(12, height - 34),
+                    width: Math.max(1, width - 24),
+                    height: 18,
+                    text: '上传图片',
+                    fill: '#8e949f',
+                    fontSize: 11,
+                    align: 'center',
+                    verticalAlign: 'middle',
+                    listening: false
+                }));
+            }
+        }
         if (documentTitle) {
             group.add(new Konva.Text({
                 name: 'fallbackTitle',
@@ -2295,13 +3898,118 @@ export class CanvasManager {
         return group;
     }
 
+    _createAudioWaveform(width, height, filePath) {
+        const group = new Konva.Group({ name: 'audioWaveform', listening: false });
+        const fileName = this._fileNameFromPath(filePath) || '未命名音频';
+        const extension = fileName.includes('.') ? fileName.split('.').pop().toUpperCase() : 'AUDIO';
+        group.add(new Konva.Path({
+            data: NODE_GLYPH_PATHS.audio,
+            x: 14,
+            y: 12,
+            scaleX: 0.9,
+            scaleY: 0.9,
+            stroke: '#aeb4bf',
+            strokeWidth: 1.5,
+            lineCap: 'round',
+            lineJoin: 'round',
+            perfectDrawEnabled: false,
+            listening: false
+        }));
+        group.add(new Konva.Text({
+            name: 'audioFileName',
+            x: 46,
+            y: 10,
+            width: Math.max(1, width - 60),
+            height: 18,
+            text: fileName,
+            fill: '#d0d3d9',
+            fontSize: 11,
+            ellipsis: true,
+            wrap: 'none',
+            listening: false
+        }));
+        group.add(new Konva.Text({
+            x: 46,
+            y: 29,
+            width: Math.max(1, width - 60),
+            height: 14,
+            text: extension,
+            fill: '#6f7580',
+            fontSize: 8,
+            listening: false
+        }));
+
+        const waveX = 14;
+        const waveY = Math.max(52, height - 32);
+        const waveWidth = Math.max(40, width - 28);
+        const barCount = Math.max(18, Math.min(42, Math.floor(waveWidth / 7)));
+        const gap = waveWidth / barCount;
+        const seed = [...fileName].reduce((total, char) => (total + char.charCodeAt(0)) % 997, 37);
+        for (let index = 0; index < barCount; index += 1) {
+            const value = Math.abs(Math.sin((index + 1) * 1.71 + seed * 0.013));
+            const barHeight = 4 + Math.round(value * Math.max(8, Math.min(22, height - 62)));
+            group.add(new Konva.Rect({
+                x: waveX + index * gap,
+                y: waveY + (24 - barHeight) / 2,
+                width: Math.max(2, gap - 3),
+                height: barHeight,
+                cornerRadius: 1,
+                fill: index % 5 === 0 ? '#9da4af' : '#666d78',
+                listening: false,
+                perfectDrawEnabled: false
+            }));
+        }
+        return group;
+    }
+
+    _requestMediaReplacement(data) {
+        document.dispatchEvent(new CustomEvent('context-relink-material', {
+            detail: { itemId: data.id, itemIds: [data.id], filePath: data.filePath || '' }
+        }));
+    }
+
+    _setHoveredMediaItem(itemId = null) {
+        const nextId = itemId && this.items.has(itemId) ? itemId : null;
+        if (this._hoveredMediaItemId === nextId) return;
+
+        const previousId = this._hoveredMediaItemId;
+        this._hoveredMediaItemId = nextId;
+        if (previousId) {
+            const previous = this.items.get(previousId);
+            if (previous) {
+                previous.isHovered = false;
+                this._demoteResourceSaverItem(previous);
+                this.graphView?.setNodeHovered(previousId, false);
+                previous.group.getLayer()?.batchDraw();
+            }
+        }
+
+        if (!nextId) return;
+        const next = this.items.get(nextId);
+        if (!next || next.data?.kind === 'op') return;
+        next.isHovered = true;
+        this._setVideoControlsVisible(next, true);
+        this._scheduleResourceSaverPromote(next);
+        this.graphView?.setNodeHovered(nextId, true);
+        next.group.getLayer()?.batchDraw();
+    }
+
+    _syncHoveredMediaItemAtPointer() {
+        const pointer = this.stage?.getPointerPosition?.();
+        if (!pointer) return;
+        const target = this.stage.getIntersection(pointer);
+        const hoveredItem = this._findMediaReferenceItemFromNode(target);
+        this._setHoveredMediaItem(
+            hoveredItem?.data?.kind === 'op' ? null : hoveredItem?.data?.id || null
+        );
+    }
+
     _markFallbackLoadError(item, message = '加载失败') {
         if (!item?.group) return;
         item.loadErrorMessage = String(message || '加载失败');
         if (!item.group.findOne('.fallbackIcon')) {
-            const fileType = this._getFileType(item.data.filePath);
-            const w = item.data.width || DOC_DEFAULT_SIZE;
-            const h = item.data.height || DOC_DEFAULT_SIZE;
+            const fileType = this._getItemMediaType(item.data);
+            const { width: w, height: h } = this._mediaPlaceholderSize(fileType, item.data);
             item.group.add(this._createFallbackGroup(fileType, w, h, item.data.filePath));
         }
 
@@ -2421,7 +4129,9 @@ export class CanvasManager {
     }
 
     async _createCard(data) {
-        const fileType = this._getFileType(data.filePath);
+        const fileType = this._getItemMediaType(data);
+        const placeholderSize = this._mediaPlaceholderSize(fileType, data);
+        data.mediaType = fileType;
 
         const group = new Konva.Group({
             x: data.x || 0, y: data.y || 0,
@@ -2432,11 +4142,12 @@ export class CanvasManager {
         });
 
         // 默认占位块（在图片未加载完成前或非图片文件时显示）
-        group.add(this._createFallbackGroup(fileType, DOC_DEFAULT_SIZE, DOC_DEFAULT_SIZE, data.filePath));
+        group.add(this._createFallbackGroup(fileType, placeholderSize.width, placeholderSize.height, data.filePath));
+        this._syncExternalNodeTitle(group, data, fileType);
 
         group.on('mouseenter', () => {
             const item = this.items.get(data.id);
-            if (item) this._scheduleResourceSaverPromote(item);
+            this._setHoveredMediaItem(data.id);
             if (this._activePlanReferencePick) {
                 document.body.style.cursor = 'crosshair';
                 this._planReferencePickTargetId = data.id;
@@ -2465,7 +4176,7 @@ export class CanvasManager {
         group.on('mouseleave', () => {
             document.body.style.cursor = 'default';
             const item = this.items.get(data.id);
-            if (item) this._demoteResourceSaverItem(item);
+            if (this._hoveredMediaItemId === data.id) this._setHoveredMediaItem(null);
             if (this._activePlanReferencePick) {
                 this._setItemReferenceHighlight(data.id, false);
                 if (this._planReferencePickTargetId === data.id) {
@@ -2532,7 +4243,7 @@ export class CanvasManager {
                 }
             });
             selectedEntries.sort((a, b) => (a.x - b.x) || (a.y - b.y));
-            const selectedFiles = selectedEntries.map(item => item.filePath);
+            const selectedFiles = selectedEntries.map(item => item.filePath).filter(Boolean);
             const selectedIds = selectedEntries.map(item => item.id);
             const currentItem = this.items.get(data.id);
             this.contextMenu.show(e, {
@@ -2540,13 +4251,18 @@ export class CanvasManager {
                 filePath: data.filePath,
                 filePaths: selectedFiles,
                 itemIds: selectedIds,
-                loadError: Boolean(currentItem?.loadError)
+                loadError: Boolean(currentItem?.loadError),
+                mediaType: currentItem?.data?.mediaType || fileType
             });
         });
 
         group.on('dblclick', () => {
             if (this._activePlanReferencePick) return;
-            window.flowCanvas.shell.openFile(data.filePath);
+            if (data.filePath) {
+                window.flowCanvas.shell.openFile(data.filePath);
+            } else {
+                this._requestMediaReplacement(data);
+            }
         });
 
         this.layer.add(group);
@@ -2554,7 +4270,7 @@ export class CanvasManager {
         this.items.set(data.id, {
             group,
             data,
-            loaded: false,
+            loaded: !data.filePath,
             loading: false,
             isThumbnail: false,
             loadToken: 0,
@@ -2569,13 +4285,3696 @@ export class CanvasManager {
             gifDomElement: null,
             videoElement: null,
             videoAnimation: null,
-            autoPlayVideo: false
+            autoPlayVideo: false,
+            loadError: false,
+            loadErrorMessage: '',
+            isHovered: false
         });
 
         const pendingPlacement = this.pendingGenerationPlacements.get(data.id);
         if (pendingPlacement) this._applyGenerationPlacement(data.id, pendingPlacement);
 
+        this.graphView?.renderPorts(data.id);
+
         return group;
+    }
+
+    /**
+     * 新建功能节点。pos 省略时落在视口中心。
+     * 数据进 storeData.items，与素材卡片同一条持久化链路。
+     */
+    /**
+     * 空白处右键的「插入节点」菜单。复用 .plan-context-menu 的样式与关闭逻辑，
+     * 节点在光标处落地而非视口中心 —— 右键的位置就是用户想要的位置。
+     */
+    _showInsertNodeMenu(evt) {
+        this.graphView?.closeConnectionNodeMenu?.();
+        this._removePlanContextMenu();
+        const at = evt.insertAt || this._getCanvasPointFromClient(evt.clientX, evt.clientY);
+
+        const menu = document.createElement('div');
+        menu.className = 'plan-context-menu insert-node-menu';
+
+        const heading = document.createElement('div');
+        heading.className = 'insert-node-heading';
+        heading.textContent = '插入节点';
+        menu.appendChild(heading);
+
+        const emptyImageButton = document.createElement('button');
+        emptyImageButton.type = 'button';
+        emptyImageButton.className = 'plan-context-item insert-node-item';
+        emptyImageButton.innerHTML =
+            `<span class="insert-node-icon">${nodeIconSvg('image')}</span>` +
+            '<span class="insert-node-label">空图片</span>';
+        emptyImageButton.title = '创建可上传或替换素材的空图片节点';
+        emptyImageButton.addEventListener('click', () => {
+            this._removePlanContextMenu();
+            this.addEmptyMediaNode('image', at);
+        });
+        menu.appendChild(emptyImageButton);
+
+        Object.entries(NODE_TYPES).forEach(([nodeType, def]) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'plan-context-item insert-node-item';
+            button.innerHTML =
+                `<span class="insert-node-icon">${nodeIconSvg(nodeType)}</span>` +
+                `<span class="insert-node-label"></span>`;
+            button.querySelector('.insert-node-label').textContent = def.title || nodeType;
+            button.addEventListener('click', () => {
+                this._removePlanContextMenu();
+                this.addOpNode(nodeType, at);
+            });
+            menu.appendChild(button);
+        });
+
+        menu.style.left = `${evt.clientX}px`;
+        menu.style.top = `${evt.clientY}px`;
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+        if (rect.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - rect.height - 10}px`;
+
+        setTimeout(() => {
+            const close = (event) => {
+                if (!menu.contains(event.target)) {
+                    this._removePlanContextMenu();
+                    document.removeEventListener('mousedown', close);
+                }
+            };
+            document.addEventListener('mousedown', close);
+        }, 0);
+    }
+
+    addEmptyMediaNode(mediaType = 'image', pos = null) {
+        const normalizedType = ['image', 'video', 'audio'].includes(mediaType) ? mediaType : 'image';
+        const at = pos || this._getViewportCenter();
+        const size = this._mediaPlaceholderSize(normalizedType);
+        const data = {
+            id: `media-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            kind: 'media',
+            mediaType: normalizedType,
+            filePath: '',
+            x: Math.round(at.x - size.width / 2),
+            y: Math.round(at.y - size.height / 2),
+            width: size.width,
+            height: size.height,
+            addedAt: Date.now()
+        };
+
+        this.storeData.items.push(data);
+        this._createCard(data);
+        this._refreshCanvasBoundary();
+        this.clearSelection();
+        this.selectItem(data.id, true);
+        this.emit('change');
+        return data;
+    }
+
+    addOpNode(nodeType, pos = null) {
+        const def = NODE_TYPES[nodeType];
+        if (!def) {
+            console.warn('[Canvas] 未知节点类型:', nodeType);
+            return null;
+        }
+
+        const at = pos || this._getViewportCenter();
+        const config = {};
+        (def.config || []).forEach(field => {
+            config[field.key] = field.default ?? '';
+        });
+        if (nodeType === 'text' || nodeType === 'image' || nodeType === 'video') {
+            const provider = nodeType === 'video'
+                ? this.options.getVideoProvider?.()
+                : nodeType === 'text'
+                    ? this.options.getTextProvider?.()
+                    : this.options.getImageProvider?.();
+            if (provider) {
+                config.providerId = provider.id || null;
+                config.sourceProviderId = provider.sourceProviderId || provider.id || null;
+                config.model = provider.model || '';
+            }
+            if (nodeType === 'video') {
+                const profile = this.options.getVideoModelProfile?.(config);
+                if (profile) {
+                    config.ratio = profile.defaultRatio || config.ratio;
+                    config.resolution = profile.defaultResolution || config.resolution;
+                    config.duration = profile.defaultDuration ?? config.duration;
+                }
+            }
+        }
+        const isGenerator = nodeType === 'image' || nodeType === 'video';
+        const placeholderSize = isGenerator ? getGeneratorPlaceholderSize(nodeType, config) : null;
+        const width = placeholderSize?.width || Math.max(OP_NODE_WIDTH, Number(def.width) || 0);
+        const height = placeholderSize?.height || OP_NODE_HEIGHTS[nodeType] || OP_NODE_HEIGHT;
+
+        const data = {
+            id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            kind: 'op',
+            nodeType,
+            title: nodeType === 'image' ? '图片生成' : nodeType === 'video' ? '视频生成' : def.title,
+            config,
+            model: config.model || '',
+            x: Math.round(at.x - width / 2),
+            y: Math.round(at.y - height / 2),
+            width,
+            height,
+            runStatus: 'idle',
+            runError: '',
+            ...(isGenerator ? {
+                generatorUiVersion: 1,
+                resultEntries: [],
+                resultFilePaths: [],
+                resultUrls: [],
+                resultItems: [],
+                resultStackPosition: 0
+            } : {})
+        };
+
+        this.storeData.items.push(data);
+        this._createOpNode(data);
+        this.clearSelection();
+        this.selectItem(data.id, true);
+        this.emit('change');
+        return data;
+    }
+
+    duplicateItems(itemIds = []) {
+        const sourceIds = (Array.isArray(itemIds) && itemIds.length ? itemIds : [...this.selectedItems])
+            .filter(id => this.items.has(id));
+        if (!sourceIds.length) return [];
+
+        const clones = sourceIds.map((id, index) => {
+            const source = this.items.get(id);
+            const data = JSON.parse(JSON.stringify(source.data || {}));
+            data.id = `${data.kind === 'op' ? 'op' : 'item'}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+            data.x = Math.round(source.group.x() + 30 + index * 6);
+            data.y = Math.round(source.group.y() + 30 + index * 6);
+            data.addedAt = Date.now();
+            if (data.kind === 'op') {
+                data.runStatus = 'idle';
+                data.runError = '';
+                if (data.nodeType === 'image' || data.nodeType === 'video') {
+                    keepFirstGeneratorResult(data);
+                }
+            }
+            this.storeData.items.push(data);
+            if (data.kind === 'op') this._createOpNode(data);
+            else void this._createCard(data);
+            return data;
+        });
+
+        this.clearSelection();
+        clones.forEach(data => this.selectItem(data.id, true));
+        this._refreshCanvasBoundary();
+        this.emit('change');
+        this._showCanvasStatus(clones.length > 1 ? `已复制 ${clones.length} 个节点` : '已复制节点');
+        return clones;
+    }
+
+    _createOpNode(data) {
+        if (!data) return null;
+        const def = NODE_TYPES[data.nodeType];
+        if (!def) return null;
+
+        const isGenerator = data.nodeType === 'image' || data.nodeType === 'video';
+        if (isGenerator) {
+            const nextTitle = data.nodeType === 'image' ? '图片生成' : '视频生成';
+            if (!data.title || data.title === def.title || data.title === '图像' || data.title === '视频') data.title = nextTitle;
+            data.generatorUiVersion = 1;
+            ensureGeneratorResultEntries(data);
+        }
+        const placeholderSize = isGenerator && getGeneratorResultEntries(data).length === 0
+            ? getGeneratorPlaceholderSize(data.nodeType, data.config)
+            : null;
+        const width = placeholderSize?.width
+            || (isGenerator ? Math.max(112, Number(data.width) || 264) : Math.max(OP_NODE_WIDTH, Number(data.width) || 0, Number(def.width) || 0));
+        const height = placeholderSize?.height
+            || (isGenerator ? Math.max(112, Number(data.height) || 264) : Math.max(OP_NODE_HEIGHTS[data.nodeType] || OP_NODE_HEIGHT, Number(data.height) || 0));
+        data.width = width;
+        data.height = height;
+
+        const group = new Konva.Group({
+            x: data.x || 0,
+            y: data.y || 0,
+            draggable: true,
+            id: data.id,
+            name: 'nodeGroup',
+            nodeKind: 'op'
+        });
+
+        this._drawOpNode(group, data, width, height);
+
+        group.on('dragmove', (event) => {
+            event.cancelBubble = true;
+            data.x = group.x();
+            data.y = group.y();
+            this.graphView?.scheduleSync(data.id);
+            if (data.nodeType === 'text') this._positionPersistentTextEditor(data.id);
+            if (this._generationComposer?.nodeId === data.id) this._positionGenerationComposer();
+        });
+        group.on('dragend', (event) => {
+            event.cancelBubble = true;
+            data.x = group.x();
+            data.y = group.y();
+            this.graphView?.sync();
+            this.emit('change');
+        });
+        group.on('mouseenter', () => {
+            document.body.style.cursor = 'pointer';
+            this.graphView?.setNodeHovered(data.id, true);
+        });
+        group.on('mouseleave', () => {
+            document.body.style.cursor = 'default';
+            this.graphView?.setNodeHovered(data.id, false);
+        });
+        group.on('click', (e) => {
+            if (e.evt.button === 2) return;
+            const additive = e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey;
+            this.selectItem(data.id, additive);
+            if (isGenerator && !additive) this.openGenerationComposer(data.id);
+        });
+        group.on('dblclick', (e) => {
+            e.cancelBubble = true;
+            if (isGenerator) {
+                this.openGenerationComposer(data.id);
+                return;
+            }
+            const def = NODE_TYPES[data.nodeType] || {};
+            if ((def.config || []).length) {
+                this.openOpNodeEditor(data.id);
+            } else {
+                this.runFromNode(data.id);
+            }
+        });
+        group.on('contextmenu', e => {
+            e.cancelBubble = true;
+            if (!this.selectedItems.has(data.id)) this.selectItem(data.id, false);
+            const itemIds = [...this.selectedItems].filter(id => this.items.has(id));
+            this.contextMenu.show(e, {
+                kind: 'op',
+                itemId: data.id,
+                itemIds,
+                filePath: '',
+                filePaths: []
+            });
+        });
+
+        this.layer.add(group);
+        this.items.set(data.id, { group, data, loaded: true, loading: false });
+        if (data.nodeType === 'text') this._ensurePersistentTextEditor(data.id);
+        this.graphView?.renderPorts(data.id);
+        return group;
+    }
+
+    _opPromptTop(data) {
+        return data?.nodeType === 'image' ? OP_GENERATOR_PROMPT_TOP : OP_NODE_PROMPT_TOP;
+    }
+
+    _generatorInputPortNames(data) {
+        if (data?.nodeType === 'image') return new Set(['source', 'prompt', 'reference']);
+        if (data?.nodeType === 'video') return new Set(['source', 'prompt', 'image', 'video', 'audio']);
+        return new Set();
+    }
+
+    _isGeneratorInputConnection(data, connection) {
+        return connection?.kind !== 'history'
+            && connection?.to?.nodeId === data?.id
+            && this._generatorInputPortNames(data).has(connection?.to?.port);
+    }
+
+    _connectionOutputDataType(connection) {
+        const source = this.items.get(connection?.from?.nodeId)?.data;
+        if (!source) return null;
+        if (source.kind === 'op') {
+            return (NODE_TYPES[source.nodeType]?.outputs || [])
+                .find(port => port.name === connection.from.port)?.dataType || null;
+        }
+        const mediaType = this._getItemMediaType(source);
+        return mediaType === 'image' || mediaType === 'video' ? mediaType : 'file';
+    }
+
+    _hasUpstreamPrompt(data) {
+        return (this.graphView?.connections || []).some(connection =>
+            this._isGeneratorInputConnection(data, connection)
+            && this._connectionOutputDataType(connection) === 'string'
+        );
+    }
+
+    _opReferenceEntries(data) {
+        if (!data?.id || !['image', 'video'].includes(data.nodeType)) return [];
+        const acceptedTypes = data.nodeType === 'image'
+            ? new Set(['image'])
+            : new Set(['image', 'video', 'file']);
+        return (this.graphView?.connections || [])
+            .filter(connection => this._isGeneratorInputConnection(data, connection)
+                && acceptedTypes.has(this._connectionOutputDataType(connection)))
+            .map(connection => {
+                const source = this.items.get(connection.from.nodeId)?.data;
+                return source ? { connection, source } : null;
+            })
+            .filter(Boolean);
+    }
+
+    _drawOpReferenceStrip(group, data, width) {
+        const references = this._opReferenceEntries(data);
+        const y = OP_GENERATOR_REFERENCE_TOP;
+        const tileSize = 40;
+        const gap = 6;
+        let x = 12;
+
+        group.add(new Konva.Text({
+            x,
+            y: y + 13,
+            width: 52,
+            text: '参考素材',
+            fontSize: 10,
+            fill: '#8f939b',
+            listening: false
+        }));
+        x += 58;
+
+        const roomForTiles = Math.max(1, Math.floor((width - x - tileSize - 16) / (tileSize + gap)));
+        const visibleReferences = references.slice(0, roomForTiles);
+        visibleReferences.forEach(({ source }, index) => {
+            const tile = new Konva.Group({ x, y, name: 'opReferenceThumbnail' });
+            const background = new Konva.Rect({
+                width: tileSize,
+                height: tileSize,
+                fill: '#292b2f',
+                stroke: 'rgba(255,255,255,0.14)',
+                strokeWidth: 1,
+                cornerRadius: 6
+            });
+            tile.add(background);
+
+            const mediaType = this._getItemMediaType(source);
+            if (mediaType === 'image' && source.filePath) {
+                const preview = new Konva.Image({
+                    x: 2,
+                    y: 2,
+                    width: tileSize - 4,
+                    height: tileSize - 4,
+                    cornerRadius: 4,
+                    listening: false
+                });
+                tile.add(preview);
+                const image = new window.Image();
+                image.onload = () => {
+                    if (!tile.getLayer()) return;
+                    const side = Math.max(1, Math.min(image.width, image.height));
+                    preview.image(image);
+                    preview.crop({
+                        x: Math.max(0, (image.width - side) / 2),
+                        y: Math.max(0, (image.height - side) / 2),
+                        width: side,
+                        height: side
+                    });
+                    tile.getLayer()?.batchDraw();
+                };
+                image.src = 'local-res://' + encodeURIComponent(source.filePath);
+            } else {
+                tile.add(new Konva.Path({
+                    data: NODE_GLYPH_PATHS[mediaType] || NODE_GLYPH_PATHS.document,
+                    x: 10,
+                    y: 10,
+                    scaleX: 1,
+                    scaleY: 1,
+                    stroke: '#a7abb2',
+                    strokeWidth: 1.25,
+                    listening: false
+                }));
+            }
+
+            tile.add(new Konva.Text({
+                x: tileSize - 15,
+                y: 3,
+                width: 11,
+                height: 11,
+                text: String(index + 1),
+                align: 'center',
+                fontSize: 8,
+                fill: '#d9dce1',
+                shadowColor: '#000',
+                shadowBlur: 3,
+                shadowOpacity: 0.7,
+                listening: false
+            }));
+            tile.on('mouseenter', () => {
+                background.stroke('rgba(255,255,255,0.32)');
+                document.body.style.cursor = 'pointer';
+                group.getLayer()?.batchDraw();
+            });
+            tile.on('mouseleave', () => {
+                background.stroke('rgba(255,255,255,0.14)');
+                document.body.style.cursor = 'default';
+                group.getLayer()?.batchDraw();
+            });
+            tile.on('mousedown touchstart click tap', event => {
+                if (event.evt?.button != null && event.evt.button !== 0) return;
+                event.cancelBubble = true;
+                event.evt?.preventDefault?.();
+                if (event.type === 'click' || event.type === 'tap') this.selectItem(source.id, false);
+            });
+            group.add(tile);
+            x += tileSize + gap;
+        });
+
+        if (references.length > visibleReferences.length) {
+            const remaining = references.length - visibleReferences.length;
+            group.add(new Konva.Text({
+                x: Math.max(70, x - tileSize - gap),
+                y: y + 14,
+                width: tileSize,
+                text: `+${remaining}`,
+                align: 'center',
+                fontSize: 10,
+                fill: '#e0e2e5',
+                listening: false
+            }));
+        }
+
+        const addButton = new Konva.Group({ x, y, name: 'opReferenceAddButton' });
+        const addBackground = new Konva.Rect({
+            width: tileSize,
+            height: tileSize,
+            fill: '#292b2f',
+            stroke: 'rgba(255,255,255,0.12)',
+            strokeWidth: 1,
+            cornerRadius: 6
+        });
+        addButton.add(addBackground, new Konva.Line({
+            points: [13, 20, 27, 20, 20, 20, 20, 13, 20, 27],
+            stroke: '#aeb2b9',
+            strokeWidth: 1.5,
+            lineCap: 'round',
+            listening: false
+        }));
+        addButton.on('mouseenter', () => {
+            addBackground.fill('#34363b');
+            addBackground.stroke('rgba(255,255,255,0.24)');
+            document.body.style.cursor = 'pointer';
+            group.getLayer()?.batchDraw();
+        });
+        addButton.on('mouseleave', () => {
+            addBackground.fill('#292b2f');
+            addBackground.stroke('rgba(255,255,255,0.12)');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        addButton.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (event.type === 'click' || event.type === 'tap') this.beginNodeReferencePick(data.id);
+        });
+        group.add(addButton);
+    }
+
+    _drawGeneratorPlaceholder(group, data, width, height) {
+        group.getAttr('generatorAnimation')?.stop?.();
+        group.setAttr('generatorAnimation', null);
+        const previousVideos = group.getAttr('generatorPreviewVideos') || [];
+        previousVideos.forEach(video => {
+            video.pause?.();
+            video.removeAttribute?.('src');
+            video.load?.();
+        });
+        group.setAttr('generatorPreviewVideos', []);
+        group.off('.generatorStack');
+        group.destroyChildren();
+
+        const status = data.runStatus || 'idle';
+        const results = ensureGeneratorResultEntries(data);
+        const resultCount = results.length;
+        const isBusy = status === STATUS.QUEUED || status === STATUS.RUNNING;
+        const stroke = status === STATUS.ERROR
+            ? OP_STATUS_COLORS.error
+            : 'rgba(255, 255, 255, 0.24)';
+
+        if (resultCount > 1) {
+            const collapsedOffset = 7;
+            const expandedOffset = Math.min(64, Math.max(40, Math.round(width * 0.18)));
+            const nextCard = new Konva.Group({
+                x: collapsedOffset,
+                y: collapsedOffset,
+                name: 'generatorStackNext'
+            });
+            nextCard.add(new Konva.Rect({
+                width,
+                height,
+                fill: '#17181a',
+                stroke: 'rgba(255, 255, 255, 0.14)',
+                strokeWidth: 1,
+                cornerRadius: 8
+            }));
+            this._addGeneratorResultPreview(group, nextCard, data, results[1], width, height);
+            nextCard.on('mouseenter.generatorStack', () => {
+                document.body.style.cursor = 'pointer';
+            });
+            nextCard.on('mousedown.generatorStack touchstart.generatorStack click.generatorStack tap.generatorStack', event => {
+                if (event.evt?.button != null && event.evt.button !== 0) return;
+                event.cancelBubble = true;
+                event.evt?.preventDefault?.();
+                if (event.type !== 'click' && event.type !== 'tap') return;
+                rotateGeneratorResults(data);
+                this.refreshOpNode(data.id);
+                this.emit('change');
+            });
+            group.add(nextCard);
+            group.on('mouseenter.generatorStack', () => {
+                nextCard.to({
+                    x: expandedOffset,
+                    y: 5,
+                    duration: 0.16,
+                    easing: Konva.Easings.EaseOut
+                });
+            });
+            group.on('mouseleave.generatorStack', () => {
+                nextCard.to({
+                    x: collapsedOffset,
+                    y: collapsedOffset,
+                    duration: 0.14,
+                    easing: Konva.Easings.EaseInOut
+                });
+            });
+        }
+
+        const background = new Konva.Rect({
+            name: 'displayNode',
+            width,
+            height,
+            fill: '#202123',
+            stroke,
+            strokeWidth: status === STATUS.ERROR ? 1.5 : 1,
+            cornerRadius: 8,
+            shadowColor: 'rgba(0, 0, 0, 0.36)',
+            shadowBlur: 14,
+            shadowOffsetY: 5,
+            shadowOpacity: 0.5
+        });
+        group.add(background);
+
+        if (results[0]) {
+            this._addGeneratorResultPreview(group, group, data, results[0], width, height, 'generatorResultPreview');
+        } else {
+            const glyph = NODE_GLYPH_PATHS[data.nodeType] || NODE_GLYPH_PATHS.image;
+            group.add(new Konva.Path({
+                data: glyph,
+                x: width / 2 - 22,
+                y: height / 2 - 22,
+                scaleX: 2.2,
+                scaleY: 2.2,
+                stroke: '#696c71',
+                strokeWidth: 1.8,
+                lineCap: 'round',
+                lineJoin: 'round',
+                listening: false
+            }));
+        }
+
+        if (isBusy) {
+            const sweepWidth = Math.max(72, Math.round(width * 0.34));
+            const sweep = new Konva.Rect({
+                x: -sweepWidth,
+                width: sweepWidth,
+                height,
+                fillLinearGradientStartPoint: { x: 0, y: 0 },
+                fillLinearGradientEndPoint: { x: sweepWidth, y: 0 },
+                fillLinearGradientColorStops: [
+                    0, 'rgba(255,255,255,0)',
+                    0.5, 'rgba(255,255,255,0.15)',
+                    1, 'rgba(255,255,255,0)'
+                ],
+                listening: false
+            });
+            const clip = new Konva.Group({
+                clipX: 1,
+                clipY: 1,
+                clipWidth: Math.max(1, width - 2),
+                clipHeight: Math.max(1, height - 2),
+                listening: false
+            });
+            clip.add(sweep);
+            group.add(clip);
+            const animation = new Konva.Animation(frame => {
+                const progress = ((frame?.time || 0) % 1500) / 1500;
+                sweep.x(-sweepWidth + (width + sweepWidth) * progress);
+            }, this.layer);
+            group.setAttr('generatorAnimation', animation);
+            animation.start();
+        }
+
+        if (status === STATUS.ERROR && data.runError) {
+            group.add(new Konva.Rect({
+                x: 8,
+                y: height - 44,
+                width: width - 16,
+                height: 36,
+                fill: 'rgba(31, 15, 16, 0.9)',
+                cornerRadius: 5,
+                listening: false
+            }), new Konva.Text({
+                x: 14,
+                y: height - 36,
+                width: width - 28,
+                height: 24,
+                text: data.runError,
+                fontSize: 10,
+                lineHeight: 1.25,
+                fill: '#d99a94',
+                ellipsis: true,
+                wrap: 'word',
+                listening: false
+            }));
+        }
+
+        if (resultCount > 1) {
+            group.add(new Konva.Text({
+                name: 'generatorStackPosition',
+                x: Math.max(0, width - 72),
+                y: -24,
+                width: 72,
+                height: 18,
+                text: `${Number(data.resultStackPosition || 0) + 1}/${resultCount}`,
+                align: 'right',
+                fontFamily: 'Segoe UI, sans-serif',
+                fontSize: 11,
+                fill: '#aeb1b7',
+                listening: false
+            }));
+        }
+
+        this._syncExternalNodeTitle(group, data, data.nodeType);
+    }
+
+    _addGeneratorResultPreview(ownerGroup, parent, data, result, width, height, name = '') {
+        const source = result?.filePath
+            ? `local-res://${encodeURIComponent(resolveCanvasFilePath(result.filePath))}`
+            : result?.url || '';
+        if (!source) return null;
+
+        const preview = new Konva.Image({
+            name,
+            width,
+            height,
+            cornerRadius: 8,
+            listening: false
+        });
+        parent.add(preview);
+
+        if (data.nodeType === 'video') {
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+            const drawFrame = () => {
+                if (!ownerGroup.getLayer()) return;
+                preview.image(video);
+                this._coverGeneratorPreview(preview, video.videoWidth, video.videoHeight, width, height);
+                ownerGroup.getLayer()?.batchDraw();
+            };
+            video.addEventListener('loadeddata', () => {
+                if (Number.isFinite(video.duration) && video.duration > 0.12) {
+                    try { video.currentTime = Math.min(0.12, video.duration / 2); } catch (_) { drawFrame(); }
+                } else {
+                    drawFrame();
+                }
+            }, { once: true });
+            video.addEventListener('seeked', drawFrame, { once: true });
+            video.src = source;
+            const videos = ownerGroup.getAttr('generatorPreviewVideos') || [];
+            videos.push(video);
+            ownerGroup.setAttr('generatorPreviewVideos', videos);
+        } else {
+            const image = new window.Image();
+            image.onload = () => {
+                if (!ownerGroup.getLayer()) return;
+                preview.image(image);
+                this._coverGeneratorPreview(preview, image.naturalWidth || image.width, image.naturalHeight || image.height, width, height);
+                ownerGroup.getLayer()?.batchDraw();
+            };
+            image.src = source;
+        }
+        return preview;
+    }
+
+    _coverGeneratorPreview(preview, mediaWidth, mediaHeight, boxWidth, boxHeight) {
+        const sourceWidth = Math.max(1, Number(mediaWidth) || boxWidth);
+        const sourceHeight = Math.max(1, Number(mediaHeight) || boxHeight);
+        const sourceRatio = sourceWidth / sourceHeight;
+        const boxRatio = boxWidth / boxHeight;
+        if (sourceRatio > boxRatio) {
+            const cropWidth = sourceHeight * boxRatio;
+            preview.crop({ x: (sourceWidth - cropWidth) / 2, y: 0, width: cropWidth, height: sourceHeight });
+        } else {
+            const cropHeight = sourceWidth / boxRatio;
+            preview.crop({ x: 0, y: (sourceHeight - cropHeight) / 2, width: sourceWidth, height: cropHeight });
+        }
+    }
+
+    _drawOpNode(group, data, width, height) {
+        group.destroyChildren();
+        const def = NODE_TYPES[data.nodeType] || {};
+        const status = data.runStatus || 'idle';
+        const isGenerator = data.nodeType === 'image' || data.nodeType === 'video';
+
+        if (isGenerator) {
+            this._drawGeneratorPlaceholder(group, data, width, height);
+            return;
+        }
+
+        this._syncExternalNodeTitle(group, data, data.nodeType);
+
+        group.add(new Konva.Rect({
+            name: 'displayNode',
+            width,
+            height,
+            fill: '#202123',
+            stroke: status === 'error' ? OP_STATUS_COLORS.error : 'rgba(255,255,255,0.13)',
+            strokeWidth: status === 'error' ? 1.5 : 1,
+            cornerRadius: 8,
+            shadowColor: 'rgba(0,0,0,0.32)',
+            shadowBlur: 12,
+            shadowOffsetY: 4,
+            shadowOpacity: 0.45
+        }));
+
+        const promptField = data.nodeType === 'text' ? 'text' : 'prompt';
+        const isPromptNode = ['text', 'image', 'video'].includes(data.nodeType);
+        const prompt = isPromptNode ? String(data.config?.[promptField] || '') : '';
+        const footerY = data.nodeType === 'text' ? height : height - OP_NODE_FOOTER_HEIGHT;
+
+        if (isPromptNode) {
+            let actionX = 12;
+            if (data.nodeType === 'image' || data.nodeType === 'video') {
+                actionX += this._addOpToolbarAction(group, {
+                    x: actionX,
+                    label: '预设',
+                    onClick: event => this._showOpPromptPresetMenu(data.id, event)
+                });
+            }
+            actionX += this._addOpToolbarAction(group, {
+                x: actionX,
+                label: '优化',
+                onClick: () => this._tidyOpPrompt(data.id)
+            });
+            if (data.nodeType === 'text') {
+                this._addOpToolbarAction(group, {
+                    x: actionX,
+                    label: this._visualExtractingNodeIds.has(data.id) ? '提取中' : '画面提取',
+                    onClick: () => this._extractVisualPrompt(data.id)
+                });
+            }
+            if (data.nodeType === 'image' || data.nodeType === 'video') {
+                this._addOpToolbarAction(group, {
+                    x: actionX,
+                    label: '参考',
+                    onClick: () => this.beginNodeReferencePick(data.id)
+                });
+            }
+
+            if (data.nodeType === 'image') this._drawOpReferenceStrip(group, data, width);
+
+            if (data.nodeType !== 'text') {
+                const promptY = this._opPromptTop(data);
+                const promptHeight = Math.max(44, footerY - promptY - 8);
+                const promptHit = new Konva.Rect({
+                    name: 'opPromptEditorHit',
+                    x: 10,
+                    y: promptY - 3,
+                    width: width - 20,
+                    height: promptHeight + 4,
+                    fill: 'rgba(255,255,255,0.001)',
+                    cornerRadius: 5
+                });
+                const promptText = new Konva.Text({
+                    name: 'opPromptText',
+                    x: 16,
+                    y: promptY + 4,
+                    width: width - 32,
+                    height: promptHeight - 8,
+                    text: data.runError || prompt || '点击输入提示词…',
+                    fontFamily: 'Segoe UI, sans-serif',
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    fill: data.runError ? '#e7a1a1' : (prompt ? '#d9dade' : '#74777d'),
+                    ellipsis: true,
+                    wrap: 'word',
+                    listening: false
+                });
+                promptHit.on('mouseenter', () => {
+                    promptHit.fill('rgba(255,255,255,0.025)');
+                    document.body.style.cursor = 'text';
+                    group.getLayer()?.batchDraw();
+                });
+                promptHit.on('mouseleave', () => {
+                    promptHit.fill('rgba(255,255,255,0.001)');
+                    document.body.style.cursor = 'default';
+                    group.getLayer()?.batchDraw();
+                });
+                promptHit.on('mousedown touchstart click tap dblclick dbltap', event => {
+                    if (event.evt?.button != null && event.evt.button !== 0) return;
+                    event.cancelBubble = true;
+                    event.evt?.preventDefault?.();
+                    if (['click', 'tap', 'dblclick', 'dbltap'].includes(event.type)) {
+                        this.selectItem(data.id, false);
+                        this.openInlineOpPromptEditor(data.id);
+                    }
+                });
+                group.add(promptHit, promptText);
+            }
+        } else {
+            const summary = data.runError || this._opConfigSummary(data, def);
+            group.add(new Konva.Text({
+                x: 16,
+                y: 17,
+                width: width - 32,
+                height: footerY - 28,
+                text: summary,
+                fontFamily: 'Segoe UI, sans-serif',
+                fontSize: 13,
+                lineHeight: 1.5,
+                fill: data.runError ? '#f0a0a0' : '#85888e',
+                ellipsis: true,
+                wrap: 'word'
+            }));
+        }
+
+        if (data.nodeType === 'text') {
+            group.findOne('.externalNodeTitle')?.moveToTop();
+            return;
+        }
+
+        group.add(new Konva.Line({
+            points: [0, footerY, width, footerY],
+            stroke: 'rgba(255,255,255,0.08)',
+            strokeWidth: 1,
+            listening: false
+        }));
+
+        const modelText = data.model || data.config?.model || (isGenerator ? '选择模型' : '编辑参数');
+        const footerControlY = footerY + 10;
+        const modelPillWidth = isGenerator
+            ? Math.min(112, Math.max(72, 22 + String(modelText).length * 10))
+            : Math.min(132, Math.max(76, 24 + String(modelText).length * 11));
+
+        this._addOpFooterPill(group, {
+            name: 'opModelButton',
+            x: 12,
+            y: footerControlY,
+            width: modelPillWidth,
+            text: modelText,
+            onClick: event => isGenerator
+                ? this._showOpModelMenu(data.id, event)
+                : this.openOpNodeEditor(data.id)
+        });
+
+        if (isGenerator) {
+            const controlGap = 5;
+            const countWidth = 42;
+            const runSpace = 48;
+            const parameterX = 12 + modelPillWidth + controlGap;
+            let countX;
+            if (data.nodeType === 'image') {
+                const styleWidth = 62;
+                const cameraWidth = 80;
+                const parameterWidth = Math.max(
+                    98,
+                    width - parameterX - styleWidth - cameraWidth - countWidth - runSpace - controlGap * 5
+                );
+                let controlX = parameterX;
+                this._addOpFooterPill(group, {
+                    name: 'opParameterButton',
+                    x: controlX,
+                    y: footerControlY,
+                    width: parameterWidth,
+                    text: this._opParameterSummary(data),
+                    onClick: event => this._showOpParameterMenu(data.id, event)
+                });
+                controlX += parameterWidth + controlGap;
+                this._addOpFooterPill(group, {
+                    name: 'opStyleButton',
+                    x: controlX,
+                    y: footerControlY,
+                    width: styleWidth,
+                    text: data.config?.style || '风格',
+                    onClick: event => this._showOpChoiceMenu(data.id, event, {
+                        title: '图像风格',
+                        key: 'style',
+                        choices: ['', '写实', '产品摄影', '电影感', '插画', '极简']
+                    })
+                });
+                controlX += styleWidth + controlGap;
+                this._addOpFooterPill(group, {
+                    name: 'opCameraButton',
+                    x: controlX,
+                    y: footerControlY,
+                    width: cameraWidth,
+                    text: data.config?.cameraControl || '摄影控制',
+                    onClick: event => this._showOpChoiceMenu(data.id, event, {
+                        title: '摄影机控制',
+                        key: 'cameraControl',
+                        choices: ['', '自动', '特写', '近景', '中景', '广角', '俯拍']
+                    })
+                });
+                countX = controlX + cameraWidth + controlGap;
+            } else {
+                const parameterWidth = Math.max(84, width - parameterX - countWidth - runSpace - controlGap * 2);
+                countX = parameterX + parameterWidth + controlGap;
+                this._addOpFooterPill(group, {
+                    name: 'opParameterButton',
+                    x: parameterX,
+                    y: footerControlY,
+                    width: parameterWidth,
+                    text: this._opParameterSummary(data),
+                    onClick: event => this._showOpParameterMenu(data.id, event)
+                });
+            }
+            this._addOpFooterPill(group, {
+                name: 'opCountButton',
+                x: countX,
+                y: footerControlY,
+                width: countWidth,
+                text: `${Math.max(1, Number(data.config?.count) || 1)}×`,
+                align: 'center',
+                onClick: event => this._showOpCountMenu(data.id, event)
+            });
+        } else {
+            const parameterText = data.nodeType === 'batch'
+                ? `${Number(data.config?.count) || 1}×`
+                : 'Prompt';
+            const metaX = 20 + modelPillWidth;
+            group.add(new Konva.Text({
+                x: metaX,
+                y: footerY + 18,
+                width: Math.max(40, width - metaX - 58),
+                text: `${parameterText} · ${OP_STATUS_LABELS[status] || OP_STATUS_LABELS.idle}`,
+                fontSize: 11,
+                fill: '#85888e',
+                ellipsis: true,
+                wrap: 'none',
+                listening: false
+            }));
+        }
+
+        const runButton = new Konva.Group({
+            name: 'opRunButton',
+            x: width - 40,
+            y: footerY + 8
+        });
+        const runButtonBg = new Konva.Circle({
+            x: 16,
+            y: 16,
+            radius: 16,
+            fill: status === 'error' ? '#d9b2b2' : '#eeeeef',
+            opacity: status === 'running' ? 0.66 : 1,
+            shadowColor: 'rgba(0,0,0,0.3)',
+            shadowBlur: 6,
+            shadowOffsetY: 2,
+            shadowOpacity: 0.4
+        });
+        runButton.add(runButtonBg);
+        if (status === 'running' || status === 'queued') {
+            runButton.add(new Konva.Arc({
+                x: 16,
+                y: 16,
+                innerRadius: 6,
+                outerRadius: 7.5,
+                angle: 250,
+                rotation: -90,
+                fill: '#4c4e52',
+                listening: false
+            }));
+        } else {
+            runButton.add(new Konva.Line({
+                points: [10, 17, 16, 11, 22, 17, 16, 11, 16, 22],
+                stroke: '#202123',
+                strokeWidth: 1.8,
+                lineCap: 'round',
+                lineJoin: 'round',
+                listening: false
+            }));
+        }
+        runButton.on('mouseenter', () => {
+            runButtonBg.fill('#ffffff');
+            document.body.style.cursor = 'pointer';
+            group.getLayer()?.batchDraw();
+        });
+        runButton.on('mouseleave', () => {
+            runButtonBg.fill(status === 'error' ? '#d9b2b2' : '#eeeeef');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        runButton.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (event.type === 'click' || event.type === 'tap') this.runFromNode(data.id);
+        });
+        group.add(runButton);
+        group.findOne('.externalNodeTitle')?.moveToTop();
+    }
+
+    _addOpFooterPill(group, { name, x, y, width, text, align = 'left', onClick }) {
+        const button = new Konva.Group({ name, x, y });
+        const background = new Konva.Rect({
+            width,
+            height: 28,
+            fill: '#2a2b2e',
+            stroke: 'rgba(255,255,255,0.08)',
+            strokeWidth: 1,
+            cornerRadius: 6
+        });
+        button.add(background, new Konva.Text({
+            x: align === 'center' ? 4 : 10,
+            y: 8,
+            width: width - (align === 'center' ? 8 : 20),
+            text: String(text || ''),
+            align,
+            fontSize: 11,
+            fill: '#b7b9bd',
+            ellipsis: true,
+            wrap: 'none',
+            listening: false
+        }));
+        button.on('mouseenter', () => {
+            background.fill('#343539');
+            background.stroke('rgba(255,255,255,0.15)');
+            document.body.style.cursor = 'pointer';
+            group.getLayer()?.batchDraw();
+        });
+        button.on('mouseleave', () => {
+            background.fill('#2a2b2e');
+            background.stroke('rgba(255,255,255,0.08)');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        button.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (event.type === 'click' || event.type === 'tap') onClick?.(event);
+        });
+        group.add(button);
+        return button;
+    }
+
+    _addOpToolbarAction(group, { x, label, onClick }) {
+        const width = Math.max(44, 20 + String(label || '').length * 12);
+        const button = new Konva.Group({ x, y: 10, name: 'opToolbarAction' });
+        const background = new Konva.Rect({
+            width,
+            height: 24,
+            fill: '#292a2d',
+            stroke: 'rgba(255,255,255,0.07)',
+            strokeWidth: 1,
+            cornerRadius: 5
+        });
+        button.add(background, new Konva.Text({
+            x: 8,
+            y: 6,
+            width: width - 16,
+            text: label,
+            align: 'center',
+            fontSize: 10,
+            fill: '#a8abb1',
+            listening: false
+        }));
+        button.on('mouseenter', () => {
+            background.fill('#35363a');
+            background.stroke('rgba(255,255,255,0.14)');
+            document.body.style.cursor = 'pointer';
+            group.getLayer()?.batchDraw();
+        });
+        button.on('mouseleave', () => {
+            background.fill('#292a2d');
+            background.stroke('rgba(255,255,255,0.07)');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        button.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (event.type === 'click' || event.type === 'tap') onClick?.(event);
+        });
+        group.add(button);
+        return width + 6;
+    }
+
+    _opParameterSummary(data) {
+        if (data.nodeType === 'image') {
+            const width = Math.max(1, Number(data.config?.width) || 1024);
+            const height = Math.max(1, Number(data.config?.height) || 1024);
+            const tier = data.config?.resolutionTier || inferImageResolutionTier(width, height);
+            const ratio = data.config?.ratio || inferImageAspectRatio(width, height);
+            return `${ratio === 'adaptive' ? '自适应' : ratio} · ${tier}`;
+        }
+        if (data.nodeType === 'video') {
+            const parts = [
+                data.config?.ratio,
+                data.config?.resolution,
+                Number(data.config?.duration) === -1
+                    ? '智能时长'
+                    : (data.config?.duration ? `${data.config.duration}s` : '')
+            ].filter(Boolean);
+            return parts.join(' · ') || '接口默认';
+        }
+        return '参数';
+    }
+
+    _normalizeVideoConfigForProfile(config) {
+        const profile = this.options.getVideoModelProfile?.(config);
+        if (!profile) return null;
+        const syncChoice = (key, values, fallback) => {
+            const options = (values || []).map(String);
+            if (!options.length) {
+                config[key] = '';
+                return;
+            }
+            const current = String(config[key] ?? '');
+            config[key] = options.includes(current) ? config[key] : (fallback ?? values[0]);
+        };
+        syncChoice('ratio', profile.ratios, profile.defaultRatio);
+        syncChoice('resolution', profile.resolutions, profile.defaultResolution);
+        syncChoice('duration', profile.durations, profile.defaultDuration);
+        if (profile.supportsCameraFixed === false) config.cameraFixed = false;
+        if (profile.supportsGeneratedAudio === false) config.generateAudio = false;
+        if (profile.supportsWebSearch !== true) config.webSearch = false;
+        if (profile.supportsWatermark === false) config.watermark = false;
+        return profile;
+    }
+
+    _showOpModelMenu(nodeId, event = null) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['image', 'video'].includes(data.nodeType)) return;
+        const providers = this.options.getGenerationProviders?.(data.nodeType) || [];
+        const menu = document.createElement('section');
+        menu.className = 'op-node-quick-menu op-node-model-menu';
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', '选择模型');
+        menu.innerHTML = `
+            <div class="op-quick-menu-head">
+                <strong>选择模型</strong>
+                <button type="button" data-close title="关闭" aria-label="关闭">×</button>
+            </div>
+            <label class="op-model-search">
+                <span aria-hidden="true">⌕</span>
+                <input type="search" autocomplete="off" placeholder="搜索模型或 API" aria-label="搜索模型或 API">
+            </label>
+            <div class="op-model-options"></div>
+        `;
+        const search = menu.querySelector('input');
+        const list = menu.querySelector('.op-model-options');
+        const render = () => {
+            const query = search.value.trim().toLowerCase();
+            const matches = providers.filter(provider =>
+                !query || `${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)
+            );
+            list.replaceChildren();
+            if (!matches.length) {
+                const empty = document.createElement('div');
+                empty.className = 'op-quick-empty';
+                empty.textContent = providers.length ? '没有匹配的模型' : '请先在右上角设置中添加 API';
+                list.appendChild(empty);
+                return;
+            }
+            matches.forEach(provider => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'op-model-option';
+                const isSelected = provider.id === data.config?.providerId
+                    || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
+                button.classList.toggle('selected', isSelected);
+                const model = document.createElement('strong');
+                model.textContent = provider.model || '未命名模型';
+                const source = document.createElement('small');
+                source.textContent = provider.name || '未命名 API';
+                const marker = document.createElement('span');
+                marker.textContent = isSelected ? '当前' : '›';
+                button.append(model, source, marker);
+                button.addEventListener('click', () => {
+                    data.config = data.config || {};
+                    data.config.providerId = provider.id;
+                    data.config.sourceProviderId = provider.sourceProviderId || provider.id;
+                    data.config.model = provider.model || '';
+                    data.model = data.config.model;
+                    if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
+                    this.refreshOpNode(nodeId);
+                    this.emit('change');
+                    this._closeOpQuickMenu();
+                });
+                list.appendChild(button);
+            });
+        };
+        search.addEventListener('input', render);
+        menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
+        render();
+        this._mountOpQuickMenu(menu, nodeId, event);
+        search.focus();
+    }
+
+    _showOpParameterMenu(nodeId, event = null) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['image', 'video'].includes(data.nodeType)) return;
+        data.config = data.config || {};
+        const menu = document.createElement('section');
+        menu.className = 'op-node-quick-menu op-node-parameter-menu';
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', '生成参数');
+        menu.innerHTML = `
+            <div class="op-quick-menu-head">
+                <strong>生成参数</strong>
+                <button type="button" data-close title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div class="op-parameter-sections"></div>
+        `;
+        const sections = menu.querySelector('.op-parameter-sections');
+        const commit = () => {
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+        };
+        const addChoices = (label, key, values, formatter = value => String(value)) => {
+            if (!values?.length) return;
+            const section = document.createElement('div');
+            section.className = 'op-quick-section';
+            const title = document.createElement('span');
+            title.className = 'op-quick-section-title';
+            title.textContent = label;
+            const options = document.createElement('div');
+            options.className = 'op-parameter-options';
+            values.forEach(value => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = formatter(value);
+                button.classList.toggle('selected', String(data.config[key] ?? '') === String(value));
+                button.addEventListener('click', () => {
+                    data.config[key] = key === 'duration' ? Number(value) : value;
+                    options.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                    commit();
+                });
+                options.appendChild(button);
+            });
+            section.append(title, options);
+            sections.appendChild(section);
+        };
+
+        if (data.nodeType === 'image') {
+            const initialWidth = Math.max(64, Number(data.config.width) || 1024);
+            const initialHeight = Math.max(64, Number(data.config.height) || 1024);
+            data.config.resolutionTier = IMAGE_RESOLUTION_TIERS.includes(data.config.resolutionTier)
+                ? data.config.resolutionTier
+                : inferImageResolutionTier(initialWidth, initialHeight);
+            data.config.ratio = IMAGE_ASPECT_RATIOS.includes(data.config.ratio)
+                ? data.config.ratio
+                : inferImageAspectRatio(initialWidth, initialHeight);
+
+            const applyImageProfile = () => {
+                const reference = this._opReferenceEntries(data)[0]?.source;
+                const dimensions = resolveImageDimensions(
+                    data.config.resolutionTier,
+                    data.config.ratio,
+                    {
+                        width: Number(reference?.width) || data.config.width,
+                        height: Number(reference?.height) || data.config.height
+                    }
+                );
+                data.config.width = dimensions.width;
+                data.config.height = dimensions.height;
+            };
+
+            const qualitySection = document.createElement('div');
+            qualitySection.className = 'op-quick-section';
+            qualitySection.innerHTML = '<span class="op-quick-section-title">画质</span><div class="op-parameter-options op-quality-options"></div>';
+            const qualityOptions = qualitySection.querySelector('.op-parameter-options');
+            IMAGE_RESOLUTION_TIERS.forEach(tier => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = tier;
+                button.classList.toggle('selected', data.config.resolutionTier === tier);
+                button.addEventListener('click', () => {
+                    data.config.resolutionTier = tier;
+                    applyImageProfile();
+                    qualityOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                    widthInput.value = String(data.config.width);
+                    heightInput.value = String(data.config.height);
+                    commit();
+                });
+                qualityOptions.appendChild(button);
+            });
+            sections.appendChild(qualitySection);
+
+            const ratioSection = document.createElement('div');
+            ratioSection.className = 'op-quick-section';
+            ratioSection.innerHTML = '<span class="op-quick-section-title">比例</span><div class="op-parameter-options op-ratio-options"></div>';
+            const ratioOptions = ratioSection.querySelector('.op-parameter-options');
+            IMAGE_ASPECT_RATIOS.forEach(ratio => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = ratio === 'adaptive' ? '自适应' : ratio;
+                button.classList.toggle('selected', data.config.ratio === ratio);
+                button.addEventListener('click', () => {
+                    data.config.ratio = ratio;
+                    applyImageProfile();
+                    ratioOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                    widthInput.value = String(data.config.width);
+                    heightInput.value = String(data.config.height);
+                    commit();
+                });
+                ratioOptions.appendChild(button);
+            });
+            sections.appendChild(ratioSection);
+
+            const searchSection = document.createElement('div');
+            searchSection.className = 'op-quick-section';
+            searchSection.innerHTML = '<span class="op-quick-section-title">联网搜索</span><div class="op-parameter-options op-binary-options"></div>';
+            const searchOptions = searchSection.querySelector('.op-parameter-options');
+            [true, false].forEach(enabled => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = enabled ? 'ON' : 'OFF';
+                button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
+                button.addEventListener('click', () => {
+                    data.config.webSearch = enabled;
+                    searchOptions.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                    commit();
+                });
+                searchOptions.appendChild(button);
+            });
+            sections.appendChild(searchSection);
+
+            const section = document.createElement('div');
+            section.className = 'op-quick-section op-exact-dimensions';
+            section.innerHTML = '<span class="op-quick-section-title">精确尺寸</span>';
+            const dimensions = document.createElement('div');
+            dimensions.className = 'op-dimension-inputs';
+            const widthInput = document.createElement('input');
+            const heightInput = document.createElement('input');
+            [widthInput, heightInput].forEach(input => {
+                input.type = 'number';
+                input.min = '64';
+                input.max = '8192';
+                input.step = '64';
+            });
+            widthInput.value = String(Number(data.config.width) || 1024);
+            heightInput.value = String(Number(data.config.height) || 1024);
+            widthInput.setAttribute('aria-label', '图片宽度');
+            heightInput.setAttribute('aria-label', '图片高度');
+            const applyDimensions = () => {
+                data.config.width = Math.max(64, Math.min(8192, Number(widthInput.value) || 1024));
+                data.config.height = Math.max(64, Math.min(8192, Number(heightInput.value) || 1024));
+                data.config.resolutionTier = inferImageResolutionTier(data.config.width, data.config.height);
+                data.config.ratio = inferImageAspectRatio(data.config.width, data.config.height);
+                widthInput.value = String(data.config.width);
+                heightInput.value = String(data.config.height);
+                commit();
+            };
+            widthInput.addEventListener('change', applyDimensions);
+            heightInput.addEventListener('change', applyDimensions);
+            dimensions.append(widthInput, document.createTextNode('×'), heightInput);
+            section.appendChild(dimensions);
+            sections.appendChild(section);
+        } else {
+            const profile = this._normalizeVideoConfigForProfile(data.config);
+            addChoices('画面比例', 'ratio', profile?.ratios || [], value => value === 'adaptive' ? '自适应' : value);
+            addChoices('输出分辨率', 'resolution', profile?.resolutions || []);
+            addChoices('视频时长', 'duration', profile?.durations || [], value => Number(value) === -1 ? '智能' : `${value}s`);
+            const capabilities = [
+                ['cameraFixed', '固定镜头', profile?.supportsCameraFixed !== false],
+                ['generateAudio', '生成音频', profile?.supportsGeneratedAudio !== false],
+                ['webSearch', '联网搜索', profile?.supportsWebSearch === true],
+                ['watermark', '添加水印', profile?.supportsWatermark !== false]
+            ].filter(([, , supported]) => supported);
+            if (capabilities.length) {
+                const section = document.createElement('div');
+                section.className = 'op-quick-section';
+                const title = document.createElement('span');
+                title.className = 'op-quick-section-title';
+                title.textContent = '模型能力';
+                const toggles = document.createElement('div');
+                toggles.className = 'op-capability-toggles';
+                capabilities.forEach(([key, label]) => {
+                    const control = document.createElement('label');
+                    const input = document.createElement('input');
+                    input.type = 'checkbox';
+                    input.checked = Boolean(data.config[key]);
+                    input.addEventListener('change', () => {
+                        data.config[key] = input.checked;
+                        commit();
+                    });
+                    control.append(input, document.createTextNode(label));
+                    toggles.appendChild(control);
+                });
+                section.append(title, toggles);
+                sections.appendChild(section);
+            }
+            if (!sections.children.length) {
+                const empty = document.createElement('div');
+                empty.className = 'op-quick-empty';
+                empty.textContent = '当前模型未声明可调参数，将使用接口默认值';
+                sections.appendChild(empty);
+            }
+        }
+
+        menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
+        this._mountOpQuickMenu(menu, nodeId, event);
+    }
+
+    _showOpChoiceMenu(nodeId, event, { title, key, choices = [] } = {}) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || data.nodeType !== 'image' || !key) return;
+        data.config = data.config || {};
+        const menu = document.createElement('section');
+        menu.className = 'op-node-quick-menu op-node-choice-menu';
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', title || '选择参数');
+        menu.innerHTML = `
+            <div class="op-quick-menu-head">
+                <strong></strong>
+                <button type="button" data-close title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div class="op-choice-options"></div>
+        `;
+        menu.querySelector('strong').textContent = title || '选择参数';
+        const options = menu.querySelector('.op-choice-options');
+        choices.forEach(value => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = value || '模型默认';
+            button.classList.toggle('selected', String(data.config[key] || '') === String(value));
+            button.addEventListener('click', () => {
+                data.config[key] = value;
+                this.refreshOpNode(nodeId);
+                this.emit('change');
+                this._closeOpQuickMenu();
+            });
+            options.appendChild(button);
+        });
+        menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
+        this._mountOpQuickMenu(menu, nodeId, event);
+    }
+
+    _showOpCountMenu(nodeId, event = null) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['image', 'video'].includes(data.nodeType)) return;
+        data.config = data.config || {};
+        const menu = document.createElement('section');
+        menu.className = 'op-node-quick-menu op-node-count-menu';
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', '生成数量与并发');
+        menu.innerHTML = `
+            <div class="op-quick-menu-head">
+                <strong>生成数量</strong>
+                <button type="button" data-close title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div class="op-count-stepper">
+                <button type="button" data-step="-1" title="减少数量" aria-label="减少数量">−</button>
+                <strong data-count></strong>
+                <button type="button" data-step="1" title="增加数量" aria-label="增加数量">+</button>
+            </div>
+            <div class="op-count-presets" aria-label="常用生成数量"></div>
+            <label class="op-concurrency-control"><span>并发任务</span><select aria-label="并发任务数"></select></label>
+        `;
+        const countOutput = menu.querySelector('[data-count]');
+        const presets = menu.querySelector('.op-count-presets');
+        const concurrency = menu.querySelector('select');
+        const readCount = () => Math.max(1, Math.min(20, Number(data.config.count) || 1));
+        const render = () => {
+            const count = readCount();
+            data.config.count = count;
+            countOutput.textContent = `${count}×`;
+            presets.querySelectorAll('button').forEach(button => button.classList.toggle('selected', Number(button.dataset.value) === count));
+            const limit = Math.min(6, count);
+            const selectedConcurrency = Math.max(1, Math.min(limit, Number(data.config.concurrency) || Math.min(limit, data.nodeType === 'video' ? 2 : 3)));
+            data.config.concurrency = selectedConcurrency;
+            concurrency.replaceChildren(...Array.from({ length: limit }, (_, index) => {
+                const option = document.createElement('option');
+                option.value = String(index + 1);
+                option.textContent = `${index + 1} 路`;
+                return option;
+            }));
+            concurrency.value = String(selectedConcurrency);
+        };
+        const commit = count => {
+            data.config.count = Math.max(1, Math.min(20, Number(count) || 1));
+            render();
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+        };
+        [1, 2, 4, 8].forEach(value => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.value = String(value);
+            button.textContent = `${value}×`;
+            button.addEventListener('click', () => commit(value));
+            presets.appendChild(button);
+        });
+        menu.querySelectorAll('[data-step]').forEach(button => {
+            button.addEventListener('click', () => commit(readCount() + Number(button.dataset.step)));
+        });
+        concurrency.addEventListener('change', () => {
+            data.config.concurrency = Number(concurrency.value) || 1;
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+        });
+        menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
+        render();
+        this._mountOpQuickMenu(menu, nodeId, event);
+    }
+
+    _mountOpQuickMenu(menu, nodeId, event = null) {
+        this._closeOpQuickMenu();
+        this._closeOpPromptPresetMenu();
+        this._removeOpNodeEditor();
+        document.body.appendChild(menu);
+        const entry = this.items.get(nodeId);
+        const containerRect = this.container.getBoundingClientRect();
+        const scale = this.stage.scaleX();
+        const clientX = Number(event?.evt?.clientX);
+        const clientY = Number(event?.evt?.clientY);
+        const fallbackX = containerRect.left + this.stage.x() + ((entry?.group?.x() || 0) + 12) * scale;
+        const fallbackY = containerRect.top + this.stage.y()
+            + ((entry?.group?.y() || 0) + (entry?.data?.height || OP_NODE_HEIGHT)) * scale;
+        const anchorX = Number.isFinite(clientX) ? clientX : fallbackX;
+        const anchorY = Number.isFinite(clientY) ? clientY : fallbackY;
+        menu.style.left = `${anchorX}px`;
+        menu.style.top = `${anchorY + 8}px`;
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth - 10) menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+        if (rect.bottom > window.innerHeight - 10) {
+            menu.style.top = `${Math.max(10, anchorY - rect.height - 8)}px`;
+        }
+        const closeOutside = outsideEvent => {
+            if (!menu.contains(outsideEvent.target)) this._closeOpQuickMenu();
+        };
+        const closeOnKey = keyEvent => {
+            if (keyEvent.key === 'Escape') this._closeOpQuickMenu();
+        };
+        this._opQuickMenu = { menu, closeOutside, closeOnKey };
+        setTimeout(() => document.addEventListener('pointerdown', closeOutside, true), 0);
+        document.addEventListener('keydown', closeOnKey, true);
+    }
+
+    _closeOpQuickMenu() {
+        const active = this._opQuickMenu;
+        if (!active) return;
+        document.removeEventListener('pointerdown', active.closeOutside, true);
+        document.removeEventListener('keydown', active.closeOnKey, true);
+        active.menu?.remove();
+        this._opQuickMenu = null;
+    }
+
+    _tidyOpPrompt(nodeId) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['text', 'image', 'video'].includes(data.nodeType)) return;
+        const field = data.nodeType === 'text' ? 'text' : 'prompt';
+        const current = String(data.config?.[field] || '');
+        if (!current.trim()) {
+            this.openInlineOpPromptEditor(nodeId);
+            this._showCanvasStatus('先输入提示词，再进行优化');
+            return;
+        }
+        const next = current
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .join('\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+        if (next === current) {
+            this._showCanvasStatus('提示词格式已经很整洁');
+            return;
+        }
+        data.config[field] = next;
+        this.refreshOpNode(nodeId);
+        this.emit('change');
+        this._showCanvasStatus('已整理提示词格式');
+    }
+
+    _textNodeImageSources(nodeId) {
+        return (this.graphView?.connections || [])
+            .filter(connection => connection.kind !== 'history'
+                && connection.to.nodeId === nodeId
+                && connection.to.port === 'context')
+            .map(connection => this.items.get(connection.from.nodeId)?.data || null)
+            .filter(source => source?.filePath && this._getItemMediaType(source) === 'image');
+    }
+
+    async _extractVisualPrompt(nodeId) {
+        const data = this.items.get(nodeId)?.data;
+        if (data?.nodeType !== 'text' || this._visualExtractingNodeIds.has(nodeId)) return;
+        const filePaths = [...new Set(this._textNodeImageSources(nodeId)
+            .map(source => resolveCanvasFilePath(source.filePath))
+            .filter(Boolean))].slice(0, 4);
+        if (!filePaths.length) {
+            this._showCanvasStatus('请先将图片连接到文本节点，再提取画面', 3200);
+            return;
+        }
+        const provider = this.options.getTextProvider?.(data.config);
+        if (!provider?.apiKey || !provider?.model) {
+            this._showCanvasStatus('请先配置支持图片输入的文本与视觉 API', 3600);
+            return;
+        }
+        if (!window.flowCanvas?.ai?.describeImages) {
+            this._showCanvasStatus('画面提取接口不可用，请重启 Flow Canvas', 3600);
+            return;
+        }
+
+        this._closeInlineOpPromptEditor();
+        this._visualExtractingNodeIds.add(nodeId);
+        this.refreshOpNode(nodeId);
+        this._showCanvasStatus(`正在提取${filePaths.length > 1 ? ` ${filePaths.length} 张图片的` : ''}画面…`, 120000);
+        try {
+            const result = await window.flowCanvas.ai.describeImages({ filePaths, provider });
+            if (!result?.success) throw new Error(result?.error || '视觉模型没有返回画面描述');
+            const extracted = String(result.text || '').trim();
+            if (!extracted) throw new Error('视觉模型返回了空内容');
+            data.config = data.config || {};
+            const current = String(data.config.text || '').trim();
+            data.config.text = current ? `${current}\n\n${extracted}` : extracted;
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            this._showCanvasStatus('画面提取完成，已写入文本节点', 3000);
+        } catch (error) {
+            console.error('[Canvas] visual prompt extraction failed:', error);
+            this._showCanvasStatus(`画面提取失败：${error?.message || error}`, 5000);
+        } finally {
+            this._visualExtractingNodeIds.delete(nodeId);
+            if (this.items.has(nodeId)) this.refreshOpNode(nodeId);
+        }
+    }
+
+    _showOpPromptPresetMenu(nodeId, event = null) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['image', 'video'].includes(data.nodeType)) return;
+        this._closeOpQuickMenu();
+        this._closeOpPromptPresetMenu();
+
+        const menu = document.createElement('section');
+        menu.className = 'op-prompt-preset-menu';
+        menu.setAttribute('role', 'dialog');
+        menu.setAttribute('aria-label', '提示词预设');
+        menu.innerHTML = `
+            <div class="op-prompt-preset-head">
+                <strong>提示词预设</strong>
+                <button type="button" title="关闭" aria-label="关闭">×</button>
+            </div>
+            <select class="op-prompt-preset-select" aria-label="选择提示词预设"></select>
+            <div class="op-prompt-preset-save-row">
+                <input type="text" maxlength="60" placeholder="输入预设名称" aria-label="预设名称">
+                <button type="button" data-save-preset>保存</button>
+            </div>
+            <div class="op-prompt-preset-status" aria-live="polite"></div>
+        `;
+        const select = menu.querySelector('select');
+        const nameInput = menu.querySelector('input');
+        const status = menu.querySelector('.op-prompt-preset-status');
+        const readPresets = () => this.options.getPromptPresets?.(data.nodeType) || [];
+        const renderOptions = (selectedId = '') => {
+            const presets = readPresets();
+            select.replaceChildren();
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = presets.length ? '选择预设…' : '暂无预设';
+            select.appendChild(placeholder);
+            presets.forEach(preset => {
+                const option = document.createElement('option');
+                option.value = preset.id;
+                option.textContent = preset.name;
+                select.appendChild(option);
+            });
+            select.value = presets.some(preset => preset.id === selectedId) ? selectedId : '';
+        };
+        renderOptions();
+
+        select.addEventListener('change', () => {
+            const preset = readPresets().find(candidate => candidate.id === select.value);
+            if (!preset) return;
+            data.config = data.config || {};
+            data.config.prompt = preset.prompt;
+            nameInput.value = preset.name;
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            status.textContent = `已写入“${preset.name}”`;
+            status.dataset.state = 'success';
+        });
+        menu.querySelector('[data-save-preset]')?.addEventListener('click', () => {
+            const name = nameInput.value.trim();
+            const prompt = String(data.config?.prompt || '').trim();
+            if (!name || !prompt) {
+                status.textContent = !name ? '请填写预设名称' : '当前提示词为空';
+                status.dataset.state = 'error';
+                (!name ? nameInput : null)?.focus();
+                return;
+            }
+            try {
+                const saved = this.options.savePromptPreset?.(data.nodeType, {
+                    id: select.value || null,
+                    name,
+                    prompt
+                });
+                if (!saved) throw new Error('预设存储不可用');
+                renderOptions(saved.id);
+                status.textContent = `已保存“${saved.name}”`;
+                status.dataset.state = 'success';
+            } catch (error) {
+                status.textContent = error?.message || '预设保存失败';
+                status.dataset.state = 'error';
+            }
+        });
+        menu.querySelector('.op-prompt-preset-head button')?.addEventListener('click', () => {
+            this._closeOpPromptPresetMenu();
+        });
+
+        document.body.appendChild(menu);
+        const clientX = Number(event?.evt?.clientX);
+        const clientY = Number(event?.evt?.clientY);
+        const containerRect = this.container.getBoundingClientRect();
+        const scale = this.stage.scaleX();
+        const group = this.items.get(nodeId)?.group;
+        const fallbackX = containerRect.left + this.stage.x() + ((group?.x() || 0) + 12) * scale;
+        const fallbackY = containerRect.top + this.stage.y() + ((group?.y() || 0) + 40) * scale;
+        menu.style.left = `${Number.isFinite(clientX) ? clientX : fallbackX}px`;
+        menu.style.top = `${(Number.isFinite(clientY) ? clientY : fallbackY) + 8}px`;
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth - 10) menu.style.left = `${window.innerWidth - rect.width - 10}px`;
+        if (rect.bottom > window.innerHeight - 10) menu.style.top = `${window.innerHeight - rect.height - 10}px`;
+
+        const closeOutside = outsideEvent => {
+            if (!menu.contains(outsideEvent.target)) this._closeOpPromptPresetMenu();
+        };
+        const closeOnKey = keyEvent => {
+            if (keyEvent.key === 'Escape') this._closeOpPromptPresetMenu();
+        };
+        this._opPromptPresetMenu = { menu, closeOutside, closeOnKey };
+        setTimeout(() => document.addEventListener('pointerdown', closeOutside, true), 0);
+        document.addEventListener('keydown', closeOnKey, true);
+    }
+
+    _closeOpPromptPresetMenu() {
+        const active = this._opPromptPresetMenu;
+        if (!active) return;
+        document.removeEventListener('pointerdown', active.closeOutside, true);
+        document.removeEventListener('keydown', active.closeOnKey, true);
+        active.menu?.remove();
+        this._opPromptPresetMenu = null;
+    }
+
+    _ensurePersistentTextEditor(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op' || entry.data.nodeType !== 'text') {
+            this._removePersistentTextEditor(nodeId);
+            return null;
+        }
+
+        entry.data.config = entry.data.config || {};
+        let editor = this._textNodeEditors.get(nodeId);
+        if (!editor?.element?.isConnected) {
+            const textarea = document.createElement('textarea');
+            textarea.className = 'op-inline-prompt-editor persistent';
+            textarea.placeholder = '输入 Prompt 文本';
+            textarea.spellcheck = false;
+            textarea.setAttribute('aria-label', 'Prompt 文本');
+            this.opInlineLayer.appendChild(textarea);
+            editor = { element: textarea };
+            this._textNodeEditors.set(nodeId, editor);
+
+            ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
+                textarea.addEventListener(type, inputEvent => inputEvent.stopPropagation());
+            });
+            textarea.addEventListener('pointerdown', inputEvent => {
+                const additive = inputEvent.ctrlKey || inputEvent.metaKey || inputEvent.shiftKey;
+                this.selectItem(nodeId, additive);
+            });
+            textarea.addEventListener('input', () => {
+                const current = this.items.get(nodeId)?.data;
+                if (!current || current.nodeType !== 'text') return;
+                current.config = current.config || {};
+                current.config.text = textarea.value;
+                clearTimeout(this._textNodeChangeTimers.get(nodeId));
+                this._textNodeChangeTimers.set(nodeId, setTimeout(() => {
+                    this._textNodeChangeTimers.delete(nodeId);
+                    if (this.items.has(nodeId)) this.emit('change');
+                }, 300));
+            });
+            textarea.addEventListener('keydown', keyEvent => {
+                keyEvent.stopPropagation();
+                if (keyEvent.key === 'Escape') textarea.blur();
+            });
+            textarea.addEventListener('blur', () => {
+                const timer = this._textNodeChangeTimers.get(nodeId);
+                if (!timer) return;
+                clearTimeout(timer);
+                this._textNodeChangeTimers.delete(nodeId);
+                if (this.items.has(nodeId)) this.emit('change');
+            });
+        }
+
+        const nextValue = String(entry.data.config.text || '');
+        if (editor.element.value !== nextValue) editor.element.value = nextValue;
+        this._positionPersistentTextEditor(nodeId);
+        return editor.element;
+    }
+
+    _positionPersistentTextEditor(nodeId) {
+        const editor = this._textNodeEditors.get(nodeId);
+        const entry = this.items.get(nodeId);
+        if (!editor?.element?.isConnected || !entry?.group || entry.data?.nodeType !== 'text') return;
+        const scale = this.stage.scaleX();
+        const visible = isCanvasTextContentVisible(scale);
+        editor.element.hidden = !visible;
+        editor.element.setAttribute('aria-hidden', visible ? 'false' : 'true');
+        editor.element.tabIndex = visible ? 0 : -1;
+        if (!visible) return;
+        const data = entry.data;
+        const width = Number(data.width) || OP_NODE_WIDTH;
+        const height = Number(data.height) || OP_NODE_HEIGHT;
+        const footerY = height;
+        Object.assign(editor.element.style, {
+            left: `${this.stage.x() + (entry.group.x() + 11) * scale}px`,
+            top: `${this.stage.y() + (entry.group.y() + this._opPromptTop(data) - 2) * scale}px`,
+            width: `${Math.max(120, (width - 22) * scale)}px`,
+            height: `${Math.max(58, (footerY - this._opPromptTop(data) - 4) * scale)}px`,
+            fontSize: `${Math.max(11, Math.min(20, 13 * scale))}px`
+        });
+    }
+
+    _syncPersistentTextEditors() {
+        this._textNodeEditors.forEach((_editor, nodeId) => {
+            const data = this.items.get(nodeId)?.data;
+            if (!data || data.nodeType !== 'text') this._removePersistentTextEditor(nodeId);
+        });
+        this.items.forEach((entry, nodeId) => {
+            if (entry?.data?.kind === 'op' && entry.data.nodeType === 'text') {
+                this._ensurePersistentTextEditor(nodeId);
+            }
+        });
+    }
+
+    _removePersistentTextEditor(nodeId) {
+        clearTimeout(this._textNodeChangeTimers.get(nodeId));
+        this._textNodeChangeTimers.delete(nodeId);
+        this._textNodeEditors.get(nodeId)?.element?.remove();
+        this._textNodeEditors.delete(nodeId);
+    }
+
+    _removeAllPersistentTextEditors() {
+        this._textNodeEditors.forEach(editor => editor.element?.remove());
+        this._textNodeEditors.clear();
+        this._textNodeChangeTimers.forEach(timer => clearTimeout(timer));
+        this._textNodeChangeTimers.clear();
+    }
+
+    openInlineOpPromptEditor(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op') return;
+        const { data, group } = entry;
+        if (!['text', 'image', 'video'].includes(data.nodeType)) return;
+        if (data.nodeType === 'text') {
+            const textarea = this._ensurePersistentTextEditor(nodeId);
+            textarea?.focus();
+            if (textarea) textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            return;
+        }
+        if (this._activeOpPromptEditor?.nodeId === nodeId) {
+            this._activeOpPromptEditor.element.focus();
+            return;
+        }
+        this._closeMediaTitleEditor();
+        this._closeInlineOpPromptEditor();
+
+        data.config = data.config || {};
+        const field = data.nodeType === 'text' ? 'text' : 'prompt';
+        const originalValue = String(data.config[field] || '');
+        const textarea = document.createElement('textarea');
+        textarea.className = 'op-inline-prompt-editor';
+        textarea.value = originalValue;
+        textarea.placeholder = data.nodeType === 'text' ? '输入 Prompt 文本' : '描述要生成的内容';
+        textarea.spellcheck = false;
+        textarea.setAttribute('aria-label', data.nodeType === 'text' ? 'Prompt 文本' : '生成提示词');
+        this.opInlineLayer.appendChild(textarea);
+        group.draggable(false);
+        this._activeOpPromptEditor = {
+            nodeId,
+            element: textarea,
+            group,
+            data,
+            field,
+            originalValue,
+            changed: false
+        };
+        this._positionOpPromptEditor();
+
+        ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
+            textarea.addEventListener(type, inputEvent => inputEvent.stopPropagation());
+        });
+        textarea.addEventListener('input', () => {
+            const active = this._activeOpPromptEditor;
+            if (!active || active.element !== textarea) return;
+            active.changed = textarea.value !== originalValue;
+            data.config[field] = textarea.value;
+            const promptText = group.findOne('.opPromptText');
+            if (promptText) {
+                promptText.text(textarea.value || '点击输入提示词…');
+                promptText.fill(textarea.value ? '#d9dade' : '#74777d');
+                group.getLayer()?.batchDraw();
+            }
+        });
+        textarea.addEventListener('keydown', keyEvent => {
+            keyEvent.stopPropagation();
+            if (keyEvent.key === 'Escape') {
+                keyEvent.preventDefault();
+                this._closeInlineOpPromptEditor({ commit: false });
+            } else if (keyEvent.key === 'Enter' && (keyEvent.ctrlKey || keyEvent.metaKey)) {
+                keyEvent.preventDefault();
+                this._closeInlineOpPromptEditor();
+            }
+        });
+        textarea.addEventListener('blur', () => {
+            setTimeout(() => {
+                if (this._activeOpPromptEditor?.element === textarea) this._closeInlineOpPromptEditor();
+            }, 0);
+        });
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }
+
+    _positionOpPromptEditor() {
+        const active = this._activeOpPromptEditor;
+        if (!active?.element?.isConnected) return;
+        const entry = this.items.get(active.nodeId);
+        if (!entry?.group) {
+            this._closeInlineOpPromptEditor({ commit: false });
+            return;
+        }
+        const scale = this.stage.scaleX();
+        const data = entry.data;
+        const width = Number(data.width) || OP_NODE_WIDTH;
+        const height = Number(data.height) || OP_NODE_HEIGHT;
+        const footerY = height - OP_NODE_FOOTER_HEIGHT;
+        Object.assign(active.element.style, {
+            left: `${this.stage.x() + (entry.group.x() + 11) * scale}px`,
+            top: `${this.stage.y() + (entry.group.y() + this._opPromptTop(data) - 2) * scale}px`,
+            width: `${Math.max(120, (width - 22) * scale)}px`,
+            height: `${Math.max(58, (footerY - this._opPromptTop(data) - 4) * scale)}px`,
+            fontSize: `${Math.max(11, Math.min(20, 13 * scale))}px`
+        });
+    }
+
+    _closeInlineOpPromptEditor({ commit = true } = {}) {
+        const active = this._activeOpPromptEditor;
+        if (!active) return;
+        this._activeOpPromptEditor = null;
+        if (!commit) active.data.config[active.field] = active.originalValue;
+        active.element?.remove();
+        active.group?.draggable(true);
+        if (this.items.has(active.nodeId)) this.refreshOpNode(active.nodeId);
+        if (commit && active.changed) this.emit('change');
+    }
+
+    openMediaTitleEditor(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind === 'op' || this._getItemMediaType(entry.data) !== 'image') return;
+        if (this._activeMediaTitleEditor?.nodeId === nodeId) {
+            this._activeMediaTitleEditor.element.focus();
+            this._activeMediaTitleEditor.element.select();
+            return;
+        }
+
+        this._closeInlineOpPromptEditor();
+        this._closeMediaTitleEditor();
+        const { data, group } = entry;
+        const originalCustomName = Object.prototype.hasOwnProperty.call(data, 'displayName')
+            ? data.displayName
+            : undefined;
+        const originalValue = this._mediaDisplayName(data, 'image');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'media-title-inline-editor';
+        input.value = originalValue;
+        input.maxLength = 160;
+        input.spellcheck = false;
+        input.setAttribute('aria-label', '图片名称');
+        this.opInlineLayer.appendChild(input);
+        group.draggable(false);
+        this._activeMediaTitleEditor = {
+            nodeId,
+            element: input,
+            group,
+            data,
+            originalCustomName,
+            originalValue
+        };
+        this._positionMediaTitleEditor();
+
+        ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
+            input.addEventListener(type, inputEvent => inputEvent.stopPropagation());
+        });
+        input.addEventListener('keydown', keyEvent => {
+            keyEvent.stopPropagation();
+            if (keyEvent.key === 'Escape') {
+                keyEvent.preventDefault();
+                this._closeMediaTitleEditor({ commit: false });
+            } else if (keyEvent.key === 'Enter') {
+                keyEvent.preventDefault();
+                this._closeMediaTitleEditor();
+            }
+        });
+        input.addEventListener('blur', () => {
+            setTimeout(() => {
+                if (this._activeMediaTitleEditor?.element === input) this._closeMediaTitleEditor();
+            }, 0);
+        });
+        input.focus();
+        input.select();
+    }
+
+    _positionMediaTitleEditor() {
+        const active = this._activeMediaTitleEditor;
+        if (!active?.element?.isConnected) return;
+        const entry = this.items.get(active.nodeId);
+        if (!entry?.group) {
+            this._closeMediaTitleEditor({ commit: false });
+            return;
+        }
+        const scale = this.stage.scaleX();
+        const width = Number(entry.data.width) || IMAGE_DEFAULT_WIDTH;
+        Object.assign(active.element.style, {
+            left: `${this.stage.x() + (entry.group.x() + 18) * scale}px`,
+            top: `${this.stage.y() + (entry.group.y() - 29) * scale}px`,
+            width: `${Math.max(72, (width - 18) * scale)}px`,
+            height: `${Math.max(24, 22 * scale)}px`,
+            fontSize: `${Math.max(11, Math.min(20, 13 * scale))}px`
+        });
+    }
+
+    _closeMediaTitleEditor({ commit = true } = {}) {
+        const active = this._activeMediaTitleEditor;
+        if (!active) return;
+        this._activeMediaTitleEditor = null;
+
+        if (commit) {
+            const nextName = String(active.element?.value || '').trim();
+            if (!nextName || (active.originalCustomName === undefined && nextName === active.originalValue)) {
+                delete active.data.displayName;
+            } else {
+                active.data.displayName = nextName;
+            }
+        } else if (active.originalCustomName === undefined) {
+            delete active.data.displayName;
+        } else {
+            active.data.displayName = active.originalCustomName;
+        }
+
+        const before = active.originalCustomName === undefined ? '' : String(active.originalCustomName || '').trim();
+        const after = String(active.data.displayName || '').trim();
+        const changed = before !== after;
+        active.element?.remove();
+        active.group?.draggable(true);
+        if (this.items.has(active.nodeId)) {
+            this._syncExternalNodeTitle(active.group, active.data, 'image');
+            active.group.getLayer()?.batchDraw();
+        }
+        if (commit && changed) this.emit('change');
+    }
+
+    _opConfigSummary(data, def) {
+        const fields = this._opConfigFields(data, def);
+        if (!fields.length) return '点击运行，双击打开参数';
+        if (data.nodeType === 'image' || data.nodeType === 'video' || data.nodeType === 'text') {
+            return '双击填写提示词或连接上游节点';
+        }
+        return fields
+            .map(field => {
+                const value = data.config?.[field.key];
+                const shown = (value === '' || value == null) ? '—' : String(value);
+                return `${field.label || field.key}: ${shown}`;
+            })
+            .join('\n');
+    }
+
+    _opConfigFields(data, def, config = data.config || {}) {
+        const profile = data.nodeType === 'video'
+            ? this.options.getVideoModelProfile?.(config)
+            : null;
+        return (def.config || [])
+            .filter(field => {
+                if (!profile) return true;
+                if (field.key === 'ratio') return (profile.ratios || []).length > 0;
+                if (field.key === 'resolution') return (profile.resolutions || []).length > 0;
+                if (field.key === 'duration') return (profile.durations || []).length > 0;
+                if (field.key === 'cameraFixed') return profile.supportsCameraFixed !== false;
+                if (field.key === 'generateAudio') return profile.supportsGeneratedAudio !== false;
+                if (field.key === 'webSearch') return profile.supportsWebSearch === true;
+                if (field.key === 'watermark') return profile.supportsWatermark !== false;
+                return true;
+            })
+            .map(field => {
+                if (!profile) return field;
+                if (field.key === 'ratio') {
+                    return { ...field, options: profile.ratios, default: profile.defaultRatio ?? field.default };
+                }
+                if (field.key === 'resolution') {
+                    return { ...field, options: profile.resolutions, default: profile.defaultResolution ?? field.default };
+                }
+                if (field.key === 'duration') {
+                    return { ...field, options: profile.durations, default: profile.defaultDuration ?? field.default };
+                }
+                return field;
+            });
+    }
+
+    openGenerationComposer(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op' || !['image', 'video'].includes(entry.data.nodeType)) return;
+        const { data } = entry;
+        data.config = data.config || {};
+        this._closeGenerationComposer({ commit: true, keepReferencePick: true });
+        this._closeGenerationTypeMenu();
+        this._closeOpQuickMenu();
+        this._closeOpPromptPresetMenu();
+        this._removeOpNodeEditor();
+
+        const composer = document.createElement('section');
+        composer.className = 'generation-composer';
+        composer.setAttribute('role', 'dialog');
+        composer.setAttribute('aria-label', data.nodeType === 'video' ? '视频生成设置' : '图片生成设置');
+        composer.innerHTML = `
+            <div class="generation-composer-reference-row">
+                <div class="generation-composer-references" data-reference-list></div>
+                ${data.nodeType === 'image' ? `
+                    <button class="generation-composer-upstream-plan" type="button" data-upstream-plan hidden
+                        title="规划上游提示词" aria-label="规划上游提示词" aria-haspopup="dialog">
+                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                        <span>规划上游提示词</span>
+                    </button>
+                ` : ''}
+            </div>
+            <div class="generation-composer-prompt-shell">
+                <div class="generation-composer-prompt" data-prompt contenteditable="true" role="textbox" aria-label="提示词" aria-multiline="true" spellcheck="false"></div>
+            </div>
+            <div class="generation-composer-options" data-option-row></div>
+            <div class="generation-composer-footer">
+                <button class="generation-composer-trigger generation-composer-model" type="button" data-model title="选择 API 和模型" aria-label="选择 API 和模型" aria-haspopup="dialog">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-models"></use></svg>
+                    <span data-model-label></span>
+                    <span class="generation-composer-trigger-arrow" aria-hidden="true">⌄</span>
+                </button>
+                <div class="generation-composer-parameters" data-parameters></div>
+                ${data.nodeType === 'image' ? `
+                    <button class="generation-composer-agent-toggle" type="button" data-agent-mode role="switch"
+                        title="Agent 规划模式" aria-label="Agent 规划模式">
+                        <span>Agent 模式</span><i aria-hidden="true"></i>
+                    </button>
+                ` : ''}
+                <label class="generation-composer-count" title="生成数量">
+                    <select data-count aria-label="生成数量"></select>
+                </label>
+                <button class="generation-composer-submit" type="button" data-submit title="开始生成" aria-label="开始生成">
+                    <svg viewBox="8 8 16 16" aria-hidden="true" focusable="false">
+                        <path d="M10 17L16 11L22 17M16 11V22"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="generation-composer-message" data-message aria-live="polite"></div>
+        `;
+        document.body.appendChild(composer);
+
+        const active = {
+            nodeId,
+            element: composer,
+            changed: false,
+            closeOutside: null,
+            closeOnKey: null,
+            closeOutsideTimer: null,
+            popover: null
+        };
+        this._generationComposer = active;
+
+        const prompt = composer.querySelector('[data-prompt]');
+        this._setGenerationComposerPromptValue(prompt, data.config.prompt || '');
+        prompt.dataset.placeholder = data.nodeType === 'video'
+            ? '描述你希望生成的视频，参考素材会通过连线传入'
+            : '描述你希望生成的图片，参考素材会通过连线传入';
+        ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
+            prompt.addEventListener(type, event => event.stopPropagation());
+        });
+        prompt.addEventListener('input', () => {
+            data.config.prompt = this._generationComposerPromptValue(prompt);
+            const previousCitationIds = Array.isArray(data.config.referenceCitationIds)
+                ? data.config.referenceCitationIds.join('\u0000')
+                : '';
+            const citationState = this._syncGenerationComposerCitationsFromPrompt(data, prompt);
+            prompt.dataset.empty = data.config.prompt || citationState.selectedIds.size ? 'false' : 'true';
+            active.changed = true;
+            if (previousCitationIds !== citationState.orderedIds.join('\u0000')) {
+                this._renderGenerationComposerReferences(nodeId);
+            }
+        });
+        prompt.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.ctrlKey || event.metaKey || event.isComposing) return;
+            event.preventDefault();
+            document.execCommand('insertText', false, '\n');
+        });
+        prompt.addEventListener('paste', event => {
+            event.preventDefault();
+            document.execCommand('insertText', false, event.clipboardData?.getData('text/plain') || '');
+        });
+        composer.querySelector('.generation-composer-prompt-shell')?.addEventListener('click', event => {
+            if (event.target !== event.currentTarget) return;
+            this._focusGenerationComposerPromptEnd(prompt);
+        });
+
+        const model = composer.querySelector('[data-model]');
+        this._syncGenerationComposerModelButton(nodeId);
+        model.addEventListener('click', () => this._showGenerationComposerModelMenu(nodeId, model));
+
+        const upstreamPlan = composer.querySelector('[data-upstream-plan]');
+        upstreamPlan?.addEventListener('click', () => this._showGenerationComposerPromptMerge(nodeId, upstreamPlan));
+
+        const agentToggle = composer.querySelector('[data-agent-mode]');
+        const syncAgentToggle = () => {
+            if (!agentToggle) return;
+            const enabled = this.options.getImageIntentPipelineMode?.() !== 'off';
+            agentToggle.setAttribute('aria-checked', String(enabled));
+            agentToggle.classList.toggle('active', enabled);
+        };
+        syncAgentToggle();
+        agentToggle?.addEventListener('click', async () => {
+            if (agentToggle.disabled) return;
+            const enable = agentToggle.getAttribute('aria-checked') !== 'true';
+            agentToggle.disabled = true;
+            agentToggle.classList.add('pending');
+            try {
+                await this.options.setImageIntentPipelineEnabled?.(enable);
+            } finally {
+                agentToggle.disabled = false;
+                agentToggle.classList.remove('pending');
+                syncAgentToggle();
+            }
+        });
+
+        const count = composer.querySelector('[data-count]');
+        for (let value = 1; value <= 8; value += 1) {
+            const option = document.createElement('option');
+            option.value = String(value);
+            option.textContent = `${value}×`;
+            count.appendChild(option);
+        }
+        count.value = String(Math.max(1, Math.min(8, Number(data.config.count) || 1)));
+        count.addEventListener('change', () => {
+            data.config.count = Number(count.value) || 1;
+            data.config.concurrency = Math.max(1, Math.min(data.config.count, data.nodeType === 'video' ? 2 : 3));
+            active.changed = true;
+            this.emit('change');
+        });
+
+        composer.querySelector('[data-submit]').addEventListener('click', () => this._runGeneratorFromComposer(nodeId));
+        active.closeOutside = event => {
+            const popover = active.popover;
+            if (popover?.element?.contains(event.target)) return;
+            if (composer.contains(event.target)) {
+                if (!popover?.anchor?.contains(event.target)) this._closeGenerationComposerPopover(active);
+                return;
+            }
+            if (this._activeNodeReferenceTargetId === nodeId && this.container.contains(event.target)) return;
+            this._closeGenerationComposer({ commit: true });
+        };
+        active.closeOnKey = event => {
+            if (event.key === 'Escape') {
+                if (active.popover) {
+                    this._closeGenerationComposerPopover(active);
+                    return;
+                }
+                if (this._activeNodeReferenceTargetId === nodeId) {
+                    this.endMediaReferencePick();
+                    this._renderGenerationComposerReferences(nodeId);
+                } else {
+                    this._closeGenerationComposer({ commit: true });
+                }
+                return;
+            }
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                this._runGeneratorFromComposer(nodeId);
+            }
+        };
+        active.closeOutsideTimer = setTimeout(() => {
+            active.closeOutsideTimer = null;
+            if (this._generationComposer !== active || !composer.isConnected) return;
+            document.addEventListener('pointerdown', active.closeOutside, true);
+        }, 0);
+        document.addEventListener('keydown', active.closeOnKey, true);
+        composer.addEventListener('scroll', () => this._positionGenerationComposerPopover(active));
+
+        this._renderGenerationComposerReferences(nodeId);
+        this._renderGenerationComposerParameters(nodeId);
+        this._syncGenerationComposerStatus(nodeId);
+        this._positionGenerationComposer();
+        requestAnimationFrame(() => {
+            this._positionGenerationComposer();
+            this._focusGenerationComposerPromptEnd(prompt);
+        });
+    }
+
+    _generationComposerPromptValue(prompt) {
+        if (!prompt) return '';
+        const clone = prompt.cloneNode(true);
+        clone.querySelectorAll('[data-citation-id]').forEach(citation => citation.remove());
+        return String(clone.innerText || clone.textContent || '')
+            .replace(/\u200B/g, '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\r\n/g, '\n');
+    }
+
+    _setGenerationComposerPromptValue(prompt, value) {
+        if (!prompt) return;
+        const text = String(value || '');
+        const citations = [...prompt.querySelectorAll('[data-citation-id]')];
+        prompt.replaceChildren(document.createTextNode(text), ...citations);
+        citations.forEach(citation => this._ensureGenerationComposerCitationCaret(citation));
+        prompt.dataset.empty = text || citations.length ? 'false' : 'true';
+    }
+
+    _focusGenerationComposerPromptEnd(prompt) {
+        if (!prompt) return;
+        prompt.focus({ preventScroll: true });
+        const selection = window.getSelection();
+        if (!selection) return;
+        const range = document.createRange();
+        range.selectNodeContents(prompt);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    _focusGenerationComposerPromptAfterCitation(prompt, citation) {
+        if (!prompt || !citation) return;
+        prompt.focus({ preventScroll: true });
+        const next = this._ensureGenerationComposerCitationCaret(citation);
+        const selection = window.getSelection();
+        if (!selection) return;
+        const range = document.createRange();
+        range.setStart(next, GENERATION_COMPOSER_CARET_ANCHOR.length);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+
+    _ensureGenerationComposerCitationCaret(citation) {
+        let next = citation.nextSibling;
+        if (!next || next.nodeType !== Node.TEXT_NODE) {
+            next = document.createTextNode(GENERATION_COMPOSER_CARET_ANCHOR);
+            citation.after(next);
+        } else if (!next.nodeValue?.startsWith(GENERATION_COMPOSER_CARET_ANCHOR)) {
+            next.nodeValue = GENERATION_COMPOSER_CARET_ANCHOR + (next.nodeValue || '');
+        }
+        return next;
+    }
+
+    _renderGenerationComposerReferences(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const host = active.element.querySelector('[data-reference-list]');
+        if (!host) return;
+        host.replaceChildren();
+
+        const references = this._opReferenceEntries(data);
+        const citationState = this._generationComposerCitationState(data, references);
+        let imageIndex = 0;
+        references.forEach(({ connection, source }, index) => {
+            const tile = document.createElement('div');
+            tile.className = 'generation-composer-reference';
+            tile.title = this._fileNameFromPath(source.filePath) || `参考素材 ${index + 1}`;
+            const mediaType = this._getItemMediaType(source);
+            if (mediaType === 'image' && source.filePath) {
+                const referenceLabel = this._generationImageReferenceLabel(imageIndex);
+                imageIndex += 1;
+                const image = document.createElement('img');
+                image.src = `local-res://${encodeURIComponent(resolveCanvasFilePath(source.filePath))}`;
+                image.alt = '';
+                tile.appendChild(image);
+                tile.classList.add('citable');
+                tile.classList.toggle('cited', citationState.selectedIds.has(connection.id));
+                tile.tabIndex = 0;
+                tile.setAttribute('role', 'button');
+                tile.setAttribute('aria-label', `引用${referenceLabel}`);
+                tile.setAttribute('aria-pressed', citationState.selectedIds.has(connection.id) ? 'true' : 'false');
+                tile.title = `点击引用${referenceLabel} · ${tile.title}`;
+                const toggleCitation = () => this._toggleGenerationComposerCitation(nodeId, connection.id);
+                tile.addEventListener('pointerdown', event => {
+                    if (event.target.closest('button')) return;
+                    event.preventDefault();
+                });
+                tile.addEventListener('click', toggleCitation);
+                tile.addEventListener('keydown', event => {
+                    if (event.target !== tile) return;
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    toggleCitation();
+                });
+            } else {
+                const icon = document.createElement('span');
+                const iconId = mediaType === 'audio' ? 'icon-audio' : 'icon-video';
+                icon.innerHTML = `<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#${iconId}"></use></svg>`;
+                tile.appendChild(icon);
+            }
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.title = '移除参考素材';
+            remove.setAttribute('aria-label', '移除参考素材');
+            remove.textContent = '×';
+            remove.addEventListener('click', event => {
+                event.stopPropagation();
+                this.graphView?.disconnect(connection.id);
+            });
+            tile.appendChild(remove);
+            host.appendChild(tile);
+        });
+
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.className = 'generation-composer-reference-add';
+        add.title = '从画布选择参考素材';
+        add.setAttribute('aria-label', '添加参考素材');
+        add.innerHTML = '<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>';
+        add.classList.toggle('active', this._activeNodeReferenceTargetId === nodeId);
+        add.addEventListener('click', () => {
+            if (this._activeNodeReferenceTargetId === nodeId) this.endMediaReferencePick();
+            else this.beginNodeReferencePick(nodeId);
+            this._renderGenerationComposerReferences(nodeId);
+        });
+        host.appendChild(add);
+        this._renderGenerationComposerCitations(nodeId, references);
+        this._syncGenerationComposerPromptMergeButton(nodeId);
+        this._positionGenerationComposer();
+    }
+
+    _generationImageReferenceLabel(index) {
+        const numerals = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+        return `图${numerals[index] || index + 1}`;
+    }
+
+    _generationComposerCitationState(data, references = this._opReferenceEntries(data)) {
+        data.config = data.config || {};
+        const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
+        const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
+        const configuredIds = Array.isArray(data.config.referenceCitationIds)
+            ? data.config.referenceCitationIds.filter(id => validIds.has(id))
+            : [];
+        const selectedIds = new Set(configuredIds);
+        const orderedIds = imageReferences
+            .map(({ connection }) => connection.id)
+            .filter(id => selectedIds.has(id));
+        const configuredOffsets = data.config.referenceCitationOffsets
+            && typeof data.config.referenceCitationOffsets === 'object'
+            ? data.config.referenceCitationOffsets
+            : {};
+        const offsets = {};
+        orderedIds.forEach(id => {
+            const offset = Number(configuredOffsets[id]);
+            if (Number.isFinite(offset) && offset >= 0) offsets[id] = offset;
+        });
+        const labels = imageReferences
+            .map(({ connection }, index) => selectedIds.has(connection.id)
+                ? this._generationImageReferenceLabel(index)
+                : null)
+            .filter(Boolean);
+        data.config.referenceCitationIds = orderedIds;
+        data.config.referenceCitationLabels = labels;
+        data.config.referenceCitationOffsets = offsets;
+        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets };
+    }
+
+    _toggleGenerationComposerCitation(nodeId, connectionId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const state = this._generationComposerCitationState(data);
+        if (!state.imageReferences.some(({ connection }) => connection.id === connectionId)) return;
+        const adding = !state.selectedIds.has(connectionId);
+        if (adding) state.selectedIds.add(connectionId);
+        else {
+            state.selectedIds.delete(connectionId);
+            delete data.config.referenceCitationOffsets?.[connectionId];
+        }
+        data.config.referenceCitationIds = [...state.selectedIds];
+        active.changed = true;
+        this._renderGenerationComposerReferences(nodeId);
+        const prompt = active.element.querySelector('[data-prompt]');
+        const citation = [...prompt.querySelectorAll('[data-citation-id]')]
+            .find(element => element.dataset.citationId === connectionId);
+        if (adding && citation) this._focusGenerationComposerPromptAfterCitation(prompt, citation);
+        else this._focusGenerationComposerPromptEnd(prompt);
+    }
+
+    _renderGenerationComposerCitations(nodeId, references = null) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const prompt = active.element.querySelector('[data-prompt]');
+        if (!prompt) return;
+        const state = this._generationComposerCitationState(data, references || this._opReferenceEntries(data));
+        const labelsById = new Map(state.imageReferences.map(({ connection }, index) => [
+            connection.id,
+            this._generationImageReferenceLabel(index)
+        ]));
+        const existingById = new Map();
+        prompt.querySelectorAll('[data-citation-id]').forEach(citation => {
+            const citationId = citation.dataset.citationId;
+            if (!state.selectedIds.has(citationId) || existingById.has(citationId)) {
+                citation.remove();
+                return;
+            }
+            const label = labelsById.get(citationId);
+            citation.textContent = label;
+            citation.title = `取消引用${label}`;
+            citation.setAttribute('aria-label', `取消引用${label}`);
+            existingById.set(citationId, citation);
+        });
+
+        const selectionRange = this._generationComposerPromptSelection(prompt);
+        const missing = state.imageReferences.filter(({ connection }) =>
+            state.selectedIds.has(connection.id) && !existingById.has(connection.id)
+        );
+        for (let index = missing.length - 1; index >= 0; index -= 1) {
+            const { connection } = missing[index];
+            const label = labelsById.get(connection.id);
+            const pill = this._createGenerationComposerCitation(nodeId, connection.id, label);
+            this._insertGenerationComposerCitation(
+                prompt,
+                pill,
+                state.offsets[connection.id],
+                selectionRange
+            );
+            existingById.set(connection.id, pill);
+        }
+        const synced = this._syncGenerationComposerCitationsFromPrompt(data, prompt);
+        prompt.dataset.empty = this._generationComposerPromptValue(prompt) || synced.selectedIds.size
+            ? 'false'
+            : 'true';
+    }
+
+    _createGenerationComposerCitation(nodeId, connectionId, label) {
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'generation-composer-citation';
+        pill.dataset.citationId = connectionId;
+        pill.contentEditable = 'false';
+        pill.textContent = label;
+        pill.title = `取消引用${label}`;
+        pill.setAttribute('aria-label', `取消引用${label}`);
+        pill.addEventListener('pointerdown', event => {
+            event.preventDefault();
+            event.stopPropagation();
+        });
+        pill.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            this._toggleGenerationComposerCitation(nodeId, connectionId);
+        });
+        return pill;
+    }
+
+    _generationComposerPromptSelection(prompt) {
+        const selection = window.getSelection();
+        if (!selection?.rangeCount) return null;
+        const range = selection.getRangeAt(0);
+        const common = range.commonAncestorContainer;
+        if (common !== prompt && !prompt.contains(common)) return null;
+        const element = common.nodeType === Node.ELEMENT_NODE ? common : common.parentElement;
+        if (element?.closest?.('[data-citation-id]')) return null;
+        return range.cloneRange();
+    }
+
+    _insertGenerationComposerCitation(prompt, citation, offset, selectionRange = null) {
+        const textPosition = Number.isFinite(offset)
+            ? this._generationComposerTextPosition(prompt, offset)
+            : null;
+        const range = document.createRange();
+        if (textPosition) {
+            range.setStart(textPosition.node, textPosition.offset);
+        } else if (selectionRange) {
+            range.setStart(selectionRange.endContainer, selectionRange.endOffset);
+        } else {
+            range.selectNodeContents(prompt);
+            range.collapse(false);
+        }
+        range.collapse(true);
+        range.insertNode(citation);
+        this._ensureGenerationComposerCitationCaret(citation);
+    }
+
+    _generationComposerTextPosition(prompt, requestedOffset) {
+        let remaining = Math.max(0, Number(requestedOffset) || 0);
+        const walker = document.createTreeWalker(prompt, NodeFilter.SHOW_TEXT, {
+            acceptNode: node => node.parentElement?.closest?.('[data-citation-id]')
+                ? NodeFilter.FILTER_REJECT
+                : NodeFilter.FILTER_ACCEPT
+        });
+        let node = walker.nextNode();
+        let last = null;
+        while (node) {
+            last = node;
+            const value = node.nodeValue || '';
+            const length = value.replace(/\u200B/g, '').length;
+            if (remaining <= length) {
+                let rawOffset = 0;
+                let visibleOffset = 0;
+                while (rawOffset < value.length && visibleOffset < remaining) {
+                    if (value[rawOffset] !== GENERATION_COMPOSER_CARET_ANCHOR) visibleOffset += 1;
+                    rawOffset += 1;
+                }
+                return { node, offset: rawOffset };
+            }
+            remaining -= length;
+            node = walker.nextNode();
+        }
+        return last ? { node: last, offset: last.nodeValue?.length || 0 } : null;
+    }
+
+    _generationComposerCitationOffsets(prompt) {
+        const offsets = {};
+        let textOffset = 0;
+        const visit = node => {
+            if (node.nodeType === Node.TEXT_NODE) {
+                textOffset += (node.nodeValue || '').replace(/\u200B/g, '').length;
+                return;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+            if (node.matches('[data-citation-id]')) {
+                offsets[node.dataset.citationId] = textOffset;
+                return;
+            }
+            if (node.tagName === 'BR') {
+                textOffset += 1;
+                return;
+            }
+            node.childNodes.forEach(visit);
+        };
+        prompt.childNodes.forEach(visit);
+        return offsets;
+    }
+
+    _syncGenerationComposerCitationsFromPrompt(data, prompt) {
+        const references = this._opReferenceEntries(data);
+        const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
+        const visibleIds = new Set([...prompt.querySelectorAll('[data-citation-id]')]
+            .map(citation => citation.dataset.citationId));
+        data.config.referenceCitationIds = imageReferences
+            .map(({ connection }) => connection.id)
+            .filter(id => visibleIds.has(id));
+        const state = this._generationComposerCitationState(data, references);
+        const measuredOffsets = this._generationComposerCitationOffsets(prompt);
+        data.config.referenceCitationOffsets = Object.fromEntries(state.orderedIds
+            .filter(id => Number.isFinite(measuredOffsets[id]))
+            .map(id => [id, measuredOffsets[id]]));
+        state.offsets = data.config.referenceCitationOffsets;
+        return state;
+    }
+
+    _syncGenerationComposerModelButton(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const button = active.element.querySelector('[data-model]');
+        const label = button?.querySelector('[data-model-label]');
+        if (!button || !label) return;
+        const providers = this.options.getGenerationProviders?.(data.nodeType) || [];
+        const selected = providers.find(provider =>
+            provider.id === data.config?.providerId
+            || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model)
+        );
+        label.textContent = selected?.model || data.config?.model || (providers.length ? '选择模型' : '请先添加 API');
+        button.title = selected
+            ? `${selected.name || '未命名 API'} · ${selected.model || '未命名模型'}`
+            : (providers.length ? '选择 API 和模型' : '请先在设置中添加 API');
+        button.classList.toggle('is-empty', !selected && !data.config?.model);
+    }
+
+    _showGenerationComposerModelMenu(nodeId, anchor) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+        const providers = this.options.getGenerationProviders?.(data.nodeType) || [];
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-model-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', '选择模型');
+        popover.innerHTML = `
+            <div class="generation-composer-popover-title">选择模型</div>
+            <label class="generation-composer-popover-search">
+                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                <input type="search" autocomplete="off" placeholder="搜索模型或 API" aria-label="搜索模型或 API">
+            </label>
+            <div class="generation-composer-model-options" role="listbox"></div>
+        `;
+        const search = popover.querySelector('input');
+        const list = popover.querySelector('.generation-composer-model-options');
+        const render = () => {
+            const query = search.value.trim().toLowerCase();
+            const matches = providers.filter(provider =>
+                !query || `${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)
+            );
+            list.replaceChildren();
+            if (!matches.length) {
+                const empty = document.createElement('div');
+                empty.className = 'generation-composer-popover-empty';
+                empty.textContent = providers.length ? '没有匹配的模型' : '请先在设置中添加图片 API';
+                list.appendChild(empty);
+                return;
+            }
+            matches.forEach(provider => {
+                const selected = provider.id === data.config?.providerId
+                    || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'generation-composer-model-option';
+                button.classList.toggle('selected', selected);
+                button.setAttribute('role', 'option');
+                button.setAttribute('aria-selected', String(selected));
+                const copy = document.createElement('span');
+                const model = document.createElement('strong');
+                model.textContent = provider.model || '未命名模型';
+                const source = document.createElement('small');
+                source.textContent = provider.name || '未命名 API';
+                copy.append(model, source);
+                const marker = document.createElement('span');
+                marker.textContent = selected ? '当前' : '›';
+                button.append(copy, marker);
+                button.addEventListener('click', () => {
+                    data.config.providerId = provider.id;
+                    data.config.sourceProviderId = provider.sourceProviderId || provider.id;
+                    data.config.model = provider.model || '';
+                    data.model = data.config.model;
+                    if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
+                    active.changed = true;
+                    this._closeGenerationComposerPopover(active);
+                    this._syncGenerationComposerModelButton(nodeId);
+                    this._renderGenerationComposerParameters(nodeId);
+                    this.refreshOpNode(nodeId);
+                    this.emit('change');
+                });
+                list.appendChild(button);
+            });
+        };
+        search.addEventListener('input', render);
+        render();
+        this._mountGenerationComposerPopover(active, popover, anchor);
+        search.focus({ preventScroll: true });
+    }
+
+    _syncGenerationComposerImageButtons(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
+        const parameterLabel = active.element.querySelector('[data-image-settings-label]');
+        const styleLabel = active.element.querySelector('[data-image-style-label]');
+        const cameraLabel = active.element.querySelector('[data-image-camera-label]');
+        if (parameterLabel) parameterLabel.textContent = this._opParameterSummary(data);
+        if (styleLabel) styleLabel.textContent = data.config?.style || '风格';
+        if (cameraLabel) cameraLabel.textContent = data.config?.cameraControl || '摄影机控制';
+    }
+
+    _syncGenerationComposerPromptMergeButton(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
+        const button = active.element.querySelector('[data-upstream-plan]');
+        if (!button) return;
+        const visible = this._hasUpstreamPrompt(data);
+        const labels = { append: '追加', prepend: '前置', replace: '替换' };
+        const mode = ['append', 'prepend', 'replace'].includes(data.config?.promptMergeMode)
+            ? data.config.promptMergeMode
+            : 'append';
+        button.hidden = !visible;
+        button.dataset.mode = mode;
+        button.title = `规划上游提示词（${labels[mode]}）`;
+        button.setAttribute('aria-label', button.title);
+        if (!visible && active.popover?.anchor === button) this._closeGenerationComposerPopover(active);
+    }
+
+    _showGenerationComposerPromptMerge(nodeId, anchor) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image' || !this._hasUpstreamPrompt(data)) return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-prompt-merge-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', '规划上游提示词');
+        popover.innerHTML = `
+            <div class="generation-composer-popover-title">规划上游提示词</div>
+            <div class="generation-composer-segmented" data-prompt-merge role="group" aria-label="上游提示词合并方式"></div>
+        `;
+        const host = popover.querySelector('[data-prompt-merge]');
+        const selectedMode = ['append', 'prepend', 'replace'].includes(data.config.promptMergeMode)
+            ? data.config.promptMergeMode
+            : 'append';
+        [
+            { value: 'append', label: '追加' },
+            { value: 'prepend', label: '前置' },
+            { value: 'replace', label: '替换' }
+        ].forEach(option => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = option.label;
+            button.classList.toggle('selected', selectedMode === option.value);
+            button.addEventListener('click', () => {
+                data.config.promptMergeMode = option.value;
+                host.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                active.changed = true;
+                this._syncGenerationComposerPromptMergeButton(nodeId);
+                this.refreshOpNode(nodeId);
+                this.emit('change');
+            });
+            host.appendChild(button);
+        });
+        this._mountGenerationComposerPopover(active, popover, anchor);
+    }
+
+    _showGenerationComposerImageSettings(nodeId, anchor) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+        const profile = this.options.getImageModelProfile?.(data.config) || null;
+        const availableTiers = profile?.resolutionTiers?.length
+            ? profile.resolutionTiers
+            : IMAGE_RESOLUTION_TIERS;
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-image-settings-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', '图片生成参数');
+        popover.innerHTML = `
+            <div class="generation-composer-setting-section">
+                <div class="generation-composer-setting-title">画质</div>
+                <div class="generation-composer-segmented" data-quality role="group" aria-label="画质"></div>
+            </div>
+            <div class="generation-composer-setting-section">
+                <div class="generation-composer-setting-title">比例</div>
+                <div class="generation-composer-ratio-grid" data-ratios role="group" aria-label="画面比例"></div>
+            </div>
+            <div class="generation-composer-setting-section">
+                <div class="generation-composer-setting-title">联网搜索</div>
+                <div class="generation-composer-segmented" data-web-search role="group" aria-label="联网搜索"></div>
+            </div>
+        `;
+        const commitImageProfile = () => {
+            const reference = this._opReferenceEntries(data)[0]?.source;
+            Object.assign(data.config, resolveImageDimensions(
+                data.config.resolutionTier || '1K',
+                data.config.ratio || 'adaptive',
+                { width: reference?.width || data.config.width, height: reference?.height || data.config.height }
+            ));
+            active.changed = true;
+            this._syncGenerationComposerImageButtons(nodeId);
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+        };
+        const qualityHost = popover.querySelector('[data-quality]');
+        IMAGE_RESOLUTION_TIERS.forEach(tier => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = tier;
+            button.disabled = !availableTiers.includes(tier);
+            button.classList.toggle('selected', data.config.resolutionTier === tier);
+            button.addEventListener('click', () => {
+                data.config.resolutionTier = tier;
+                qualityHost.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                commitImageProfile();
+            });
+            qualityHost.appendChild(button);
+        });
+        const ratioHost = popover.querySelector('[data-ratios]');
+        IMAGE_ASPECT_RATIOS.forEach(ratio => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.value = ratio;
+            button.classList.toggle('selected', data.config.ratio === ratio);
+            const icon = document.createElement('span');
+            icon.className = 'generation-composer-ratio-icon';
+            if (ratio === 'adaptive') {
+                icon.innerHTML = '<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-fit"></use></svg>';
+            } else {
+                const [ratioWidth, ratioHeight] = ratio.split(':').map(Number);
+                const numericRatio = ratioWidth / ratioHeight;
+                const width = numericRatio >= 1 ? 22 : Math.max(7, Math.round(22 * numericRatio));
+                const height = numericRatio >= 1 ? Math.max(7, Math.round(22 / numericRatio)) : 22;
+                icon.style.setProperty('--ratio-width', `${width}px`);
+                icon.style.setProperty('--ratio-height', `${height}px`);
+            }
+            const label = document.createElement('span');
+            label.textContent = ratio === 'adaptive' ? '自适应' : ratio;
+            button.append(icon, label);
+            button.addEventListener('click', () => {
+                data.config.ratio = ratio;
+                ratioHost.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                commitImageProfile();
+            });
+            ratioHost.appendChild(button);
+        });
+        const searchHost = popover.querySelector('[data-web-search]');
+        [true, false].forEach(enabled => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = enabled ? 'ON' : 'OFF';
+            button.classList.toggle('selected', Boolean(data.config.webSearch) === enabled);
+            button.addEventListener('click', () => {
+                data.config.webSearch = enabled;
+                searchHost.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
+                active.changed = true;
+                this.refreshOpNode(nodeId);
+                this.emit('change');
+            });
+            searchHost.appendChild(button);
+        });
+        this._mountGenerationComposerPopover(active, popover, anchor);
+    }
+
+    _showGenerationComposerImageStyle(nodeId, anchor) {
+        this._showGenerationComposerImageChoice(nodeId, anchor, {
+            key: 'style',
+            title: '图片风格',
+            emptyLabel: '默认风格'
+        });
+    }
+
+    _showGenerationComposerImageCamera(nodeId, anchor) {
+        this._showGenerationComposerImageChoice(nodeId, anchor, {
+            key: 'cameraControl',
+            title: '摄影机控制',
+            emptyLabel: '模型默认'
+        });
+    }
+
+    _showGenerationComposerImageChoice(nodeId, anchor, { key, title, emptyLabel }) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'image') return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+        const field = NODE_TYPES.image?.config?.find(candidate => candidate.key === key);
+        const choices = field?.options || [''];
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-style-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', title);
+        const titleElement = document.createElement('div');
+        titleElement.className = 'generation-composer-popover-title';
+        titleElement.textContent = title;
+        const options = document.createElement('div');
+        options.className = 'generation-composer-style-options';
+        choices.forEach(value => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = value || emptyLabel;
+            button.classList.toggle('selected', String(data.config[key] || '') === String(value));
+            button.addEventListener('click', () => {
+                data.config[key] = value;
+                active.changed = true;
+                this._syncGenerationComposerImageButtons(nodeId);
+                this.refreshOpNode(nodeId);
+                this.emit('change');
+                this._closeGenerationComposerPopover(active);
+            });
+            options.appendChild(button);
+        });
+        popover.append(titleElement, options);
+        this._mountGenerationComposerPopover(active, popover, anchor);
+    }
+
+    _mountGenerationComposerPopover(active, element, anchor) {
+        if (!active || this._generationComposer !== active) return;
+        this._closeGenerationComposerPopover(active);
+        document.body.appendChild(element);
+        active.popover = { element, anchor };
+        anchor.classList.add('is-open');
+        anchor.setAttribute('aria-expanded', 'true');
+        this._positionGenerationComposerPopover(active);
+    }
+
+    _positionGenerationComposerPopover(active = this._generationComposer) {
+        const popover = active?.popover;
+        if (!popover?.element?.isConnected || !popover.anchor?.isConnected) return;
+        const margin = 10;
+        const gap = 9;
+        const anchorRect = popover.anchor.getBoundingClientRect();
+        const rect = popover.element.getBoundingClientRect();
+        let left = anchorRect.left;
+        let top = anchorRect.top - rect.height - gap;
+        let placement = 'above';
+        if (top < margin) {
+            top = anchorRect.bottom + gap;
+            placement = 'below';
+        }
+        left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - rect.width - margin));
+        top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - rect.height - margin));
+        popover.element.style.left = `${left}px`;
+        popover.element.style.top = `${top}px`;
+        popover.element.dataset.placement = placement;
+    }
+
+    _closeGenerationComposerPopover(active = this._generationComposer) {
+        const popover = active?.popover;
+        if (!popover) return;
+        active.popover = null;
+        popover.anchor?.classList.remove('is-open');
+        popover.anchor?.setAttribute('aria-expanded', 'false');
+        popover.element?.remove();
+    }
+
+    _renderGenerationComposerParameters(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const host = active.element.querySelector('[data-parameters]');
+        const optionRow = active.element.querySelector('[data-option-row]');
+        if (!host || !optionRow) return;
+        host.replaceChildren();
+        optionRow.replaceChildren();
+
+        const addSelect = (parent, key, values, formatter, title) => {
+            if (!values?.length) return null;
+            const label = document.createElement('label');
+            label.className = 'generation-composer-select';
+            label.title = title;
+            const select = document.createElement('select');
+            select.setAttribute('aria-label', title);
+            values.forEach(value => {
+                const option = document.createElement('option');
+                option.value = String(value);
+                option.textContent = formatter ? formatter(value) : String(value);
+                select.appendChild(option);
+            });
+            select.value = String(data.config[key] ?? values[0]);
+            if (!select.value && values.length) select.value = String(values[0]);
+            select.addEventListener('change', () => {
+                data.config[key] = key === 'duration' ? Number(select.value) : select.value;
+                if (data.nodeType === 'image' && (key === 'ratio' || key === 'resolutionTier')) {
+                    const reference = this._opReferenceEntries(data)[0]?.source;
+                    Object.assign(data.config, resolveImageDimensions(
+                        data.config.resolutionTier || '1K',
+                        data.config.ratio || 'adaptive',
+                        { width: reference?.width || data.config.width, height: reference?.height || data.config.height }
+                    ));
+                }
+                active.changed = true;
+                this.refreshOpNode(nodeId);
+                this.emit('change');
+            });
+            label.appendChild(select);
+            parent.appendChild(label);
+            return select;
+        };
+
+        if (data.nodeType === 'image') {
+            const width = Math.max(64, Number(data.config.width) || 1024);
+            const height = Math.max(64, Number(data.config.height) || 1024);
+            data.config.resolutionTier = IMAGE_RESOLUTION_TIERS.includes(data.config.resolutionTier)
+                ? data.config.resolutionTier
+                : inferImageResolutionTier(width, height);
+            data.config.ratio = IMAGE_ASPECT_RATIOS.includes(data.config.ratio)
+                ? data.config.ratio
+                : inferImageAspectRatio(width, height);
+            const profile = this.options.getImageModelProfile?.(data.config) || null;
+            const availableTiers = profile?.resolutionTiers || [];
+            if (availableTiers.length && !availableTiers.includes(data.config.resolutionTier)) {
+                data.config.resolutionTier = availableTiers.includes(profile.defaultResolutionTier)
+                    ? profile.defaultResolutionTier
+                    : availableTiers[0];
+                const reference = this._opReferenceEntries(data)[0]?.source;
+                Object.assign(data.config, resolveImageDimensions(
+                    data.config.resolutionTier,
+                    data.config.ratio,
+                    { width: reference?.width || data.config.width, height: reference?.height || data.config.height }
+                ));
+                active.changed = true;
+            }
+            const settings = document.createElement('button');
+            settings.type = 'button';
+            settings.className = 'generation-composer-trigger generation-composer-parameter-trigger';
+            settings.dataset.imageSettings = '';
+            settings.title = '画质、比例和联网搜索';
+            settings.setAttribute('aria-label', '图片生成参数');
+            settings.setAttribute('aria-haspopup', 'dialog');
+            settings.innerHTML = `
+                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-fit"></use></svg>
+                <span data-image-settings-label></span>
+            `;
+            settings.addEventListener('click', () => this._showGenerationComposerImageSettings(nodeId, settings));
+            const style = document.createElement('button');
+            style.type = 'button';
+            style.className = 'generation-composer-trigger generation-composer-style-trigger';
+            style.title = '图片风格';
+            style.setAttribute('aria-label', '图片风格');
+            style.setAttribute('aria-haspopup', 'dialog');
+            style.innerHTML = `
+                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                <span data-image-style-label></span>
+            `;
+            style.addEventListener('click', () => this._showGenerationComposerImageStyle(nodeId, style));
+            const camera = document.createElement('button');
+            camera.type = 'button';
+            camera.className = 'generation-composer-trigger generation-composer-camera-trigger';
+            camera.title = '摄影机控制';
+            camera.setAttribute('aria-label', '摄影机控制');
+            camera.setAttribute('aria-haspopup', 'dialog');
+            camera.innerHTML = `
+                <span class="generation-composer-camera-icon" aria-hidden="true"></span>
+                <span data-image-camera-label></span>
+            `;
+            camera.addEventListener('click', () => this._showGenerationComposerImageCamera(nodeId, camera));
+            host.append(settings, style, camera);
+            this._syncGenerationComposerImageButtons(nodeId);
+        } else {
+            const profile = this._normalizeVideoConfigForProfile(data.config);
+            if (profile) {
+                addSelect(host, 'ratio', profile.ratios || [], null, '画面比例');
+                addSelect(host, 'resolution', profile.resolutions || [], null, '输出分辨率');
+                addSelect(host, 'duration', profile.durations || [], value => Number(value) === -1 ? '智能时长' : `${value}s`, '视频时长');
+            }
+            const toggles = [
+                ['cameraFixed', '固定镜头', Boolean(profile) && profile.supportsCameraFixed !== false],
+                ['generateAudio', '生成音频', Boolean(profile) && profile.supportsGeneratedAudio !== false],
+                ['webSearch', '联网搜索', Boolean(profile) && profile.supportsWebSearch === true],
+                ['watermark', '水印', Boolean(profile) && profile.supportsWatermark !== false]
+            ];
+            toggles.filter(([, , visible]) => visible).forEach(([key, labelText]) => {
+                const label = document.createElement('label');
+                label.className = 'generation-composer-toggle';
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = Boolean(data.config[key]);
+                input.addEventListener('change', () => {
+                    data.config[key] = input.checked;
+                    active.changed = true;
+                    this.emit('change');
+                });
+                const text = document.createElement('span');
+                text.textContent = labelText;
+                label.append(input, text);
+                optionRow.appendChild(label);
+            });
+        }
+        optionRow.hidden = !optionRow.childElementCount;
+        this._positionGenerationComposer();
+    }
+
+    async _runGeneratorFromComposer(nodeId) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const message = active.element.querySelector('[data-message]');
+        const hasUpstreamPrompt = this._hasUpstreamPrompt(data);
+        if (!String(data.config?.prompt || '').trim() && !hasUpstreamPrompt) {
+            message.textContent = '请先填写提示词，或连接一个文本节点';
+            message.dataset.state = 'error';
+            active.element.querySelector('[data-prompt]')?.focus();
+            return;
+        }
+        if (!data.config?.providerId && !data.config?.model) {
+            message.textContent = '请先选择一个可用模型';
+            message.dataset.state = 'error';
+            active.element.querySelector('[data-model]')?.focus();
+            return;
+        }
+
+        data.runError = '';
+        clearGeneratorResults(data);
+        active.changed = false;
+        this.emit('change');
+        this._syncGenerationComposerStatus(nodeId, '正在提交生成任务…');
+        await this.runFromNode(nodeId);
+        this._syncGenerationComposerStatus(nodeId);
+    }
+
+    _syncGenerationComposerStatus(nodeId, pendingMessage = '') {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || !data) return;
+        const submit = active.element.querySelector('[data-submit]');
+        const message = active.element.querySelector('[data-message]');
+        const isBusy = data.runStatus === STATUS.QUEUED || data.runStatus === STATUS.RUNNING;
+        submit?.classList.toggle('is-running', isBusy);
+        submit?.setAttribute('aria-label', isBusy ? '生成中' : '开始生成');
+        if (pendingMessage) {
+            message.textContent = pendingMessage;
+            message.dataset.state = 'pending';
+        } else if (data.runStatus === STATUS.ERROR) {
+            message.textContent = data.runError || '生成失败';
+            message.dataset.state = 'error';
+        } else if (data.runStatus === STATUS.DONE) {
+            message.textContent = '';
+            delete message.dataset.state;
+        } else if (isBusy) {
+            message.textContent = data.runStatus === STATUS.QUEUED ? '任务排队中…' : '正在生成…';
+            message.dataset.state = 'pending';
+        } else {
+            message.textContent = '';
+            delete message.dataset.state;
+        }
+    }
+
+    _positionGenerationComposer() {
+        const active = this._generationComposer;
+        const entry = active ? this.items.get(active.nodeId) : null;
+        if (!active?.element?.isConnected || !entry?.group) return;
+        const containerRect = this.container.getBoundingClientRect();
+        const scale = this.stage.scaleX() || 1;
+        const left = containerRect.left + this.stage.x() + entry.group.x() * scale;
+        const top = containerRect.top + this.stage.y() + entry.group.y() * scale;
+        const anchor = {
+            left,
+            top,
+            right: left + Number(entry.data.width || 1) * scale,
+            bottom: top + Number(entry.data.height || 1) * scale,
+            width: Number(entry.data.width || 1) * scale,
+            height: Number(entry.data.height || 1) * scale
+        };
+        const rect = active.element.getBoundingClientRect();
+        const position = getGeneratorComposerPosition(
+            anchor,
+            { width: rect.width, height: rect.height },
+            { width: window.innerWidth, height: window.innerHeight }
+        );
+        active.element.style.left = `${position.left}px`;
+        active.element.style.top = `${position.top}px`;
+        active.element.dataset.placement = position.placement;
+        this._positionGenerationComposerPopover(active);
+    }
+
+    _closeGenerationComposer({ commit = true, keepReferencePick = false } = {}) {
+        const active = this._generationComposer;
+        if (!active) return;
+        this._closeGenerationComposerPopover(active);
+        this._generationComposer = null;
+        clearTimeout(active.closeOutsideTimer);
+        active.closeOutsideTimer = null;
+        document.removeEventListener('pointerdown', active.closeOutside, true);
+        document.removeEventListener('keydown', active.closeOnKey, true);
+        active.element?.remove();
+        if (!keepReferencePick && this._activeNodeReferenceTargetId === active.nodeId) {
+            this.endMediaReferencePick({ silent: true });
+        }
+        if (commit && active.changed) this.emit('change');
+    }
+
+    /** 双击 op 节点时打开配置编辑器，允许输入文本/数值 */
+    openOpNodeEditor(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op') return;
+        const { data } = entry;
+        if (data.nodeType === 'image' || data.nodeType === 'video') {
+            this.openGenerationComposer(nodeId);
+            return;
+        }
+        const def = NODE_TYPES[data.nodeType] || {};
+        data.config = data.config || {};
+        const fields = this._opConfigFields(data, def);
+        if (!fields.length) return;
+
+        this._removeOpNodeEditor();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'plan-editor-overlay op-node-editor-overlay';
+        overlay.innerHTML = `
+            <div class="plan-editor op-node-editor" role="dialog" aria-modal="true">
+                <div class="plan-editor-header">
+                    <input class="plan-editor-title" value="${escapeHtml(data.title || def.title || data.nodeType)}" aria-label="节点标题">
+                    <button class="plan-editor-close" type="button" title="关闭">×</button>
+                </div>
+                <div class="plan-editor-table-wrap op-node-editor-body"></div>
+                <div class="plan-editor-footer">
+                    <div></div>
+                    <div class="plan-editor-footer-actions">
+                        <button class="plan-editor-cancel" type="button">取消</button>
+                        <button class="plan-editor-save" type="button">保存</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const body = overlay.querySelector('.op-node-editor-body');
+        const draft = { ...data.config };
+        const inputs = [];
+        let applyVideoProfile = () => {};
+
+        if (['text', 'image', 'video'].includes(data.nodeType)) {
+            const providerOptions = this.options.getGenerationProviders?.(data.nodeType) || [];
+            const wrap = document.createElement('label');
+            wrap.className = 'op-node-field';
+            const label = document.createElement('span');
+            label.className = 'op-node-field-label';
+            label.textContent = 'API / 模型';
+            const select = document.createElement('select');
+            select.className = 'plan-cell-input';
+            const empty = document.createElement('option');
+            empty.value = '';
+            empty.textContent = providerOptions.length ? '请选择模型' : '请先在设置中添加 API';
+            select.appendChild(empty);
+            providerOptions.forEach(provider => {
+                const option = document.createElement('option');
+                option.value = provider.id;
+                option.textContent = `${provider.name} (${provider.model})`;
+                option.dataset.sourceProviderId = provider.sourceProviderId;
+                option.dataset.model = provider.model;
+                select.appendChild(option);
+            });
+            select.value = draft.providerId || '';
+            select.addEventListener('change', () => {
+                const option = select.selectedOptions[0];
+                draft.providerId = select.value || null;
+                draft.sourceProviderId = option?.dataset.sourceProviderId || null;
+                draft.model = option?.dataset.model || '';
+                applyVideoProfile();
+            });
+            wrap.append(label, select);
+            body.appendChild(wrap);
+        }
+
+        fields.forEach(field => {
+            const wrap = document.createElement('label');
+            wrap.className = 'op-node-field';
+            const label = document.createElement('span');
+            label.className = 'op-node-field-label';
+            label.textContent = field.label || field.key;
+            wrap.appendChild(label);
+
+            const current = draft[field.key] ?? field.default ?? '';
+            let control;
+            if (field.type === 'textarea') {
+                control = document.createElement('textarea');
+                control.className = 'plan-cell-input';
+                control.rows = 4;
+                control.value = String(current);
+            } else if (field.type === 'checkbox') {
+                wrap.classList.add('is-checkbox');
+                control = document.createElement('input');
+                control.className = 'op-node-checkbox';
+                control.type = 'checkbox';
+                control.checked = Boolean(current);
+            } else if (field.type === 'select') {
+                control = document.createElement('select');
+                control.className = 'plan-cell-input';
+                (field.options || []).forEach(value => {
+                    const option = document.createElement('option');
+                    option.value = String(value);
+                    option.textContent = String(value);
+                    control.appendChild(option);
+                });
+                control.value = String(current);
+            } else {
+                control = document.createElement('input');
+                control.className = 'plan-cell-input';
+                control.type = field.type === 'number' ? 'number' : 'text';
+                control.value = String(current);
+            }
+            const readValue = () => field.type === 'checkbox'
+                ? control.checked
+                : field.type === 'number'
+                    ? (control.value === '' ? '' : Number(control.value))
+                    : control.value;
+            control.addEventListener('input', () => { draft[field.key] = readValue(); });
+            inputs.push({ field, control, wrap });
+            wrap.appendChild(control);
+            body.appendChild(wrap);
+        });
+
+        if (data.nodeType === 'video') {
+            applyVideoProfile = () => {
+                const nextFields = new Map(
+                    this._opConfigFields(data, def, draft).map(field => [field.key, field])
+                );
+                inputs.forEach(input => {
+                    const nextField = nextFields.get(input.field.key);
+                    input.wrap.hidden = !nextField;
+                    if (!nextField) {
+                        if (input.field.type === 'checkbox') {
+                            input.control.checked = false;
+                            draft[input.field.key] = false;
+                        }
+                        return;
+                    }
+                    if (input.field.type !== 'select') return;
+                    const previousValue = String(draft[input.field.key] ?? input.control.value ?? '');
+                    const options = (nextField.options || []).map(String);
+                    input.control.replaceChildren(...options.map(value => {
+                        const option = document.createElement('option');
+                        option.value = value;
+                        option.textContent = value;
+                        return option;
+                    }));
+                    const fallback = String(nextField.default ?? options[0] ?? '');
+                    input.control.value = options.includes(previousValue) ? previousValue : fallback;
+                    draft[input.field.key] = input.control.value;
+                });
+            };
+            applyVideoProfile();
+        }
+
+        document.body.appendChild(overlay);
+        const titleInput = overlay.querySelector('.plan-editor-title');
+        (inputs[0]?.control || titleInput)?.focus();
+
+        const close = () => this._removeOpNodeEditor();
+        const save = () => {
+            inputs.forEach(({ field, control }) => {
+                data.config[field.key] = field.type === 'checkbox'
+                    ? control.checked
+                    : field.type === 'number'
+                        ? (control.value === '' ? '' : Number(control.value))
+                        : control.value;
+            });
+            Object.assign(data.config, draft);
+            data.model = data.config.model || '';
+            const title = titleInput.value.trim();
+            if (title) data.title = title;
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            close();
+        };
+
+        overlay.querySelector('.plan-editor-close')?.addEventListener('click', close);
+        overlay.querySelector('.plan-editor-cancel')?.addEventListener('click', close);
+        overlay.querySelector('.plan-editor-save')?.addEventListener('click', save);
+        overlay.addEventListener('mousedown', event => {
+            if (event.target === overlay) close();
+        });
+        overlay.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { close(); return; }
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) save();
+        });
+    }
+
+    _removeOpNodeEditor() {
+        document.querySelectorAll('.op-node-editor-overlay').forEach(node => node.remove());
+    }
+
+    /** 状态变化后只重绘该节点，避免整层刷新 */
+    refreshOpNode(nodeId) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op') return;
+        const { group, data } = entry;
+        if ((data.nodeType === 'image' || data.nodeType === 'video') && getGeneratorResultEntries(data).length === 0) {
+            const reference = this._opReferenceEntries(data)[0]?.source;
+            const size = getGeneratorPlaceholderSize(data.nodeType, data.config, reference);
+            data.width = size.width;
+            data.height = size.height;
+        }
+        this._drawOpNode(group, data, data.width || OP_NODE_WIDTH, data.height || OP_NODE_HEIGHT);
+        if (data.nodeType === 'text') this._ensurePersistentTextEditor(nodeId);
+        this.graphView?.renderPorts(nodeId);
+        if (this._generationComposer?.nodeId === nodeId) this._renderGenerationComposerReferences(nodeId);
+        this._syncGenerationComposerStatus(nodeId);
+        this._positionGenerationComposer();
+        this.layer.batchDraw();
+    }
+
+    /**
+     * 生成结果自动落地成素材卡片，并连一条 history 边指回源节点。
+     * 这是节点体系相对侧栏聊天的核心优势：产物立刻可以连出去做下一步，
+     * 不用手动往画布上摆。参考 Infinite-Canvas 的 createPendingOutputFromSource。
+     * history 边只做溯源，不参与执行遍历（graph-model 的 topoOrder 会忽略它）。
+     */
+    async _landResult(sourceItem, output) {
+        const rawResult = output?.image || output?.video || output?.file || '';
+        const filePath = output?._resultFilePath
+            || (/^https?:\/\//i.test(String(rawResult)) ? '' : resolveCanvasFilePath(rawResult));
+        const resultUrl = output?._resultUrl
+            || (/^https?:\/\//i.test(String(rawResult)) ? String(rawResult) : '');
+        if (sourceItem?.kind === 'op' && ['image', 'video'].includes(sourceItem.nodeType)) {
+            if (!filePath && !resultUrl) return null;
+            const results = appendGeneratorResult(sourceItem, {
+                filePath,
+                url: resultUrl,
+                item: output?._resultItem || null
+            });
+
+            if (results.length === 1) {
+                const resultItem = output?._resultItem || {};
+                const mediaWidth = Number(resultItem.naturalWidth || resultItem.pixelWidth || resultItem.width);
+                const mediaHeight = Number(resultItem.naturalHeight || resultItem.pixelHeight || resultItem.height);
+                if (mediaWidth > 0 && mediaHeight > 0) {
+                    const size = getGeneratorPlaceholderSize(sourceItem.nodeType, { ratio: 'adaptive' }, {
+                        width: mediaWidth,
+                        height: mediaHeight
+                    });
+                    sourceItem.width = size.width;
+                    sourceItem.height = size.height;
+                }
+            }
+            this.refreshOpNode(sourceItem.id);
+            this.emit('change');
+            return sourceItem;
+        }
+        if (!filePath) return null;              // 纯文本产物留在缓存里，不落地
+        const firstReference = this._opReferenceEntries(sourceItem)[0]?.source || null;
+        const displaySize = resolveGenerationDisplaySize({
+            kind: sourceItem.nodeType,
+            referenceSize: firstReference ? {
+                width: firstReference.width,
+                height: firstReference.height
+            } : null,
+            ratio: sourceItem.config?.ratio,
+            size: sourceItem.nodeType === 'image'
+                ? `${Number(sourceItem.config?.width) || 1024}x${Number(sourceItem.config?.height) || 1024}`
+                : '',
+            longEdge: VIDEO_PLACEHOLDER_LONG_EDGE
+        });
+        const existing = this._findItemByFilePath(filePath);
+        if (existing) {
+            if (!existing.data.fromNodeId && Date.now() - Number(existing.data.addedAt || 0) < 10000) {
+                const at = this._findResultSlot(sourceItem);
+                existing.data.fromNodeId = sourceItem.id;
+                existing.data.x = at.x;
+                existing.data.y = at.y;
+                existing.group.position(at);
+                this._applyGeneratedDisplaySize(existing, displaySize.width, displaySize.height);
+                this.graphView?.sync();
+                this.emit('change');
+            }
+            this._connectResultHistory(sourceItem, output, existing.data.id);
+            return existing.data;
+        }
+
+        const at = this._findResultSlot(sourceItem);
+        const data = {
+            ...(output?._resultItem || {}),
+            id: output?._resultItem?.id || Date.now().toString() + Math.random().toString(36).substr(2, 5),
+            filePath,
+            x: at.x,
+            y: at.y,
+            width: displaySize.width,
+            height: displaySize.height,
+            addedAt: Date.now(),
+            fromNodeId: sourceItem.id
+        };
+
+        // 必须 await：_createCard 是异步的（canvas.js:2638），
+        // 卡片的 Konva 组建好之后端口才存在，连线才有落点。
+        await this._createCard(data);
+        this._scheduleCullCheck();
+        this.emit('capturedFile', data);
+
+        this._connectResultHistory(sourceItem, output, data.id);
+        return data;
+    }
+
+    _connectResultHistory(sourceItem, output, resultNodeId) {
+        const alreadyConnected = this.graphView?.connections?.some(connection =>
+            connection.kind === 'history'
+            && connection.from.nodeId === sourceItem.id
+            && connection.to.nodeId === resultNodeId
+        );
+        if (alreadyConnected) return;
+        this.graphView?.connect(
+            { nodeId: sourceItem.id, port: this._resultPortName(sourceItem, output) },
+            { nodeId: resultNodeId, port: 'source' },
+            { kind: 'history', silent: true }
+        );
+    }
+
+    /** 产物对应的输出端口名，用于连溯源边 */
+    _resultPortName(sourceItem, output) {
+        if (sourceItem?.kind !== 'op') return 'out';
+        const def = NODE_TYPES[sourceItem.nodeType] || {};
+        const outputs = def.outputs || [];
+        const key = output?.image ? 'image' : output?.video ? 'video' : 'file';
+        return outputs.find(p => p.dataType === key)?.name || outputs[0]?.name || 'output';
+    }
+
+    /**
+     * 产物落点：源节点右侧固定偏移；该位置已被占用时向下顺延，
+     * 这样连续生成不会叠在一起。只查一屏范围内的卡片，不做全局布局。
+     */
+    _findResultSlot(sourceItem) {
+        const gap = 40;
+        const baseX = (sourceItem.x || 0) + (sourceItem.width || OP_NODE_WIDTH) + gap;
+        let y = sourceItem.y || 0;
+        const stepY = (sourceItem.height || OP_NODE_HEIGHT) + gap;
+
+        const occupied = (x, cy) => {
+            for (const entry of this.items.values()) {
+                const d = entry?.data;
+                if (!d) continue;
+                if (Math.abs((d.x || 0) - x) < gap && Math.abs((d.y || 0) - cy) < gap) return true;
+            }
+            return false;
+        };
+
+        let guard = 0;
+        while (occupied(baseX, y) && guard++ < 50) y += stepY;
+        return { x: Math.round(baseX), y: Math.round(y) };
+    }
+
+    _ensureRunner() {
+        if (this.graphRunner) return this.graphRunner;
+        this.graphRunner = new GraphRunner({
+            getItems: () => {
+                const map = new Map();
+                this.items.forEach((entry, id) => { if (entry?.data) map.set(id, entry.data); });
+                return map;
+            },
+            getConnections: () => this.graphView?.serialize() || [],
+            onStatus: (id) => this.refreshOpNode(id),
+            onResult: (item, output) => this._landResult(item, output),
+            // 复用 main.js 注入的 provider 取值器（canvas.js:5977 同一套）
+            getTextProvider: (binding) => this.options.getTextProvider?.(binding) || null,
+            getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
+            getVideoProvider: (binding) => this.options.getVideoProvider?.(binding) || null,
+            getImageIntentPipelineMode: () => this.options.getImageIntentPipelineMode?.() || 'compiled',
+            prepareImageReferences: (refs) => this.options.prepareImageReferences?.(refs) || []
+        });
+        return this.graphRunner;
+    }
+
+    /** 执行 nodeId 及其全部上游依赖 */
+    async runFromNode(nodeId) {
+        const runner = this._ensureRunner();
+        this._showCanvasStatus('开始执行…');
+        const result = await runner.runFrom(nodeId);
+        if (!result.ok) {
+            this._showCanvasStatus(result.reason || '执行失败', 3200);
+        } else {
+            this._showCanvasStatus(`执行完成，共 ${result.ran?.length || 0} 个节点`, 2400);
+            this.emit('change');
+        }
+        return result;
     }
 
     addPlan() {
@@ -4357,6 +9756,7 @@ export class CanvasManager {
 
     syncPlanInlineEditors() {
         this.planInlineEditors?.forEach((_, planId) => this._positionPlanInlineEditor(planId));
+        this.graphView?.sync();
     }
 
     focusPlanInlineEditor(planId) {
@@ -4395,25 +9795,37 @@ export class CanvasManager {
 
     _zoomCanvasAtClientPoint(event) {
         event.preventDefault();
-        const oldScale = this.stage.scaleX();
-        const pointer = this._getStagePointerFromClient(event.clientX, event.clientY);
-        const mousePointTo = {
-            x: (pointer.x - this.stage.x()) / oldScale,
-            y: (pointer.y - this.stage.y()) / oldScale,
-        };
+        const delta = normalizeWheelDelta(event, this.stage.height());
+        if (!delta) return;
 
-        const direction = event.deltaY > 0 ? -1 : 1;
-        const scaleBy = 1.1;
-        const newScale = direction > 0 ? oldScale * scaleBy : oldScale / scaleBy;
-        if (newScale < 0.1 || newScale > 10) return;
+        const hasClientPoint = Number.isFinite(Number(event.clientX)) && Number.isFinite(Number(event.clientY));
+        const pointer = hasClientPoint
+            ? this._getStagePointerFromClient(Number(event.clientX), Number(event.clientY))
+            : this.stage.getPointerPosition();
+        if (!pointer) return;
 
-        this.stage.scale({ x: newScale, y: newScale });
-        this.stage.position({
-            x: pointer.x - mousePointTo.x * newScale,
-            y: pointer.y - mousePointTo.y * newScale,
+        this._wheelZoomDelta += delta;
+        this._wheelZoomPointer = { x: pointer.x, y: pointer.y };
+        if (this._wheelZoomFrame) return;
+
+        this._wheelZoomFrame = requestAnimationFrame(() => {
+            this._wheelZoomFrame = 0;
+            const accumulatedDelta = this._wheelZoomDelta;
+            const zoomPointer = this._wheelZoomPointer;
+            this._wheelZoomDelta = 0;
+            this._wheelZoomPointer = null;
+            if (!zoomPointer || !accumulatedDelta) return;
+
+            const viewport = zoomViewportAtPoint({
+                x: this.stage.x(),
+                y: this.stage.y(),
+                scale: this.stage.scaleX()
+            }, zoomPointer, wheelZoomFactor(accumulatedDelta));
+            this.stage.scale({ x: viewport.scale, y: viewport.scale });
+            this.stage.position({ x: viewport.x, y: viewport.y });
+            this.stage.batchDraw();
+            this.emit('change');
         });
-        this.stage.batchDraw();
-        this.emit('change');
     }
 
     _startCanvasPanFromClientPoint(event, options = {}) {
@@ -5239,6 +10651,17 @@ export class CanvasManager {
             const isMedia = mode === 'media';
             const stroke = isConnection ? PLAN_OUTPUT_CONNECTION_COLOR : isMedia ? '#fbbf24' : PLAN_CONNECTION_PREVIEW_COLOR;
             const fill = isConnection ? 'rgba(255, 255, 255, 0.06)' : isMedia ? 'rgba(251, 191, 36, 0.08)' : 'rgba(52, 211, 153, 0.08)';
+            const mediaTone = Number(options.referenceIndex) % 2 === 0
+                ? {
+                    fill: 'rgba(62, 65, 71, 0.96)',
+                    stroke: 'rgba(183, 187, 195, 0.5)',
+                    text: '#e1e3e6'
+                }
+                : {
+                    fill: 'rgba(190, 193, 199, 0.96)',
+                    stroke: 'rgba(235, 236, 239, 0.72)',
+                    text: '#25272b'
+                };
             const referenceCount = isConnection
                 ? this._countPlanReferencesToItem(item.data.id, item.data.filePath)
                 : 0;
@@ -5246,25 +10669,30 @@ export class CanvasManager {
                 ? `连接目标 · ${referenceCount || 1} 条关联`
                 : '可连接');
             const labelWidth = Math.max(54, this._estimateTextWidth(labelText) + 18);
-            if (!halo) {
-                halo = new Konva.Rect({
-                    name: 'referenceDropHalo',
-                    listening: false,
-                    cornerRadius: 12,
-                    perfectDrawEnabled: false
-                });
-                item.group.add(halo);
+            if (isMedia) {
+                halo?.destroy();
+                halo = null;
+            } else {
+                if (!halo) {
+                    halo = new Konva.Rect({
+                        name: 'referenceDropHalo',
+                        listening: false,
+                        cornerRadius: 12,
+                        perfectDrawEnabled: false
+                    });
+                    item.group.add(halo);
+                }
+                halo.stroke(stroke);
+                halo.strokeWidth(isConnection ? 2.4 : 3);
+                halo.dash(isConnection ? [] : [12, 7]);
+                halo.fill(fill);
+                halo.shadowColor(stroke);
+                halo.shadowBlur(isConnection ? 22 : 18);
+                halo.shadowOpacity(isConnection ? 0.42 : 0.35);
+                halo.position({ x: rect.x - 7, y: rect.y - 7 });
+                halo.size({ width: rect.width + 14, height: rect.height + 14 });
+                halo.moveToTop();
             }
-            halo.stroke(stroke);
-            halo.strokeWidth(isConnection ? 2.4 : 3);
-            halo.dash(isConnection ? [] : [12, 7]);
-            halo.fill(fill);
-            halo.shadowColor(stroke);
-            halo.shadowBlur(isConnection ? 22 : 18);
-            halo.shadowOpacity(isConnection ? 0.42 : 0.35);
-            halo.position({ x: rect.x - 7, y: rect.y - 7 });
-            halo.size({ width: rect.width + 14, height: rect.height + 14 });
-            halo.moveToTop();
             if (!label) {
                 label = new Konva.Group({
                     name: 'referenceDropLabel',
@@ -5293,17 +10721,17 @@ export class CanvasManager {
             });
             label.findOne('.referenceDropLabelBg')?.setAttrs({
                 width: labelWidth,
-                fill: isConnection ? 'rgba(8, 35, 48, 0.96)' : 'rgba(8, 45, 34, 0.96)',
-                stroke: isConnection ? 'rgba(236, 238, 241, 0.38)' : 'rgba(52, 211, 153, 0.48)',
+                fill: isMedia ? mediaTone.fill : (isConnection ? 'rgba(8, 35, 48, 0.96)' : 'rgba(8, 45, 34, 0.96)'),
+                stroke: isMedia ? mediaTone.stroke : (isConnection ? 'rgba(236, 238, 241, 0.38)' : 'rgba(52, 211, 153, 0.48)'),
                 strokeWidth: 1,
-                shadowColor: stroke,
-                shadowBlur: 10,
-                shadowOpacity: 0.2
+                shadowColor: isMedia ? '#000000' : stroke,
+                shadowBlur: isMedia ? 6 : 10,
+                shadowOpacity: isMedia ? 0.18 : 0.2
             });
             label.findOne('.referenceDropLabelText')?.setAttrs({
                 width: labelWidth,
                 text: labelText,
-                fill: isConnection ? '#d6f6ff' : '#d5ffe9'
+                fill: isMedia ? mediaTone.text : (isConnection ? '#d6f6ff' : '#d5ffe9')
             });
             label.moveToTop();
         } else {
@@ -5785,6 +11213,7 @@ export class CanvasManager {
     _loadAllContent() {
         const useThumbnail = this.resourceSaverMode;
         this.items.forEach(item => {
+            if (item.data?.kind === 'op') return;
             if (!item.loaded && !item.loading) {
                 this._queueContentLoad(item, useThumbnail);
             } else if ((item.loaded || item.loading) && item.isThumbnail !== useThumbnail && !item.hoverFull) {
@@ -5855,6 +11284,10 @@ export class CanvasManager {
             thumbnails,
             videos,
             gifs,
+            graphPortNodes: this.graphView?.portShapes?.size || 0,
+            graphPortShapes: [...(this.graphView?.portShapes?.values?.() || [])]
+                .reduce((total, entries) => total + entries.length, 0),
+            graphEdges: this.graphView?.connections?.length || 0,
             resourceSaver: this.resourceSaverMode
         };
     }
@@ -5863,8 +11296,16 @@ export class CanvasManager {
      * 按需加载节点内容（完整图或缩略图）
      */
     _loadContent(item, useThumbnail) {
-        const fileType = this._getFileType(item.data.filePath);
-        const isGif = item.data.filePath.toLowerCase().endsWith('.gif');
+        if (item.data?.kind === 'op') return;
+        const fileType = this._getItemMediaType(item.data);
+        if (!item.data.filePath) {
+            item.loading = false;
+            item.loaded = true;
+            item.loadError = false;
+            this._completeContentLoad(item);
+            return;
+        }
+        const isGif = String(item.data.filePath || '').toLowerCase().endsWith('.gif');
         const token = (item.loadToken || 0) + 1;
 
         item.loadToken = token;
@@ -6042,9 +11483,11 @@ export class CanvasManager {
     }
 
     _placeLoadedDisplayNode(item, node, token) {
+        this._styleMediaDisplayNode(item, node);
         const oldNode = item.transitionOldNode;
         if (!oldNode || !oldNode.getLayer() || oldNode.getParent() !== node.getParent()) {
             node.moveToBottom();
+            item.group.findOne('.externalNodeTitle')?.moveToTop();
             return;
         }
 
@@ -6093,6 +11536,10 @@ export class CanvasManager {
      * 卸载节点内容 — 释放图片纹理和视频资源
      */
     _unloadContent(item) {
+        // Operation nodes use vector shapes instead of media textures. Treat them as
+        // already unloaded so the shared deletion path never calls Image-only APIs.
+        if (item?.data?.kind === 'op') return;
+
         this._completeContentLoad(item);
         const transformerNode = this.imageTransformer?.nodes?.()[0];
         if (transformerNode?.getParent?.() === item.group) {
@@ -6126,7 +11573,11 @@ export class CanvasManager {
         // 销毁视频控制组（进度条等）
         const children = item.group.getChildren();
         children.forEach(child => {
-            if (child.getClassName() === 'Group' && child.name() !== 'fallbackIcon') {
+            if (
+                child.getClassName() === 'Group'
+                && child.name() !== 'fallbackIcon'
+                && child.name() !== 'externalNodeTitle'
+            ) {
                 child.destroy();
             }
         });
@@ -6149,11 +11600,11 @@ export class CanvasManager {
 
         // 恢复占位框（保留尺寸信息）
         if (!item.group.findOne('.fallbackBg')) {
-            const fileType = this._getFileType(item.data.filePath);
-            const w = item.data.width || DOC_DEFAULT_SIZE;
-            const h = item.data.height || DOC_DEFAULT_SIZE;
+            const fileType = this._getItemMediaType(item.data);
+            const { width: w, height: h } = this._mediaPlaceholderSize(fileType, item.data);
             item.group.add(this._createFallbackGroup(fileType, w, h, item.data.filePath));
         }
+        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
 
         item.isThumbnail = false;
         item.group.getLayer()?.batchDraw();
@@ -6204,6 +11655,30 @@ export class CanvasManager {
         return true;
     }
 
+    async _inspectMediaFileExists(filePath) {
+        try {
+            const inspection = await window.flowCanvas?.file?.inspect?.(filePath);
+            if (inspection?.exists === true && inspection?.isFile !== false) return true;
+            if (inspection?.exists === false || inspection?.isFile === false) return false;
+        } catch (_) {
+            // Keep the generic load error when the native inspection bridge is unavailable.
+        }
+        return null;
+    }
+
+    async _failImageLoad(item, token, fallbackMessage = '加载失败') {
+        const fileExists = await this._inspectMediaFileExists(item?.data?.filePath || '');
+        if (!this._isLoadCurrent(item, token)) {
+            this._completeContentLoad(item);
+            return false;
+        }
+        return this._failLoad(
+            item,
+            token,
+            fileExists === false ? '文件失联' : fileExists === true ? '无法解码' : fallbackMessage
+        );
+    }
+
     async _handleVideoLoadError(item, token, video, label = '视频') {
         if (video?.__flowCanvasHandlingError) return;
         if (video) video.__flowCanvasHandlingError = true;
@@ -6214,8 +11689,7 @@ export class CanvasManager {
 
         let fileExists = null;
         try {
-            const inspection = await window.flowCanvas?.file?.inspect?.(filePath);
-            fileExists = inspection?.exists === true && inspection?.isFile !== false;
+            fileExists = await this._inspectMediaFileExists(filePath);
         } catch (_) {
             fileExists = null;
         }
@@ -6252,28 +11726,224 @@ export class CanvasManager {
         return { width: targetW, height: targetH };
     }
 
+    _storeResolvedMediaSize(item, width, height) {
+        if (!item?.data || !Number.isFinite(width) || !Number.isFinite(height)) return;
+        const changed = Math.abs((Number(item.data.width) || 0) - width) > 0.01
+            || Math.abs((Number(item.data.height) || 0) - height) > 0.01;
+        item.data.width = width;
+        item.data.height = height;
+        if (changed) this._scheduleSelectionToolbarSync();
+        if (changed) {
+            this.emit('mediaDimensionsResolved', { id: item.data.id, width, height });
+        }
+    }
+
+    _createVideoPlayPauseGlyph(playing = false) {
+        const glyph = new Konva.Group({
+            name: 'videoControlGlyph videoPlayPauseGlyph',
+            x: VIDEO_CONTROL_BUTTON_WIDTH / 2,
+            y: VIDEO_CONTROL_HEIGHT / 2,
+            offsetX: VIDEO_CONTROL_BUTTON_WIDTH / 2,
+            offsetY: VIDEO_CONTROL_HEIGHT / 2,
+            listening: false
+        });
+        const play = new Konva.Line({
+            name: 'videoPlayGlyph',
+            points: [11.5, 9.5, 11.5, 18.5, 18.5, 14],
+            closed: true,
+            fill: '#c9cdd3',
+            shadowColor: '#000000',
+            shadowBlur: 3,
+            shadowOpacity: 0.72,
+            shadowOffsetY: 1,
+            visible: !playing
+        });
+        const pauseLeft = new Konva.Rect({
+            name: 'videoPauseGlyph',
+            x: 10.5,
+            y: 9.5,
+            width: 2.6,
+            height: 9,
+            cornerRadius: 1,
+            fill: '#c9cdd3',
+            shadowColor: '#000000',
+            shadowBlur: 3,
+            shadowOpacity: 0.72,
+            shadowOffsetY: 1,
+            visible: playing
+        });
+        const pauseRight = pauseLeft.clone({ x: 15.3 });
+        glyph.add(play, pauseLeft, pauseRight);
+        return glyph;
+    }
+
+    _setVideoPlayPauseGlyph(glyph, playing) {
+        glyph?.find('.videoPlayGlyph').forEach(node => node.visible(!playing));
+        glyph?.find('.videoPauseGlyph').forEach(node => node.visible(playing));
+    }
+
+    _createVideoVolumeGlyph(muted = true) {
+        const glyph = new Konva.Group({
+            name: 'videoControlGlyph videoVolumeGlyph',
+            x: VIDEO_CONTROL_BUTTON_WIDTH / 2,
+            y: VIDEO_CONTROL_HEIGHT / 2,
+            offsetX: VIDEO_CONTROL_BUTTON_WIDTH / 2,
+            offsetY: VIDEO_CONTROL_HEIGHT / 2,
+            listening: false
+        });
+        const speaker = new Konva.Line({
+            points: [9.5, 12, 12, 12, 15, 9.5, 15, 18.5, 12, 16, 9.5, 16],
+            closed: true,
+            fill: '#b9bec6',
+            shadowColor: '#000000',
+            shadowBlur: 3,
+            shadowOpacity: 0.72,
+            shadowOffsetY: 1
+        });
+        const wave = new Konva.Path({
+            name: 'videoVolumeWave',
+            data: 'M 17 11.5 C 19 13 19 15 17 16.5 M 19 9.5 C 22.5 12 22.5 16 19 18.5',
+            stroke: '#b9bec6',
+            strokeWidth: 1.4,
+            lineCap: 'round',
+            shadowColor: '#000000',
+            shadowBlur: 3,
+            shadowOpacity: 0.72,
+            shadowOffsetY: 1,
+            visible: !muted
+        });
+        const slash = new Konva.Line({
+            name: 'videoVolumeSlash',
+            points: [9.5, 9.5, 20.5, 18.5],
+            stroke: '#b9bec6',
+            strokeWidth: 1.45,
+            lineCap: 'round',
+            shadowColor: '#000000',
+            shadowBlur: 3,
+            shadowOpacity: 0.72,
+            shadowOffsetY: 1,
+            visible: muted
+        });
+        glyph.add(speaker, wave, slash);
+        return glyph;
+    }
+
+    _setVideoVolumeGlyph(glyph, muted) {
+        glyph?.find('.videoVolumeWave').forEach(node => node.visible(!muted));
+        glyph?.find('.videoVolumeSlash').forEach(node => node.visible(muted));
+    }
+
+    _layoutVideoControlGroup(controls, width, height) {
+        if (!controls) return;
+        const layout = getVideoControlLayout(this.stage?.scaleX?.(), width, height);
+        const progressBg = controls.findOne('.videoProgressBg');
+        const progressFg = controls.findOne('.videoProgressFg');
+        const previousProgressWidth = Number(progressBg?.width?.()) || 0;
+        const progressRatio = previousProgressWidth > 0
+            ? Math.max(0, Math.min(1, (Number(progressFg?.width?.()) || 0) / previousProgressWidth))
+            : 0;
+
+        controls.y(layout.groupY);
+        controls.findOne('.videoControlBg')?.setAttrs({
+            x: 0,
+            y: layout.backgroundY,
+            width,
+            height: layout.backgroundHeight
+        });
+        controls.find('.videoControlGlyph').forEach(glyph => {
+            glyph.scale({ x: layout.glyphScale, y: layout.glyphScale });
+            glyph.position({
+                x: glyph.hasName('videoVolumeGlyph') ? layout.volumeCenterX : layout.playCenterX,
+                y: layout.glyphCenterY
+            });
+        });
+        controls.find('.videoControlHotspot').forEach(hotspot => {
+            hotspot.scale({ x: 1, y: 1 });
+            hotspot.setAttrs({
+                x: hotspot.hasName('videoVolumeHotspot') ? layout.buttonWidth : 0,
+                y: 0,
+                width: layout.buttonWidth,
+                height: layout.controlHeight
+            });
+        });
+        progressBg?.setAttrs({
+            x: layout.progressX,
+            y: layout.progressY,
+            width: layout.progressWidth,
+            height: layout.progressHeight,
+            cornerRadius: layout.progressCornerRadius
+        });
+        progressFg?.setAttrs({
+            x: layout.progressX,
+            y: layout.progressY,
+            width: layout.progressWidth * progressRatio,
+            height: layout.progressHeight,
+            cornerRadius: layout.progressCornerRadius
+        });
+        controls.findOne('.videoProgressHotspot')?.setAttrs({
+            x: layout.progressX,
+            y: 0,
+            width: layout.progressWidth,
+            height: layout.controlHeight
+        });
+    }
+
+    _syncVideoControlLayout() {
+        this.items.forEach(item => {
+            const displayNode = item.group?.findOne('.displayNode') || item.group?.findOne('.fallbackBg');
+            const width = Number(displayNode?.width?.()) || Number(item.data?.width) || 0;
+            const height = Number(displayNode?.height?.()) || Number(item.data?.height) || 0;
+            this._layoutVideoControlGroup(item.group?.findOne('.videoControls'), width, height);
+            this._layoutVideoControlGroup(item.group?.findOne('.videoCoverControls'), width, height);
+        });
+    }
+
+    _syncViewportFixedControls() {
+        this._syncVideoControlLayout();
+        this.graphView?.syncViewportControlScale(this.stage?.scaleX?.());
+        this.layer.batchDraw();
+    }
+
+    _setVideoControlsVisible(item, visible) {
+        if (!item?.group?.getLayer()) return;
+        const controls = [
+            item.group.findOne('.videoControls'),
+            item.group.findOne('.videoCoverControls')
+        ].filter(Boolean);
+        controls.forEach(control => {
+            control.stop();
+            control.listening(visible);
+            control.to({
+                opacity: visible ? 1 : 0,
+                duration: visible ? 0.1 : 0.18,
+                easing: Konva.Easings.EaseOut
+            });
+        });
+    }
+
     _createVideoCoverControls(item, width, height) {
+        item.videoMuted = item.videoMuted !== false;
         const controls = new Konva.Group({
             name: 'videoCoverControls',
             x: 0,
-            y: height - 30
+            y: height - VIDEO_CONTROL_HEIGHT,
+            opacity: 1,
+            listening: true
         });
-        const buttonBg = new Konva.Rect({
-            width: 30,
-            height: 30,
-            fill: 'rgba(0,0,0,0.62)'
-        });
-        const playIcon = new Konva.Text({
-            text: '▶',
-            fontSize: 16,
-            fill: 'white',
-            x: 10,
-            y: 7,
-            listening: false
-        });
+        const playIcon = this._createVideoPlayPauseGlyph(false);
+        const volumeIcon = this._createVideoVolumeGlyph(item.videoMuted);
+        volumeIcon.x(VIDEO_CONTROL_BUTTON_WIDTH * 1.5);
         const hotspot = new Konva.Rect({
-            width: 30,
-            height: 30,
+            name: 'videoControlHotspot videoPlayPauseHotspot',
+            width: VIDEO_CONTROL_BUTTON_WIDTH,
+            height: VIDEO_CONTROL_HEIGHT,
+            fill: 'transparent'
+        });
+        const volumeHotspot = new Konva.Rect({
+            name: 'videoControlHotspot videoVolumeHotspot',
+            x: VIDEO_CONTROL_BUTTON_WIDTH,
+            width: VIDEO_CONTROL_BUTTON_WIDTH,
+            height: VIDEO_CONTROL_HEIGHT,
             fill: 'transparent'
         });
         hotspot.on('mousedown', event => {
@@ -6283,7 +11953,17 @@ export class CanvasManager {
             event.evt.stopPropagation();
             this._promoteVideoForPlayback(item);
         });
-        controls.add(buttonBg, playIcon, hotspot);
+        volumeHotspot.on('mousedown', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            if (this._pickMediaReferenceFromControl(item, event)) return;
+            event.cancelBubble = true;
+            event.evt.stopPropagation();
+            item.videoMuted = !item.videoMuted;
+            this._setVideoVolumeGlyph(volumeIcon, item.videoMuted);
+            controls.getLayer()?.batchDraw();
+        });
+        controls.add(playIcon, volumeIcon, hotspot, volumeHotspot);
+        this._layoutVideoControlGroup(controls, width, height);
         return controls;
     }
 
@@ -6335,8 +12015,7 @@ export class CanvasManager {
             canvas.height = coverHeight;
             canvas.getContext('2d')?.drawImage(video, 0, 0, coverWidth, coverHeight);
 
-            data.width = displayWidth;
-            data.height = displayHeight;
+            this._storeResolvedMediaSize(item, displayWidth, displayHeight);
             group.findOne('.fallbackIcon')?.destroy();
             const cover = new Konva.Image({
                 name: 'displayNode videoCover',
@@ -6385,7 +12064,7 @@ export class CanvasManager {
                 return;
             }
             if (!dataUrl) {
-                this._failLoad(item, token);
+                await this._failImageLoad(item, token);
                 return;
             }
 
@@ -6397,6 +12076,7 @@ export class CanvasManager {
                 }
 
                 const { width: targetW, height: targetH } = this._resolveMediaDisplaySize(item.data, img.width, img.height);
+                this._storeResolvedMediaSize(item, targetW, targetH);
 
                 const fallback = item.group.findOne('.fallbackIcon');
                 if (fallback) fallback.destroy();
@@ -6416,10 +12096,10 @@ export class CanvasManager {
                 this._finishLoad(item, token);
                 item.group.getLayer()?.batchDraw();
             };
-            img.onerror = () => this._failLoad(item, token);
+            img.onerror = () => void this._failImageLoad(item, token);
             img.src = dataUrl;
         } catch (err) {
-            this._failLoad(item, token);
+            await this._failImageLoad(item, token);
             console.warn('[Canvas] _loadLowRes 失败:', item.data.filePath, err);
         }
     }
@@ -6443,8 +12123,7 @@ export class CanvasManager {
 
                 const { width: targetW, height: targetH } = this._resolveMediaDisplaySize(data, imgObj.width, imgObj.height);
 
-                data.width = targetW;
-                data.height = targetH;
+                this._storeResolvedMediaSize(item, targetW, targetH);
 
                 const imageNode = new Konva.Image({
                     name: 'displayNode',
@@ -6497,9 +12176,18 @@ export class CanvasManager {
                 this._finishLoad(item, token);
                 group.getLayer().batchDraw();
             };
-            imgObj.onerror = () => {
+            imgObj.onerror = async () => {
                 if (!this._isLoadCurrent(item, token)) {
                     this._completeContentLoad(item);
+                    return;
+                }
+                const fileExists = await this._inspectMediaFileExists(filePath);
+                if (!this._isLoadCurrent(item, token)) {
+                    this._completeContentLoad(item);
+                    return;
+                }
+                if (fileExists === false) {
+                    this._failLoad(item, token, '文件失联');
                     return;
                 }
                 if (retryCount < MAX_RETRIES) {
@@ -6511,12 +12199,12 @@ export class CanvasManager {
                     }, RETRY_DELAY);
                 } else {
                     console.error('[Canvas] 图片加载最终失败（已重试' + MAX_RETRIES + '次）:', filePath);
-                    this._failLoad(item, token);
+                    this._failLoad(item, token, fileExists === true ? '无法解码' : '加载失败');
                 }
             };
             imgObj.src = imgUrl;
         } catch (err) {
-            this._failLoad(item, token);
+            await this._failImageLoad(item, token);
             console.error('[Canvas] 图片异常:', filePath, err);
         }
     }
@@ -6531,7 +12219,8 @@ export class CanvasManager {
         // 创建一个隐藏的 HTML video 元素
         const video = document.createElement('video');
         video.src = 'local-res://' + encodeURIComponent(data.filePath);
-        video.muted = true;
+        item.videoMuted = item.videoMuted !== false;
+        video.muted = item.videoMuted;
         video.loop = true;
         video.playsInline = true;
         video.preload = 'auto';
@@ -6577,48 +12266,79 @@ export class CanvasManager {
             // -- 进度条和控制按钮 --
             const controlsGroup = new Konva.Group({
                 name: 'videoControls',
-                x: 0, y: h - 30, opacity: 1
+                x: 0,
+                y: h - VIDEO_CONTROL_HEIGHT,
+                opacity: 1,
+                listening: true
             });
 
             const ctrlBg = new Konva.Rect({
                 name: 'videoControlBg',
-                width: w, height: 30, fill: 'rgba(0,0,0,0.6)', visible: false
+                width: w,
+                height: VIDEO_CONTROL_HEIGHT,
+                fill: 'rgba(0,0,0,0.52)',
+                visible: false
             });
 
-            const playButtonBg = new Konva.Rect({
-                width: 30, height: 30, fill: 'rgba(0,0,0,0.62)'
-            });
-
-            const playPauseBtnText = new Konva.Text({
-                text: '▶', fontSize: 16, fill: 'white', x: 10, y: 7
-            });
+            const playPauseIcon = this._createVideoPlayPauseGlyph(false);
+            const volumeIcon = this._createVideoVolumeGlyph(video.muted);
+            volumeIcon.x(VIDEO_CONTROL_BUTTON_WIDTH * 1.5);
 
             // 增大按钮的热区
             const playPauseHotspot = new Konva.Rect({
-                width: 30, height: 30, x: 0, y: 0,
+                name: 'videoControlHotspot videoPlayPauseHotspot',
+                width: VIDEO_CONTROL_BUTTON_WIDTH, height: VIDEO_CONTROL_HEIGHT, x: 0, y: 0,
+                fill: 'transparent'
+            });
+            const volumeHotspot = new Konva.Rect({
+                name: 'videoControlHotspot videoVolumeHotspot',
+                width: VIDEO_CONTROL_BUTTON_WIDTH,
+                height: VIDEO_CONTROL_HEIGHT,
+                x: VIDEO_CONTROL_BUTTON_WIDTH,
+                y: 0,
                 fill: 'transparent'
             });
 
             // 进度条背景
             const progressBg = new Konva.Rect({
                 name: 'videoProgressBg',
-                x: 35, y: 13, width: w - 45, height: 4, fill: '#555', cornerRadius: 2, visible: false
+                x: VIDEO_CONTROL_PROGRESS_X,
+                y: 12,
+                width: Math.max(0, w - VIDEO_CONTROL_PROGRESS_X - VIDEO_CONTROL_PROGRESS_RIGHT_PADDING),
+                height: 4,
+                fill: '#555',
+                cornerRadius: 2,
+                visible: false
             });
 
             // 进度条前景
             const progressFg = new Konva.Rect({
-                x: 35, y: 13, width: 0, height: 4, fill: '#b9bcc2', cornerRadius: 2, visible: false
+                name: 'videoProgressFg',
+                x: VIDEO_CONTROL_PROGRESS_X, y: 12, width: 0, height: 4, fill: '#b9bcc2', cornerRadius: 2, visible: false
             });
 
             // 进度条热区，方便点击
             const progressHotspot = new Konva.Rect({
                 name: 'videoProgressHotspot',
-                x: 35, y: 0, width: w - 45, height: 30,
+                x: VIDEO_CONTROL_PROGRESS_X,
+                y: 0,
+                width: Math.max(0, w - VIDEO_CONTROL_PROGRESS_X - VIDEO_CONTROL_PROGRESS_RIGHT_PADDING),
+                height: VIDEO_CONTROL_HEIGHT,
                 fill: 'transparent', visible: false
             });
 
-            controlsGroup.add(ctrlBg, playButtonBg, progressBg, progressFg, playPauseBtnText, playPauseHotspot, progressHotspot);
+            controlsGroup.add(
+                ctrlBg,
+                progressBg,
+                progressFg,
+                playPauseIcon,
+                volumeIcon,
+                playPauseHotspot,
+                volumeHotspot,
+                progressHotspot
+            );
             group.add(controlsGroup);
+            this._layoutVideoControlGroup(controlsGroup, w, h);
 
             // 控制逻辑 —— 用 mousedown 替代 click，避免 Konva 动画层干扰点击检测
             const revealTimeline = () => {
@@ -6631,7 +12351,7 @@ export class CanvasManager {
                 revealTimeline();
                 return video.play().then(() => {
                     anim.start();
-                    playPauseBtnText.text('⏸');
+                    this._setVideoPlayPauseGlyph(playPauseIcon, true);
                     group.getLayer()?.batchDraw();
                 }).catch(() => { });
             };
@@ -6645,9 +12365,19 @@ export class CanvasManager {
                 } else {
                     video.pause();
                     anim.stop();
-                    playPauseBtnText.text('▶');
+                    this._setVideoPlayPauseGlyph(playPauseIcon, false);
                     group.getLayer()?.batchDraw();
                 }
+            });
+            volumeHotspot.on('mousedown', (e) => {
+                if (e.evt?.button != null && e.evt.button !== 0) return;
+                if (this._pickMediaReferenceFromControl(item, e)) return;
+                e.cancelBubble = true;
+                e.evt.stopPropagation();
+                video.muted = !video.muted;
+                item.videoMuted = video.muted;
+                this._setVideoVolumeGlyph(volumeIcon, video.muted);
+                group.getLayer()?.batchDraw();
             });
 
             // 进度跳转逻辑
@@ -6657,7 +12387,7 @@ export class CanvasManager {
                 e.cancelBubble = true;
                 e.evt.stopPropagation();
                 const ptrX = group.getRelativePointerPosition().x;
-                let percent = (ptrX - 35) / Math.max(1, progressHotspot.width());
+                let percent = (ptrX - progressHotspot.x()) / Math.max(1, progressHotspot.width());
                 percent = Math.max(0, Math.min(1, percent));
                 video.currentTime = video.duration * percent;
             });
@@ -6719,15 +12449,50 @@ export class CanvasManager {
     removeFile(filePath) {
         // 移除所有与此 filePath 关联的条目（可能有 Ctrl+拖拽的副本）
         const idsToRemove = [];
+        const targetPath = normalizePathForCompare(resolveCanvasFilePath(filePath));
+        if (!targetPath) return;
         this.items.forEach((item, id) => {
-            if (item.data.filePath === filePath) idsToRemove.push(id);
+            if (normalizePathForCompare(resolveCanvasFilePath(item.data.filePath)) === targetPath) idsToRemove.push(id);
         });
+        this._removeGeneratorResultsForFilePath(filePath);
         idsToRemove.forEach(id => this.removeItemById(id));
+    }
+
+    _removeGeneratorResultsForFilePath(filePath, excludeNodeId = '') {
+        let changed = false;
+        this.items.forEach(({ data }, id) => {
+            if (id === excludeNodeId || data?.kind !== 'op' || !['image', 'video'].includes(data.nodeType)) return;
+            const removed = removeGeneratorResultByFilePath(data, filePath);
+            if (!removed.changed) return;
+            changed = true;
+            if (removed.entries.length === 0 && data.runStatus !== STATUS.RUNNING && data.runStatus !== STATUS.QUEUED) {
+                data.runStatus = STATUS.IDLE;
+                data.runError = '';
+            }
+            this.refreshOpNode(id);
+        });
+        return changed;
     }
 
     removeItemById(id) {
         const item = this.items.get(id);
         if (item) {
+            if (item.data.filePath) this._removeGeneratorResultsForFilePath(item.data.filePath, id);
+            this._removePersistentTextEditor(id);
+            if (this._activeImageCrop?.itemId === id) this._closeImageCrop({ silent: true });
+            if (this._hoveredMediaItemId === id) this._setHoveredMediaItem(null);
+            if (this._activeOpPromptEditor?.nodeId === id) {
+                this._closeInlineOpPromptEditor({ commit: false });
+            }
+            if (this._activeMediaTitleEditor?.nodeId === id) {
+                this._closeMediaTitleEditor({ commit: false });
+            }
+            if (this._generationComposer?.nodeId === id) {
+                this._closeGenerationComposer({ commit: false });
+            }
+            if (this._activeNodeReferenceTargetId === id) {
+                this.endMediaReferencePick({ silent: true, clearHighlights: true });
+            }
             if (this._planReferencePickTargetId === id) {
                 this._planReferencePickTargetId = null;
             }
@@ -6739,6 +12504,7 @@ export class CanvasManager {
                 this._clearPlanConnectionFocusState();
             }
             this._removeItemFromPlanReferences(id, item.data.filePath);
+            this.graphView?.removeNode(id);
             this.selectedItems.delete(id);
             clearTimeout(item.hoverTimer);
             item.hoverTimer = null;
@@ -6758,11 +12524,25 @@ export class CanvasManager {
         const keepWidth = Number(item.data.width) || null;
         this._unloadContent(item);
         item.data.filePath = filePath;
+        item.data.mediaType = this._getFileType(filePath);
         if (options.reflowToNewAspect) {
             item.data.width = keepWidth || IMAGE_DEFAULT_WIDTH;
             delete item.data.height;
         }
+        item.loadError = false;
+        item.loadErrorMessage = '';
         item.group.setAttr('filePath', filePath);
+        item.group.findOne('.fallbackIcon')?.destroy();
+        const fallbackSize = this._mediaPlaceholderSize(item.data.mediaType, item.data);
+        item.group.add(this._createFallbackGroup(
+            item.data.mediaType,
+            fallbackSize.width,
+            fallbackSize.height,
+            item.data.filePath
+        ));
+        this._syncExternalNodeTitle(item.group, item.data, item.data.mediaType);
+        this.graphView?.renderPorts(id);
+        this.graphView?.scheduleSync(id);
         this._updatePlanReferencesForMovedItem(id, oldPath, filePath);
         this._scheduleCullCheck();
         this.emit('change');
@@ -6810,10 +12590,19 @@ export class CanvasManager {
     }
 
     _hasFilePath(filePath) {
+        return Boolean(this._findItemByFilePath(filePath));
+    }
+
+    _findItemByFilePath(filePath) {
+        const targetPath = normalizePathForCompare(resolveCanvasFilePath(filePath));
+        if (!targetPath) return null;
         for (let [id, item] of this.items.entries()) {
-            if (item.data.filePath === filePath) return true;
+            if (normalizePathForCompare(resolveCanvasFilePath(item.data.filePath)) === targetPath) return item;
+            if (item.data.kind === 'op' && getGeneratorResultEntries(item.data).some(result =>
+                normalizePathForCompare(resolveCanvasFilePath(result.filePath)) === targetPath
+            )) return item;
         }
-        return false;
+        return null;
     }
 
     _applyPlanFilterVisibility() {
@@ -6840,13 +12629,17 @@ export class CanvasManager {
     setFilter(types) {
         this.currentFilter = types; // 现在是数组
         this.items.forEach((item, id) => {
+            if (item.data?.kind === 'op') {
+                item.group.show();
+                return;
+            }
             const filePath = item.data.filePath;
             if (this._isInternalProcessFile(filePath)) {
                 item.group.hide();
                 if (item.gifDomElement) item.gifDomElement.style.display = 'none';
                 return;
             }
-            if (types.includes('all') || types.length === 0 || types.includes(this._getFileType(filePath))) {
+            if (types.includes('all') || types.length === 0 || types.includes(this._getItemMediaType(item.data))) {
                 item.group.show();
                 if (item.gifDomElement) item.gifDomElement.style.display = '';
             } else {
@@ -7046,17 +12839,37 @@ export class CanvasManager {
             const node = g.findOne('.displayNode') || g.findOne('.fallbackIcon') || g.findOne('.planHitArea');
             const w = node ? (node.width() || DOC_DEFAULT_SIZE) : DOC_DEFAULT_SIZE;
             const h = node ? (node.height() || DOC_DEFAULT_SIZE) : DOC_DEFAULT_SIZE;
-            minX = Math.min(minX, g.x()); minY = Math.min(minY, g.y());
+            const titleY = Number(g.findOne('.externalNodeTitle')?.y?.()) || 0;
+            minX = Math.min(minX, g.x()); minY = Math.min(minY, g.y() + Math.min(0, titleY));
             maxX = Math.max(maxX, g.x() + w); maxY = Math.max(maxY, g.y() + h);
         });
         if (minX === Infinity) return;
-        const padding = 50;
         const container = this.stage.container();
-        const scaleX = (container.offsetWidth - padding * 2) / (maxX - minX);
-        const scaleY = (container.offsetHeight - padding * 2) / (maxY - minY);
+        const floatingToolsVisible = document.body.classList.contains('sidebar-closed');
+        const inset = {
+            left: floatingToolsVisible ? 250 : 32,
+            top: floatingToolsVisible ? 82 : 42,
+            right: 32,
+            bottom: 76
+        };
+        const contentWidth = Math.max(1, maxX - minX);
+        const contentHeight = Math.max(1, maxY - minY);
+        const availableWidth = Math.max(1, container.offsetWidth - inset.left - inset.right);
+        const availableHeight = Math.max(1, container.offsetHeight - inset.top - inset.bottom);
+        const scaleX = availableWidth / contentWidth;
+        const scaleY = availableHeight / contentHeight;
         const scale = Math.min(scaleX, scaleY, 1);
         this.stage.scale({ x: scale, y: scale });
-        this.stage.position({ x: padding - minX * scale, y: padding - minY * scale });
+        this.stage.position({
+            x: inset.left + (availableWidth - contentWidth * scale) / 2 - minX * scale,
+            y: inset.top + (availableHeight - contentHeight * scale) / 2 - minY * scale
+        });
+        this.stage.batchDraw();
+        this.syncBackground();
+        this.syncGifs();
+        this.syncPlanInlineEditors();
+        this.graphView?.sync();
+        this._syncCanvasViewDock();
         this.emit('change');
     }
 
@@ -7130,6 +12943,16 @@ export class CanvasManager {
         }
 
         setTimeout(() => { this.emit('change'); this.syncGifs(); }, 300);
+    }
+}
+
+function resolveCanvasFilePath(filePath) {
+    const raw = String(filePath || '');
+    if (!raw.toLowerCase().startsWith('local-res://')) return raw;
+    try {
+        return decodeURIComponent(raw.slice('local-res://'.length));
+    } catch (_) {
+        return raw.slice('local-res://'.length);
     }
 }
 

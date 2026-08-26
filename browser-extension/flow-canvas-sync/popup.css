@@ -30,5 +30,12 @@ input { accent-color: #65a7ee; }
 .stats span { color: #7f858e; font-size: 9px; }
 button { border: 1px solid #4d5967; border-radius: 6px; background: #29333e; color: #dce9f7; font: inherit; font-size: 11px; cursor: pointer; }
 button:hover { background: #344352; }
+.capture-entry { display: grid; width: 100%; min-height: 54px; grid-template-columns: 30px 1fr 12px; align-items: center; gap: 9px; margin: 12px 0 8px; padding: 8px 9px; border-color: #3d4249; background: #22252a; text-align: left; }
+.capture-entry:hover { border-color: #606873; background: #292d33; }
+.capture-entry-icon { display: block; width: 28px; height: 28px; border: 1px solid #59616b; border-radius: 6px; background: linear-gradient(135deg, #d7dade 0 45%, #68717c 46% 54%, #30343a 55%); }
+.capture-entry span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.capture-entry b { color: #e7e9ec; font-size: 11px; }
+.capture-entry small { overflow: hidden; color: #858b94; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.capture-entry i { color: #838a93; font-size: 18px; font-style: normal; }
 .primary { width: 100%; height: 34px; }
 .hint { margin: 10px 2px 0; color: #737982; font-size: 9px; line-height: 1.5; }

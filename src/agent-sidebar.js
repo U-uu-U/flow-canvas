@@ -2,9 +2,29 @@
 // Flow Canvas — Agent Sidebar (AI 对话右侧边栏)
 // ============================================================
 
+import {
+    DEFAULT_SHORTCUTS,
+    SHORTCUT_DEFINITIONS,
+    SHORTCUTS_CHANGED_EVENT,
+    formatShortcut,
+    loadShortcutBindings,
+    normalizeShortcut,
+    saveShortcutBindings,
+    shortcutFromKeyboardEvent
+} from './shortcut-settings.js';
+import {
+    IMAGE_RESOLUTION_TIERS,
+    inferImageResolutionTier
+} from './image-node-settings.js';
+import {
+    inferProviderCapability,
+    providerHasCapability
+} from './provider-capabilities.js';
+
 const DEFAULT_TEMPLATES = {
-    ravenhash: { name: 'RavenHash Image', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: 'gpt-image-2' },
-    'ravenhash-video': { name: 'RavenHash Video', type: 'openai', endpoint: 'https://art.ravenhash.org/v1', model: 'doubao-seedance-2-0' }
+    'ravenhash-text': { name: 'RavenHash Text', capability: 'text', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: '' },
+    ravenhash: { name: 'RavenHash Image', capability: 'image', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: 'gpt-image-2' },
+    'ravenhash-video': { name: 'RavenHash Video', capability: 'video', type: 'openai', endpoint: 'https://art.ravenhash.org/v1', model: 'doubao-seedance-2-0' }
 };
 
 function normalizeRavenHashEndpoint(endpoint) {
@@ -101,6 +121,9 @@ const DEFAULT_VIDEO_MODEL_PROFILE = {
     durations: [],
     durationControl: null,
     supportsWebSearch: false,
+    supportsCameraFixed: false,
+    supportsGeneratedAudio: false,
+    supportsWatermark: false,
     defaultRatio: null,
     defaultResolution: null,
     defaultDuration: null
@@ -130,19 +153,33 @@ const IMAGE_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-image-prompt-height';
 const VIDEO_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-video-prompt-height';
 const PROJECT_COMPOSER_CACHE_STORAGE_KEY = 'flow-canvas-project-composer-cache-v1';
 const PROJECT_COMPOSER_DEFAULT_KEY = '__no_project__';
+const PROMPT_PRESETS_STORAGE_KEY = 'flow-canvas-prompt-presets-v1';
+const PROMPT_PRESET_LIMIT = 100;
 const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
 const GENERATION_TASK_LIMIT = 100;
 const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
+const RESERVED_SHORTCUTS = Object.freeze([
+    { binding: 'Mod+C', label: '复制到剪贴板' },
+    { binding: 'Mod+V', label: '粘贴素材' },
+    { binding: 'Mod+A', label: '全选' },
+    { binding: 'Mod+Shift+Z', label: '重做兼容键' },
+    { binding: 'Backspace', label: '删除兼容键' },
+    { binding: 'Escape', label: '取消操作' }
+]);
 
 export class AgentSidebar {
     constructor(options = {}) {
         this.options = options;
-        // 全局配置：图片和视频 provider 选择
+        // 全局配置：文字、图片和视频 provider 选择
         this.globalConfig = {
+            textProviderId: null,
             imageProviderId: null,
-            videoProviderId: null
+            videoProviderId: null,
+            imageIntentPipelineMode: 'compiled',
+            imageIntentPipelineVersion: 2,
+            defaultTemporaryImageCompression: false
         };
-        // 存储所有的 provider { id, name, type, endpoint, apiKey, model }
+        // 存储所有的 provider { id, name, capability, type, endpoint, apiKey, model }
         this.providers = [];
 
         this.editingProviderId = null;
@@ -154,16 +191,32 @@ export class AgentSidebar {
         this.activeProjectCacheKey = this._projectCacheKey(this.options.getActiveProjectId?.());
         this.projectComposerSaveTimer = null;
         this.restoringProjectComposer = false;
+        this.selectedPromptPresetIds = { image: '', video: '' };
 
         // DOM 引用
         this.settingsPanel = document.getElementById('agentSettings');
 
         // Settings elements
+        this.settingsTabs = document.getElementById('agentSettingsTabs');
+        this.shortcutSettingsPane = document.getElementById('agentShortcutSettingsPane');
+        this.creationSettingsPane = document.getElementById('agentCreationSettingsPane');
+        this.apiSettingsPane = document.getElementById('agentApiSettingsPane');
+        this.defaultTemporaryCompressionToggle = document.getElementById('agentDefaultTemporaryCompression');
+        this.assetLibraryFolderSelect = document.getElementById('agentAssetLibraryFolderSelect');
+        this.assetLibraryFolderChoose = document.getElementById('agentAssetLibraryFolderChoose');
+        this.assetLibraryFolderStatus = document.getElementById('agentAssetLibraryFolderStatus');
+        this.shortcutList = document.getElementById('agentShortcutList');
+        this.shortcutResetBtn = document.getElementById('agentShortcutResetBtn');
+        this.shortcutStatus = document.getElementById('agentShortcutStatus');
+        this.shortcutBindings = loadShortcutBindings();
+        this.activeSettingsTab = 'shortcuts';
+        this.recordingShortcutAction = null;
         this.providerListEl = document.getElementById('agentProviderList');
         this.addApiBtn = document.getElementById('agentAddApiBtn');
         this.apiForm = document.getElementById('agentApiForm');
         this.apiFormCloseBtn = document.getElementById('agentApiFormClose');
         this.apiFormTitle = document.getElementById('agentApiFormTitle');
+        this.textModelSelectEl = document.getElementById('agentTextModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
         this.modePicker = document.getElementById('creationModePicker');
@@ -209,6 +262,12 @@ export class AgentSidebar {
         this.videoWorkspaceStatus = document.getElementById('videoWorkspaceStatus');
         this.videoGenerateBtn = document.getElementById('videoGenerateBtn');
         this.videoGenerateMessage = document.getElementById('videoGenerateMessage');
+        this.videoPromptPresetSelect = document.getElementById('videoPromptPresetSelect');
+        this.videoPromptPresetName = document.getElementById('videoPromptPresetName');
+        this.videoPromptPresetSave = document.getElementById('videoPromptPresetSave');
+        this.videoPromptPresetDelete = document.getElementById('videoPromptPresetDelete');
+        this.videoPromptPresetCount = document.getElementById('videoPromptPresetCount');
+        this.videoPromptPresetStatus = document.getElementById('videoPromptPresetStatus');
         this.videoPromptProviderChip = document.getElementById('videoPromptProviderChip');
         this.videoPromptModelChip = document.getElementById('videoPromptModelChip');
         this.imageWorkspace = document.getElementById('imageWorkspace');
@@ -226,6 +285,12 @@ export class AgentSidebar {
         this.imageWorkspaceStatus = document.getElementById('imageWorkspaceStatus');
         this.imageGenerateBtn = document.getElementById('imageGenerateBtn');
         this.imageGenerateMessage = document.getElementById('imageGenerateMessage');
+        this.imagePromptPresetSelect = document.getElementById('imagePromptPresetSelect');
+        this.imagePromptPresetName = document.getElementById('imagePromptPresetName');
+        this.imagePromptPresetSave = document.getElementById('imagePromptPresetSave');
+        this.imagePromptPresetDelete = document.getElementById('imagePromptPresetDelete');
+        this.imagePromptPresetCount = document.getElementById('imagePromptPresetCount');
+        this.imagePromptPresetStatus = document.getElementById('imagePromptPresetStatus');
         this.currentMode = 'review';
         this.taskHistoryOpen = false;
         this.generationTasks = [];
@@ -237,6 +302,7 @@ export class AgentSidebar {
 
         // Form inputs
         this.formName = document.getElementById('agentFormName');
+        this.formCapability = document.getElementById('agentFormCapability');
         this.formType = document.getElementById('agentFormType');
         this.formEndpoint = document.getElementById('agentFormEndpoint');
         this.formKey = document.getElementById('agentFormKey');
@@ -262,7 +328,15 @@ export class AgentSidebar {
         // 渲染 UI
         this._renderProviderList();
         this._renderModelSelect();
+        this._renderShortcutSettings();
+        if (this.defaultTemporaryCompressionToggle) {
+            this.defaultTemporaryCompressionToggle.checked = this.globalConfig.defaultTemporaryImageCompression === true;
+        }
+        this._renderAssetLibrarySettings();
+        this._setSettingsTab(this.activeSettingsTab);
         this._renderGenerationTasks();
+        this._renderPromptPresets('image');
+        this._renderPromptPresets('video');
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
         this._pollBrowserSyncEvents();
@@ -295,6 +369,7 @@ export class AgentSidebar {
             this._renderVideoReferencePickState();
             this._renderImageReferences();
         });
+        this.options.subscribeAssetLibrarySettings?.(() => this._renderAssetLibrarySettings());
     }
 
     _projectCacheKey(projectId) {
@@ -451,6 +526,414 @@ export class AgentSidebar {
             this.restoringProjectComposer = false;
         }
         this._restoreProjectComposerReferences(nextKey);
+        ['image', 'video'].forEach(kind => {
+            this.selectedPromptPresetIds[kind] = '';
+            const controls = this._promptPresetControls(kind);
+            if (controls.nameInput) controls.nameInput.value = '';
+            this._setPromptPresetStatus(kind, '');
+            this._renderPromptPresets(kind);
+        });
+    }
+
+    _promptPresetControls(kind) {
+        if (kind === 'video') {
+            return {
+                promptInput: this.videoPromptInput,
+                select: this.videoPromptPresetSelect,
+                nameInput: this.videoPromptPresetName,
+                saveButton: this.videoPromptPresetSave,
+                deleteButton: this.videoPromptPresetDelete,
+                count: this.videoPromptPresetCount,
+                status: this.videoPromptPresetStatus
+            };
+        }
+        return {
+            promptInput: this.imagePromptInput,
+            select: this.imagePromptPresetSelect,
+            nameInput: this.imagePromptPresetName,
+            saveButton: this.imagePromptPresetSave,
+            deleteButton: this.imagePromptPresetDelete,
+            count: this.imagePromptPresetCount,
+            status: this.imagePromptPresetStatus
+        };
+    }
+
+    _loadPromptPresetStore() {
+        try {
+            const value = JSON.parse(localStorage.getItem(PROMPT_PRESETS_STORAGE_KEY) || '{}');
+            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    _getPromptPresets(kind) {
+        const store = this._loadPromptPresetStore();
+        const presets = store?.[this.activeProjectCacheKey]?.[kind];
+        if (!Array.isArray(presets)) return [];
+        return presets
+            .filter(preset => preset && preset.id && preset.name && typeof preset.prompt === 'string')
+            .slice(0, PROMPT_PRESET_LIMIT);
+    }
+
+    _storePromptPresets(kind, presets) {
+        const store = this._loadPromptPresetStore();
+        const projectStore = store[this.activeProjectCacheKey]
+            && typeof store[this.activeProjectCacheKey] === 'object'
+            ? store[this.activeProjectCacheKey]
+            : {};
+        projectStore[kind] = presets.slice(0, PROMPT_PRESET_LIMIT);
+        store[this.activeProjectCacheKey] = projectStore;
+        localStorage.setItem(PROMPT_PRESETS_STORAGE_KEY, JSON.stringify(store));
+    }
+
+    getPromptPresets(kind) {
+        const normalizedKind = kind === 'video' ? 'video' : 'image';
+        return this._getPromptPresets(normalizedKind)
+            .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')))
+            .map(preset => ({ ...preset }));
+    }
+
+    savePromptPreset(kind, value = {}) {
+        const normalizedKind = kind === 'video' ? 'video' : 'image';
+        const name = String(value.name || '').trim();
+        const prompt = String(value.prompt || '').trim();
+        if (!name) throw new Error('请填写预设名称');
+        if (!prompt) throw new Error('当前提示词为空');
+
+        const presets = this._getPromptPresets(normalizedKind);
+        const requestedId = String(value.id || '').trim();
+        let index = requestedId ? presets.findIndex(preset => preset.id === requestedId) : -1;
+        if (index < 0) {
+            index = presets.findIndex(preset => preset.name.trim().toLowerCase() === name.toLowerCase());
+        }
+        const now = new Date().toISOString();
+        const previous = index >= 0 ? presets.splice(index, 1)[0] : null;
+        const preset = {
+            id: previous?.id || globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name,
+            prompt,
+            createdAt: previous?.createdAt || now,
+            updatedAt: now
+        };
+        presets.unshift(preset);
+        this._storePromptPresets(normalizedKind, presets);
+        this.selectedPromptPresetIds[normalizedKind] = preset.id;
+        this._renderPromptPresets(normalizedKind);
+        return { ...preset };
+    }
+
+    _setPromptPresetStatus(kind, message, state = '') {
+        const status = this._promptPresetControls(kind).status;
+        if (!status) return;
+        status.textContent = message || '';
+        status.dataset.state = state || '';
+    }
+
+    _renderPromptPresets(kind) {
+        const controls = this._promptPresetControls(kind);
+        if (!controls.select) return;
+        const presets = this._getPromptPresets(kind)
+            .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+        const selectedId = this.selectedPromptPresetIds[kind];
+        controls.select.replaceChildren();
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = presets.length > 0 ? '新建或选择预设提示词' : '暂无预设，填写名称后保存';
+        controls.select.appendChild(placeholder);
+        presets.forEach(preset => {
+            const option = document.createElement('option');
+            option.value = preset.id;
+            option.textContent = preset.name;
+            controls.select.appendChild(option);
+        });
+        const hasSelectedPreset = presets.some(preset => preset.id === selectedId);
+        controls.select.value = hasSelectedPreset ? selectedId : '';
+        if (!hasSelectedPreset) this.selectedPromptPresetIds[kind] = '';
+        if (controls.count) controls.count.textContent = String(presets.length);
+        if (controls.deleteButton) controls.deleteButton.disabled = !hasSelectedPreset;
+        const saveLabel = controls.saveButton?.querySelector('span');
+        if (saveLabel) saveLabel.textContent = hasSelectedPreset ? '更新预设' : '保存预设';
+    }
+
+    _selectPromptPreset(kind, presetId) {
+        const controls = this._promptPresetControls(kind);
+        const preset = this._getPromptPresets(kind).find(entry => entry.id === presetId);
+        this.selectedPromptPresetIds[kind] = preset?.id || '';
+        if (!preset) {
+            if (controls.nameInput) controls.nameInput.value = '';
+            this._setPromptPresetStatus(kind, '填写名称，将当前提示词保存为新预设');
+            this._renderPromptPresets(kind);
+            return;
+        }
+        if (controls.promptInput) controls.promptInput.value = preset.prompt;
+        if (controls.nameInput) controls.nameInput.value = preset.name;
+        this._scheduleProjectComposerSave();
+        this._setPromptPresetStatus(kind, `已写入“${preset.name}”`, 'success');
+        this._renderPromptPresets(kind);
+    }
+
+    _savePromptPreset(kind) {
+        const controls = this._promptPresetControls(kind);
+        const name = String(controls.nameInput?.value || '').trim();
+        const prompt = String(controls.promptInput?.value || '').trim();
+        if (!name) {
+            this._setPromptPresetStatus(kind, '请先填写预设名称', 'error');
+            controls.nameInput?.focus();
+            return;
+        }
+        if (!prompt) {
+            this._setPromptPresetStatus(kind, '当前提示词为空，无法保存', 'error');
+            controls.promptInput?.focus();
+            return;
+        }
+
+        const now = new Date().toISOString();
+        const presets = this._getPromptPresets(kind);
+        const selectedId = this.selectedPromptPresetIds[kind];
+        let index = selectedId ? presets.findIndex(preset => preset.id === selectedId) : -1;
+        if (index < 0) {
+            index = presets.findIndex(preset => preset.name.trim().toLowerCase() === name.toLowerCase());
+        }
+        let preset;
+        let action;
+        if (index >= 0) {
+            preset = { ...presets[index], name, prompt, updatedAt: now };
+            presets.splice(index, 1);
+            action = '已更新';
+        } else {
+            preset = {
+                id: globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                name,
+                prompt,
+                createdAt: now,
+                updatedAt: now
+            };
+            action = '已保存';
+        }
+        presets.unshift(preset);
+        try {
+            this._storePromptPresets(kind, presets);
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to save prompt preset:', error);
+            this._setPromptPresetStatus(kind, '保存失败，本地存储空间可能已满', 'error');
+            return;
+        }
+        this.selectedPromptPresetIds[kind] = preset.id;
+        this._renderPromptPresets(kind);
+        this._setPromptPresetStatus(kind, `${action}“${preset.name}”`, 'success');
+    }
+
+    _deletePromptPreset(kind) {
+        const presetId = this.selectedPromptPresetIds[kind];
+        if (!presetId) return;
+        const presets = this._getPromptPresets(kind);
+        const preset = presets.find(entry => entry.id === presetId);
+        try {
+            this._storePromptPresets(kind, presets.filter(entry => entry.id !== presetId));
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to delete prompt preset:', error);
+            this._setPromptPresetStatus(kind, '删除失败，请稍后重试', 'error');
+            return;
+        }
+        this.selectedPromptPresetIds[kind] = '';
+        const controls = this._promptPresetControls(kind);
+        if (controls.nameInput) controls.nameInput.value = '';
+        this._renderPromptPresets(kind);
+        this._setPromptPresetStatus(kind, preset ? `已删除“${preset.name}”` : '预设已删除', 'success');
+    }
+
+    _setSettingsTab(tab = 'shortcuts') {
+        const nextTab = ['shortcuts', 'creation', 'api'].includes(tab) ? tab : 'shortcuts';
+        if (this.recordingShortcutAction) this._cancelShortcutCapture();
+        this.activeSettingsTab = nextTab;
+        this.settingsTabs?.querySelectorAll('[data-settings-tab]').forEach(button => {
+            const active = button.dataset.settingsTab === nextTab;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-selected', String(active));
+            button.tabIndex = active ? 0 : -1;
+        });
+        if (this.shortcutSettingsPane) this.shortcutSettingsPane.hidden = nextTab !== 'shortcuts';
+        if (this.creationSettingsPane) this.creationSettingsPane.hidden = nextTab !== 'creation';
+        if (this.apiSettingsPane) this.apiSettingsPane.hidden = nextTab !== 'api';
+    }
+
+    _setAssetLibraryFolderStatus(message = '', state = '') {
+        if (!this.assetLibraryFolderStatus) return;
+        this.assetLibraryFolderStatus.textContent = message;
+        this.assetLibraryFolderStatus.dataset.state = state;
+    }
+
+    _renderAssetLibrarySettings() {
+        const select = this.assetLibraryFolderSelect;
+        if (!select) return;
+        const settings = this.options.getAssetLibrarySettings?.() || {};
+        const folders = Array.isArray(settings.folders) ? settings.folders.filter(Boolean) : [];
+        const managedFolder = String(settings.managedFolder || '');
+        const defaultFolder = String(settings.defaultFolder || '');
+
+        select.replaceChildren();
+        if (folders.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '暂无素材库目录';
+            select.appendChild(option);
+            select.disabled = true;
+            select.title = '';
+            return;
+        }
+
+        folders.forEach(folder => {
+            const option = document.createElement('option');
+            option.value = folder;
+            option.textContent = folder === managedFolder ? `Flow Canvas 管理目录 - ${folder}` : folder;
+            select.appendChild(option);
+        });
+        const selectedFolder = folders.includes(defaultFolder) ? defaultFolder : folders[0];
+        select.value = selectedFolder;
+        select.disabled = false;
+        select.title = selectedFolder;
+    }
+
+    async _chooseAssetLibraryFolder() {
+        if (!this.options.chooseAssetLibraryFolder || !this.assetLibraryFolderChoose) return;
+        this.assetLibraryFolderChoose.disabled = true;
+        this.assetLibraryFolderChoose.setAttribute('aria-busy', 'true');
+        try {
+            const folderPath = await this.options.chooseAssetLibraryFolder();
+            this._renderAssetLibrarySettings();
+            if (folderPath) this._setAssetLibraryFolderStatus('素材库目录已更新', 'success');
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to choose asset library folder:', error);
+            this._setAssetLibraryFolderStatus('目录设置失败', 'error');
+        } finally {
+            this.assetLibraryFolderChoose.disabled = false;
+            this.assetLibraryFolderChoose.removeAttribute('aria-busy');
+        }
+    }
+
+    async _setDefaultAssetLibraryFolder(folderPath) {
+        if (!folderPath || !this.options.setDefaultAssetLibraryFolder) return;
+        try {
+            const updated = await this.options.setDefaultAssetLibraryFolder(folderPath);
+            this._renderAssetLibrarySettings();
+            this._setAssetLibraryFolderStatus(updated === false ? '目录设置失败' : '默认目录已更新', updated === false ? 'error' : 'success');
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to set default asset library folder:', error);
+            this._setAssetLibraryFolderStatus('目录设置失败', 'error');
+        }
+    }
+
+    _setShortcutStatus(message = '', state = '') {
+        if (!this.shortcutStatus) return;
+        this.shortcutStatus.textContent = message;
+        if (state) this.shortcutStatus.dataset.state = state;
+        else delete this.shortcutStatus.dataset.state;
+    }
+
+    _renderShortcutSettings() {
+        if (!this.shortcutList) return;
+        const fragment = document.createDocumentFragment();
+        SHORTCUT_DEFINITIONS.forEach(definition => {
+            const row = document.createElement('div');
+            row.className = 'agent-shortcut-row';
+
+            const copy = document.createElement('div');
+            copy.className = 'agent-shortcut-copy';
+            const label = document.createElement('strong');
+            label.textContent = definition.label;
+            const description = document.createElement('span');
+            description.textContent = definition.description;
+            copy.append(label, description);
+
+            const button = document.createElement('button');
+            button.className = 'agent-shortcut-binding';
+            button.type = 'button';
+            button.dataset.shortcutAction = definition.action;
+            button.setAttribute('aria-label', `修改${definition.label}快捷键`);
+            button.title = '点击后按下新的快捷键';
+            const binding = document.createElement('kbd');
+            binding.textContent = this.recordingShortcutAction === definition.action
+                ? '请按键…'
+                : formatShortcut(this.shortcutBindings[definition.action], window.flowCanvas?.platform);
+            button.classList.toggle('recording', this.recordingShortcutAction === definition.action);
+            button.appendChild(binding);
+
+            row.append(copy, button);
+            fragment.appendChild(row);
+        });
+        this.shortcutList.replaceChildren(fragment);
+
+        document.querySelectorAll('.context-menu-shortcut[data-shortcut-action]').forEach(element => {
+            const binding = this.shortcutBindings[element.dataset.shortcutAction];
+            if (binding) element.textContent = formatShortcut(binding, window.flowCanvas?.platform);
+        });
+    }
+
+    _startShortcutCapture(action) {
+        if (!SHORTCUT_DEFINITIONS.some(definition => definition.action === action)) return;
+        this.recordingShortcutAction = action;
+        this._renderShortcutSettings();
+        this._setShortcutStatus('请按下新的快捷键，按 Esc 取消', 'recording');
+    }
+
+    _cancelShortcutCapture(message = '') {
+        if (!this.recordingShortcutAction) return;
+        this.recordingShortcutAction = null;
+        this._renderShortcutSettings();
+        this._setShortcutStatus(message);
+    }
+
+    _persistShortcutBindings(message) {
+        try {
+            this.shortcutBindings = saveShortcutBindings(this.shortcutBindings);
+            document.dispatchEvent(new CustomEvent(SHORTCUTS_CHANGED_EVENT, {
+                detail: { ...this.shortcutBindings }
+            }));
+            this._renderShortcutSettings();
+            this._setShortcutStatus(message, 'success');
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to save shortcuts:', error);
+            this._setShortcutStatus('快捷键保存失败，请检查本地存储权限', 'error');
+        }
+    }
+
+    _captureShortcut(event) {
+        const action = this.recordingShortcutAction;
+        if (!action) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+
+        if (event.key === 'Escape') {
+            this._cancelShortcutCapture('已取消修改');
+            return;
+        }
+        const binding = shortcutFromKeyboardEvent(event);
+        if (!binding) return;
+
+        const reserved = RESERVED_SHORTCUTS.find(entry => normalizeShortcut(entry.binding) === binding);
+        if (reserved) {
+            this._setShortcutStatus(`${formatShortcut(binding, window.flowCanvas?.platform)} 已用于${reserved.label}`, 'error');
+            return;
+        }
+        const conflictAction = Object.keys(this.shortcutBindings)
+            .find(candidate => candidate !== action && this.shortcutBindings[candidate] === binding);
+        if (conflictAction) {
+            const conflict = SHORTCUT_DEFINITIONS.find(definition => definition.action === conflictAction);
+            this._setShortcutStatus(`${formatShortcut(binding, window.flowCanvas?.platform)} 已用于${conflict?.label || '其他操作'}`, 'error');
+            return;
+        }
+
+        const definition = SHORTCUT_DEFINITIONS.find(candidate => candidate.action === action);
+        this.shortcutBindings[action] = binding;
+        this.recordingShortcutAction = null;
+        this._persistShortcutBindings(`已更新${definition?.label || '快捷键'}`);
+    }
+
+    _resetShortcutBindings() {
+        this.recordingShortcutAction = null;
+        this.shortcutBindings = { ...DEFAULT_SHORTCUTS };
+        this._persistShortcutBindings('已恢复默认快捷键');
     }
 
     _bindEvents() {
@@ -484,9 +967,27 @@ export class AgentSidebar {
         toggleBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
         this.modePicker?.addEventListener('mouseenter', () => this._showModePicker());
         this.modePicker?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
-        document.getElementById('creationModeImageBtn')?.addEventListener('click', () => this.setMode('image'));
         document.getElementById('creationModeVideoBtn')?.addEventListener('click', () => this.setMode('video'));
+        document.getElementById('creationModeSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
         document.getElementById('creationModeReviewBtn')?.addEventListener('click', () => this.setMode('review'));
+        this.settingsTabs?.addEventListener('click', event => {
+            const button = event.target.closest('[data-settings-tab]');
+            if (button) this._setSettingsTab(button.dataset.settingsTab);
+        });
+        this.shortcutList?.addEventListener('click', event => {
+            const button = event.target.closest('[data-shortcut-action]');
+            if (button) this._startShortcutCapture(button.dataset.shortcutAction);
+        });
+        this.shortcutResetBtn?.addEventListener('click', () => this._resetShortcutBindings());
+        this.defaultTemporaryCompressionToggle?.addEventListener('change', () => {
+            this.globalConfig.defaultTemporaryImageCompression = this.defaultTemporaryCompressionToggle.checked;
+            this._saveConfig();
+        });
+        this.assetLibraryFolderChoose?.addEventListener('click', () => void this._chooseAssetLibraryFolder());
+        this.assetLibraryFolderSelect?.addEventListener('change', () => {
+            void this._setDefaultAssetLibraryFolder(this.assetLibraryFolderSelect.value);
+        });
+        document.addEventListener('keydown', event => this._captureShortcut(event), true);
         this.taskHistoryBtn?.addEventListener('click', () => this._setTaskHistoryOpen(!this.taskHistoryOpen));
         this.taskHistoryList?.addEventListener('click', (event) => {
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
@@ -498,6 +999,17 @@ export class AgentSidebar {
             if (retryButton) this._retryGenerationTask(retryButton.dataset.retryTask);
         });
         this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
+        ['image', 'video'].forEach(kind => {
+            const controls = this._promptPresetControls(kind);
+            controls.select?.addEventListener('change', event => this._selectPromptPreset(kind, event.target.value));
+            controls.saveButton?.addEventListener('click', () => this._savePromptPreset(kind));
+            controls.deleteButton?.addEventListener('click', () => this._deletePromptPreset(kind));
+            controls.nameInput?.addEventListener('keydown', event => {
+                if (event.key !== 'Enter' || event.isComposing) return;
+                event.preventDefault();
+                this._savePromptPreset(kind);
+            });
+        });
         [this.videoPromptInput, this.imagePromptInput].forEach(input => {
             input?.addEventListener('input', () => this._scheduleProjectComposerSave());
         });
@@ -515,6 +1027,9 @@ export class AgentSidebar {
         this.videoDurationControl?.addEventListener('change', () => this._scheduleProjectComposerSave());
         this.videoAddMediaBtn?.addEventListener('click', () => this._toggleVideoReferencePick());
         this.videoClearSourcesBtn?.addEventListener('click', () => this._clearVideoReferences());
+        document.addEventListener('canvas-add-generation-reference', event => {
+            this._addCanvasGenerationReference(event.detail?.entry);
+        });
         this.agentSidebar?.addEventListener('pointerdown', (event) => {
             if (!this.activeReferenceWorkspace || event.target.closest('.creation-source-add')) return;
             this.options.endMediaReferencePick?.({ silent: true });
@@ -537,7 +1052,7 @@ export class AgentSidebar {
         this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
         this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
         document.getElementById('videoPromptModelChip')?.addEventListener('click', () => this._showVideoModelPicker());
-        document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
+        document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings', 'api'));
         this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
 
         document.getElementById('agentCollapseBtn')?.addEventListener('click', () => this.close());
@@ -545,7 +1060,7 @@ export class AgentSidebar {
         // 退出当前模式并回到普通画板。
         document.getElementById('creationModeCloseBtn')?.addEventListener('click', exitCreationMode);
 
-        // 设置模式只从右上角齿轮进入。
+        // 右上角齿轮与圆球菜单都可进入设置模式。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
 
         // 模板点击
@@ -589,6 +1104,13 @@ export class AgentSidebar {
         });
 
         // 顶部下拉框切换
+        this.textModelSelectEl?.addEventListener('change', (e) => {
+            const id = e.target.value;
+            if (id) {
+                this._setTextProvider(id);
+            }
+        });
+
         this.imageModelSelectEl?.addEventListener('change', (e) => {
             const id = e.target.value;
             if (id) {
@@ -621,10 +1143,10 @@ export class AgentSidebar {
         }, 160);
     }
 
-    setMode(mode = 'review') {
-        const nextMode = ['settings', 'image', 'video', 'review'].includes(mode) ? mode : 'review';
+    setMode(mode = 'review', settingsTab = null) {
+        const nextMode = ['settings', 'video', 'review'].includes(mode) ? mode : 'review';
         const body = document.body;
-        if (['image', 'video'].includes(this.currentMode) && nextMode !== this.currentMode) {
+        if (this.currentMode === 'video' && nextMode !== this.currentMode) {
             this.options.endMediaReferencePick?.({ clearHighlights: true });
         }
         this.currentMode = nextMode;
@@ -632,7 +1154,6 @@ export class AgentSidebar {
         if (this.modeTitle) {
             this.modeTitle.textContent = {
                 settings: '\u8bbe\u7f6e\u6a21\u5f0f',
-                image: '\u56fe\u7247\u6a21\u5f0f',
                 video: '\u89c6\u9891\u6a21\u5f0f'
             }[nextMode] || '';
         }
@@ -657,20 +1178,19 @@ export class AgentSidebar {
 
         body.classList.add('creation-mode', nextMode + '-mode');
         body.classList.add('agent-open');
-        if (nextMode === 'image' || nextMode === 'video') {
+        if (nextMode === 'video') {
             body.classList.remove('sidebar-closed');
         }
         this.settingsPanel?.classList.toggle('show', nextMode === 'settings');
+        if (nextMode === 'settings') this._setSettingsTab(settingsTab || this.activeSettingsTab);
         if (this.videoWorkspace) this.videoWorkspace.hidden = true;
         if (this.videoModelPicker) this.videoModelPicker.hidden = true;
         if (this.videoPromptDock) this.videoPromptDock.hidden = nextMode !== 'video';
-        if (this.imageWorkspace) this.imageWorkspace.hidden = nextMode !== 'image';
+        if (this.imageWorkspace) this.imageWorkspace.hidden = true;
 
         if (nextMode === 'video') {
             this._renderVideoSourcePreview();
             this._renderVideoStage();
-        } else if (nextMode === 'image') {
-            this._renderImageReferences();
         }
         this.modePicker?.classList.remove('mode-picker-visible');
         this.open();
@@ -780,6 +1300,51 @@ export class AgentSidebar {
             limits,
             this.videoReferenceSelections
         );
+    }
+
+    _addCanvasGenerationReference(entry) {
+        const mediaType = ['image', 'video', 'audio'].includes(entry?.mediaType)
+            ? entry.mediaType
+            : null;
+        const filePath = String(entry?.filePath || '');
+        const feedback = message => document.dispatchEvent(new CustomEvent('canvas-reference-feedback', {
+            detail: { message }
+        }));
+        if (!mediaType || !filePath) {
+            feedback('该素材不能作为创作参考');
+            return;
+        }
+
+        const normalizedEntry = {
+            id: entry.id || entry.itemId || filePath,
+            itemId: entry.itemId || entry.id || null,
+            filePath,
+            mediaType
+        };
+        const identity = candidate => String(candidate?.itemId || candidate?.id || candidate?.filePath || '');
+
+        if (mediaType === 'image' && this.currentMode !== 'video') {
+            feedback('图片创作已迁移到画布节点，请选择“生成图片”');
+            return;
+        }
+
+        const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const limit = Math.max(0, Number(this._getVideoReferenceLimits(profile)[mediaType]) || 0);
+        if (limit === 0) {
+            feedback('当前视频模型不支持这类参考素材');
+            return;
+        }
+        const selections = this.videoReferenceSelections[mediaType] || [];
+        const exists = selections.some(candidate => identity(candidate) === identity(normalizedEntry));
+        if (!exists && selections.length >= limit) {
+            feedback(`当前模型最多添加 ${limit} 个${mediaType === 'image' ? '图片' : mediaType === 'video' ? '视频' : '音频'}参考`);
+            return;
+        }
+        if (!exists) this.videoReferenceSelections[mediaType] = [...selections, normalizedEntry];
+        this.setMode('video');
+        this.options.updateMediaReferencePick?.(mediaType, this.videoReferenceSelections[mediaType]);
+        this._renderVideoSourcePreview();
+        feedback(exists ? '该素材已在视频参考中' : '已加入视频创作参考');
     }
 
     _removeVideoReference(type, id) {
@@ -1066,10 +1631,7 @@ export class AgentSidebar {
 
     _renderImageModelCapabilities(provider = this._getImageProvider()) {
         if (!this.imageSizeSelect) return;
-        const marker = `${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        const sizes = /ai\.ravenhash\.org|ravenhash/.test(marker)
-            ? RAVENHASH_IMAGE_SIZES
-            : DEFAULT_IMAGE_SIZES;
+        const sizes = this._getImageModelSizes(provider);
         const previousValue = this.imageSizeSelect.value;
         this.imageSizeSelect.innerHTML = '';
         sizes.forEach(size => {
@@ -1079,6 +1641,13 @@ export class AgentSidebar {
             this.imageSizeSelect.appendChild(option);
         });
         this.imageSizeSelect.value = sizes.some(size => size.value === previousValue) ? previousValue : '';
+    }
+
+    _getImageModelSizes(provider = this._getImageProvider()) {
+        const marker = `${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
+        return /ai\.ravenhash\.org|ravenhash/.test(marker)
+            ? RAVENHASH_IMAGE_SIZES
+            : DEFAULT_IMAGE_SIZES;
     }
 
     _videoModelFavorites() {
@@ -1643,12 +2212,12 @@ export class AgentSidebar {
     }
 
     _setTaskHistoryOpen(open) {
-        const nextOpen = Boolean(open) && ['image', 'video'].includes(this.currentMode);
-        const modeLabel = this.currentMode === 'image' ? '图片模式' : '视频模式';
+        const nextOpen = Boolean(open) && this.currentMode === 'video';
+        const modeLabel = '视频模式';
         this.taskHistoryOpen = nextOpen;
         document.body.classList.toggle('task-history-open', nextOpen);
         if (this.taskHistoryPanel) this.taskHistoryPanel.hidden = !nextOpen;
-        if (this.modeTitle && ['image', 'video'].includes(this.currentMode)) {
+        if (this.modeTitle && this.currentMode === 'video') {
             this.modeTitle.textContent = nextOpen ? '任务记录' : modeLabel;
         }
         if (this.taskHistoryBtn) {
@@ -1876,11 +2445,15 @@ export class AgentSidebar {
         let result = null;
         try {
             if (task.kind === 'image') {
-                placeholder = this.options.beginImageGeneration?.({ size: task.params?.size }) || null;
+                placeholder = this.options.beginImageGeneration?.({
+                    size: task.params?.size,
+                    sourceReferences: retryImageReferences
+                }) || null;
                 if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
                 result = await window.flowCanvas.mcp.generateImage({
                     provider: 'openai',
                     providerConfig: provider,
+                    clientTaskId: task.id,
                     prompt: task.prompt,
                     size: task.params?.size || undefined,
                     quality: task.params?.quality || 'high',
@@ -1888,11 +2461,16 @@ export class AgentSidebar {
                     sourceReferences: retryImageReferences,
                     x: placeholder?.x,
                     y: placeholder?.y,
+                    canvasWidth: placeholder?.width,
+                    canvasHeight: placeholder?.height,
                     addToCanvas: true
                 });
             } else {
                 if (!window.flowCanvas?.mcp?.generateVideo && !shouldResumeVideo) throw new Error('本地视频接口不可用');
-                placeholder = this.options.beginVideoGeneration?.({ ratio: task.params?.ratio || '16:9' }) || null;
+                placeholder = this.options.beginVideoGeneration?.({
+                    ratio: task.params?.ratio || '16:9',
+                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath }))
+                }) || null;
                 result = shouldResumeVideo
                     ? await window.flowCanvas.mcp.resumeVideo({
                         providerConfig: provider,
@@ -1902,6 +2480,8 @@ export class AgentSidebar {
                         targetDir: task.params?.targetDir || undefined,
                         x: placeholder?.x,
                         y: placeholder?.y,
+                        canvasWidth: placeholder?.width,
+                        canvasHeight: placeholder?.height,
                         addToCanvas: true
                     })
                     : await window.flowCanvas.mcp.generateVideo({
@@ -1922,6 +2502,8 @@ export class AgentSidebar {
                     compressReferenceImages: task.params?.compressReferenceImages === true,
                     x: placeholder?.x,
                     y: placeholder?.y,
+                    canvasWidth: placeholder?.width,
+                    canvasHeight: placeholder?.height,
                     addToCanvas: true
                 });
             }
@@ -2149,7 +2731,10 @@ export class AgentSidebar {
         this.activeVideoWorkspaceTaskId = generationTask.id;
         if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
         this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
-        const placeholder = this.options.beginVideoGeneration?.({ ratio }) || null;
+        const placeholder = this.options.beginVideoGeneration?.({
+            ratio,
+            sourceReferences: imageReferences
+        }) || null;
         let result = null;
 
         try {
@@ -2171,6 +2756,8 @@ export class AgentSidebar {
                 compressReferenceImages: videoParams.compressReferenceImages,
                 x: placeholder?.x,
                 y: placeholder?.y,
+                canvasWidth: placeholder?.width,
+                canvasHeight: placeholder?.height,
                 addToCanvas: true
             });
             if (result?.success === false) throw new Error(result.error || '\u89c6\u9891\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
@@ -2216,7 +2803,9 @@ export class AgentSidebar {
                 itemId: replacementItemId,
                 filePath: replacement.filePath,
                 mediaType: 'image',
-                temporary: !replacement.item
+                temporary: !replacement.item,
+                referenceId: replacement.referenceId || entry.referenceId || null,
+                cacheReused: replacement.cacheReused === true
             };
         });
         this.options.updateMediaReferencePick?.('image', this.imageReferenceSelections);
@@ -2250,7 +2839,9 @@ export class AgentSidebar {
                 ? {
                     itemId: replacement.item?.id || reference.itemId,
                     filePath: replacement.filePath,
-                    temporary: !replacement.item
+                    temporary: !replacement.item,
+                    referenceId: replacement.referenceId || reference.referenceId || null,
+                    cacheReused: replacement.cacheReused === true
                 }
                 : reference;
         });
@@ -2264,6 +2855,12 @@ export class AgentSidebar {
             IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES
         );
         if (!summary) return { references, outputs: [] };
+        if (this.globalConfig.defaultTemporaryImageCompression === true) {
+            return this._compressImageReferences(references, {
+                updateSelection,
+                addToCanvas: false
+            });
+        }
         const choice = await this._showReferenceCompressionDialog(summary, 'image');
         if (choice === 'cancel') return null;
         if (choice === 'original') return { references, outputs: [] };
@@ -2297,7 +2894,7 @@ export class AgentSidebar {
                 'success',
                 addToCanvas
                     ? `已生成 ${count} 张较小副本并放入画板，原图保持不变`
-                    : `已生成 ${count} 张临时较小副本，未添加到画板`
+                    : `已缓存 ${count} 张较小副本，未添加到画板，可在后续任务中复用`
             );
         } catch (error) {
             this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
@@ -2407,13 +3004,17 @@ export class AgentSidebar {
         }, sourcePaths);
         this._setImageWorkspaceStatus('running', '\u751f\u6210\u4e2d');
         this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
-        const placeholder = this.options.beginImageGeneration?.({ size }) || null;
+        const placeholder = this.options.beginImageGeneration?.({
+            size,
+            sourceReferences
+        }) || null;
         let result = null;
 
         try {
             result = await window.flowCanvas.mcp.generateImage({
                 provider: 'openai',
                 providerConfig: provider,
+                clientTaskId: generationTask.id,
                 prompt,
                 size,
                 quality,
@@ -2421,6 +3022,8 @@ export class AgentSidebar {
                 sourceReferences,
                 x: placeholder?.x,
                 y: placeholder?.y,
+                canvasWidth: placeholder?.width,
+                canvasHeight: placeholder?.height,
                 addToCanvas: true
             });
             if (result?.success === false) throw new Error(result.error || '\u56fe\u7247\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
@@ -2452,9 +3055,7 @@ export class AgentSidebar {
         document.body.classList.add('agent-open');
         const focusTarget = this.currentMode === 'video'
             ? (this._hasSelectedVideoProvider() ? this.videoPromptInput : this.videoModelSearchInput)
-            : this.currentMode === 'image'
-                ? this.imagePromptInput
-                : null;
+            : null;
         if (focusTarget) setTimeout(() => focusTarget.focus(), 120);
     }
 
@@ -2471,12 +3072,22 @@ export class AgentSidebar {
         try {
             const savedProviders = localStorage.getItem('flow-canvas-agent-providers');
             if (savedProviders) {
-                this.providers = JSON.parse(savedProviders);
+                const providers = JSON.parse(savedProviders);
+                this.providers = (Array.isArray(providers) ? providers : []).map(provider => ({
+                    ...provider,
+                    capability: inferProviderCapability(provider)
+                }));
             }
 
             const savedGlobal = localStorage.getItem('flow-canvas-agent-global');
             if (savedGlobal) {
-                Object.assign(this.globalConfig, JSON.parse(savedGlobal));
+                const globalConfig = JSON.parse(savedGlobal);
+                Object.assign(this.globalConfig, globalConfig);
+                this.globalConfig.textProviderId ||= globalConfig?.chatProviderId || null;
+                if (Number(globalConfig?.imageIntentPipelineVersion) < 2) {
+                    this.globalConfig.imageIntentPipelineMode = 'compiled';
+                    this.globalConfig.imageIntentPipelineVersion = 2;
+                }
             }
         } catch (e) {
             console.warn('[Agent] 配置加载失败', e);
@@ -2489,19 +3100,22 @@ export class AgentSidebar {
         try {
             localStorage.setItem('flow-canvas-agent-providers', JSON.stringify(this.providers));
             localStorage.setItem('flow-canvas-agent-global', JSON.stringify(this.globalConfig));
+            document.dispatchEvent(new CustomEvent('agent-providers-updated'));
         } catch (e) {
             console.warn('[Agent] 配置保存失败', e);
         }
     }
 
     _isImageProvider(provider) {
-        const marker = `${provider?.model || ''} ${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        return /(image|gpt-image|dall-e|imagen|flux|stable|sdxl|midjourney)/.test(marker);
+        return providerHasCapability(provider, 'image');
     }
 
     _isVideoProvider(provider) {
-        const marker = `${provider?.model || ''} ${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        return /(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|minimax[^a-z0-9]*h3|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker);
+        return providerHasCapability(provider, 'video');
+    }
+
+    _isTextProvider(provider) {
+        return providerHasCapability(provider, 'text');
     }
 
     _isAnthropicProvider(provider) {
@@ -2536,24 +3150,42 @@ export class AgentSidebar {
     }
 
     _getDefaultImageProviderId() {
-        return this._providerVariants().find(provider => this._isImageProvider(provider) && !this._isVideoProvider(provider))?.id || null;
+        return this._providerVariants().find(provider => this._isImageProvider(provider))?.id || null;
+    }
+
+    _getDefaultTextProviderId() {
+        return this._providerVariants().find(provider => this._isTextProvider(provider))?.id || null;
     }
 
     _ensureProviderRoles() {
         if (this.providers.length === 0) {
+            this.globalConfig.textProviderId = null;
             this.globalConfig.imageProviderId = null;
             this.globalConfig.videoProviderId = null;
             return;
         }
 
+        const currentTextProvider = this._findProvider(this.globalConfig.textProviderId);
         const currentImageProvider = this._findProvider(this.globalConfig.imageProviderId);
         const currentVideoProvider = this._findProvider(this.globalConfig.videoProviderId);
-        if (!currentImageProvider || !this._isImageProvider(currentImageProvider) || this._isVideoProvider(currentImageProvider)) {
+        if (!currentTextProvider || !this._isTextProvider(currentTextProvider)) {
+            this.globalConfig.textProviderId = this._getDefaultTextProviderId();
+        }
+        if (!currentImageProvider || !this._isImageProvider(currentImageProvider)) {
             this.globalConfig.imageProviderId = this._getDefaultImageProviderId();
         }
         if (!currentVideoProvider || !this._isVideoProvider(currentVideoProvider)) {
             this.globalConfig.videoProviderId = null;
         }
+    }
+
+    _setTextProvider(id) {
+        const provider = this._findProvider(id);
+        if (!provider || !this._isTextProvider(provider)) return;
+        this.globalConfig.textProviderId = id;
+        this._saveConfig();
+        this._renderProviderList();
+        this._renderModelSelect();
     }
 
     _setImageProvider(id) {
@@ -2578,6 +3210,10 @@ export class AgentSidebar {
         return this._findProvider(this.globalConfig.imageProviderId);
     }
 
+    _getTextProvider() {
+        return this._findProvider(this.globalConfig.textProviderId);
+    }
+
     _getVideoProvider() {
         return this._findProvider(this.globalConfig.videoProviderId);
     }
@@ -2587,14 +3223,236 @@ export class AgentSidebar {
         return `${provider.name || '未命名 API'}（${provider.model || '未设置模型'}）`;
     }
 
-    getImageProviderConfig() {
-        const provider = this._getImageProvider();
+    _getBoundProvider(binding, fallbackProvider) {
+        if (!binding?.providerId && !binding?.sourceProviderId && !binding?.model) {
+            return fallbackProvider || null;
+        }
+        const selected = binding?.providerId ? this._findProvider(binding.providerId) : null;
+        const sourceId = binding?.sourceProviderId || selected?.sourceProviderId || selected?.id || binding?.providerId;
+        const source = this.providers.find(provider => provider.id === sourceId) || selected;
+        if (!source) return null;
+        return {
+            ...source,
+            id: binding.providerId || selected?.id || source.id,
+            sourceProviderId: source.id,
+            model: binding.model || selected?.model || source.model
+        };
+    }
+
+    getGenerationProviderOptions(kind) {
+        return this._providerVariants()
+            .filter(provider => kind === 'video'
+                ? this._isVideoProvider(provider)
+                : kind === 'text'
+                    ? this._isTextProvider(provider)
+                    : this._isImageProvider(provider))
+            .map(provider => ({
+                id: provider.id,
+                sourceProviderId: provider.sourceProviderId || provider.id,
+                name: provider.name || '未命名 API',
+                model: provider.model || ''
+            }));
+    }
+
+    getImageProviderConfig(binding = null) {
+        const provider = this._getBoundProvider(binding, this._getImageProvider());
         return provider ? { ...provider } : null;
     }
 
-    getVideoProviderConfig() {
-        const provider = this._getVideoProvider();
+    getTextProviderConfig(binding = null) {
+        const provider = this._getBoundProvider(binding, this._getTextProvider());
         return provider ? { ...provider } : null;
+    }
+
+    getImageIntentPipelineMode() {
+        if (this.globalConfig.imageIntentPipelineMode === 'off') return 'off';
+        if (this.globalConfig.imageIntentPipelineMode === 'shadow') return 'shadow';
+        return 'compiled';
+    }
+
+    async setImageIntentPipelineEnabled(enabled) {
+        if (enabled) {
+            const provider = this._getTextProvider();
+            const configured = Boolean(
+                String(provider?.apiKey || '').trim()
+                && String(provider?.endpoint || '').trim()
+                && String(provider?.model || '').trim()
+            );
+            if (!configured) {
+                await this._showMissingTextProviderDialog();
+                return false;
+            }
+        }
+        this.globalConfig.imageIntentPipelineMode = enabled ? 'compiled' : 'off';
+        this._saveConfig();
+        document.dispatchEvent(new CustomEvent('image-intent-pipeline-changed', {
+            detail: { enabled: enabled === true }
+        }));
+        return enabled === true;
+    }
+
+    _showMissingTextProviderDialog() {
+        return new Promise(resolve => {
+            document.querySelector('.agent-provider-guide-overlay')?.remove();
+            const overlay = document.createElement('div');
+            overlay.className = 'agent-provider-guide-overlay';
+            overlay.innerHTML = `
+                <section class="agent-provider-guide" role="dialog" aria-modal="true" aria-labelledby="agentProviderGuideTitle">
+                    <div class="agent-provider-guide-icon" aria-hidden="true">
+                        <svg class="flow-icon"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                    </div>
+                    <div class="agent-provider-guide-copy">
+                        <h2 id="agentProviderGuideTitle">Agent 模式需要文字模型</h2>
+                        <p>请先配置“文本与视觉理解”API，规划器才能分析参考图并整理生成请求。</p>
+                    </div>
+                    <div class="agent-provider-guide-actions">
+                        <button type="button" data-guide-cancel>取消</button>
+                        <button type="button" data-guide-settings>打开 API 设置</button>
+                        <button class="primary" type="button" data-guide-ravenhash>前往 RavenHash</button>
+                    </div>
+                </section>
+            `;
+            const finish = () => {
+                document.removeEventListener('keydown', onKeyDown);
+                overlay.remove();
+                resolve(false);
+            };
+            const onKeyDown = event => {
+                if (event.key === 'Escape') finish();
+            };
+            overlay.querySelector('[data-guide-cancel]')?.addEventListener('click', finish);
+            overlay.querySelector('[data-guide-settings]')?.addEventListener('click', () => {
+                finish();
+                this.setMode('settings', 'api');
+                this._showForm();
+                this._applyTemplate('ravenhash-text');
+                document.querySelectorAll('.agent-template-chip').forEach(chip => {
+                    chip.classList.toggle('active', chip.dataset.template === 'ravenhash-text');
+                });
+            });
+            overlay.querySelector('[data-guide-ravenhash]')?.addEventListener('click', async () => {
+                try {
+                    await window.flowCanvas?.shell?.openRavenHash?.('ai');
+                } catch (error) {
+                    console.error('[AgentSidebar] Failed to open RavenHash:', error);
+                } finally {
+                    finish();
+                }
+            });
+            overlay.addEventListener('click', event => {
+                if (event.target === overlay) finish();
+            });
+            document.addEventListener('keydown', onKeyDown);
+            document.body.appendChild(overlay);
+            overlay.querySelector('[data-guide-settings]')?.focus();
+        });
+    }
+
+    getImageModelProfile(binding = null) {
+        const provider = this._getBoundProvider(binding, this._getImageProvider());
+        if (!provider) return null;
+        const sizes = this._getImageModelSizes(provider).map(size => ({ ...size }));
+        const availableTiers = new Set(sizes.map(size => {
+            const match = /^(\d+)x(\d+)$/i.exec(String(size.value || ''));
+            return match ? inferImageResolutionTier(Number(match[1]), Number(match[2])) : null;
+        }).filter(Boolean));
+        return {
+            sizes,
+            resolutionTiers: IMAGE_RESOLUTION_TIERS.filter(tier => availableTiers.has(tier)),
+            defaultResolutionTier: availableTiers.has('1K') ? '1K' : ([...availableTiers][0] || '1K')
+        };
+    }
+
+    getVideoProviderConfig(binding = null) {
+        const provider = this._getBoundProvider(binding, this._getVideoProvider());
+        return provider ? { ...provider } : null;
+    }
+
+    getVideoModelProfile(binding = null) {
+        const provider = this._getBoundProvider(binding, this._getVideoProvider());
+        const profile = this._getVideoModelProfile(provider);
+        if (!profile) return null;
+        const { match, ...plainProfile } = profile;
+        return {
+            ...plainProfile,
+            ratios: [...(plainProfile.ratios || [])],
+            resolutions: [...(plainProfile.resolutions || [])],
+            durations: [...(plainProfile.durations || [])],
+            referenceLimits: { ...VIDEO_REFERENCE_LIMITS, ...(plainProfile.referenceLimits || {}) }
+        };
+    }
+
+    getClassificationProviderConfig() {
+        const isCompatible = item => {
+            if (!item?.apiKey || !item?.endpoint || !item?.model) return false;
+            if (String(item.type || '').toLowerCase() === 'google') return false;
+            return this._isTextProvider(item);
+        };
+        const selected = this._getTextProvider();
+        const provider = isCompatible(selected)
+            ? selected
+            : this._providerVariants().find(isCompatible);
+        return provider ? { ...provider } : null;
+    }
+
+    async classifyLibraryAsset(filePath, metadata = {}) {
+        const provider = this.getClassificationProviderConfig();
+        if (!provider) return { success: false, waiting: true, error: '请先配置支持图片输入的文本与视觉模型' };
+        if (!window.flowCanvas?.ai?.classifyAsset || !window.flowCanvas?.asset?.updateMetadata) {
+            return { success: false, error: '当前版本缺少素材分类接口' };
+        }
+
+        const attempts = Number(metadata?.classification?.attempts || 0) + 1;
+        await window.flowCanvas.asset.updateMetadata(filePath, {
+            classification: {
+                status: 'running',
+                attempts,
+                providerName: provider.name || '',
+                model: provider.model,
+                startedAt: new Date().toISOString(),
+                error: null
+            }
+        });
+
+        const response = await window.flowCanvas.ai.classifyAsset(filePath, provider);
+        if (!response?.success) {
+            const status = response?.unsupported ? 'unsupported' : (attempts >= 2 ? 'failed' : 'pending');
+            const update = await window.flowCanvas.asset.updateMetadata(filePath, {
+                classification: {
+                    status,
+                    attempts,
+                    error: response?.error || '分类请求失败',
+                    updatedAt: new Date().toISOString()
+                }
+            });
+            return { ...response, metadata: update?.metadata || null };
+        }
+
+        const result = response.result || {};
+        const categories = [...new Set([
+            ...(Array.isArray(metadata?.categories) ? metadata.categories : []),
+            ...(Array.isArray(result.categories) ? result.categories : [])
+        ].map(value => String(value || '').trim()).filter(Boolean))];
+        const tags = [...new Set([
+            ...(Array.isArray(metadata?.tags) ? metadata.tags : []),
+            ...(Array.isArray(result.tags) ? result.tags : [])
+        ].map(value => String(value || '').trim()).filter(Boolean))].slice(0, 20);
+        const update = await window.flowCanvas.asset.updateMetadata(filePath, {
+            categories,
+            tags,
+            summary: result.summary || '',
+            colors: Array.isArray(result.colors) ? result.colors : [],
+            dimensions: result.dimensions || {},
+            classification: {
+                status: 'complete',
+                attempts,
+                providerName: provider.name || '',
+                model: provider.model,
+                error: null,
+                completedAt: new Date().toISOString()
+            }
+        });
+        return { success: update?.success === true, result, metadata: update?.metadata || null, error: update?.error };
     }
 
     // ── 表单及 UI 管理 ──
@@ -2610,6 +3468,7 @@ export class AgentSidebar {
             this.editingProviderId = provider.id;
             this.apiFormTitle.textContent = '编辑 API';
             this.formName.value = provider.name;
+            this.formCapability.value = inferProviderCapability(provider);
             this.formType.value = this._isAnthropicProvider(provider) ? 'anthropic' : provider.type;
             this.formEndpoint.value = normalizeRavenHashEndpoint(provider.endpoint);
             this.formKey.value = provider.apiKey;
@@ -2636,6 +3495,7 @@ export class AgentSidebar {
     _applyTemplate(id) {
         const tpl = DEFAULT_TEMPLATES[id] || DEFAULT_TEMPLATES.ravenhash;
         if (this.formName) this.formName.value = tpl.name;
+        if (this.formCapability) this.formCapability.value = tpl.capability;
         if (this.formType) this.formType.value = tpl.type;
         if (this.formEndpoint) this.formEndpoint.value = tpl.endpoint;
         if (this.formModel) this.formModel.value = tpl.model;
@@ -2781,6 +3641,7 @@ export class AgentSidebar {
 
     _saveForm() {
         const name = this.formName.value.trim();
+        const capability = this.formCapability?.value?.trim() || 'text';
         const type = this.formType.value.trim();
         const endpoint = normalizeRavenHashEndpoint(this.formEndpoint.value);
         const apiKey = this.formKey.value.trim();
@@ -2799,16 +3660,20 @@ export class AgentSidebar {
         if (this.editingProviderId) {
             const idx = this.providers.findIndex(p => p.id === this.editingProviderId);
             if (idx !== -1) {
-                this.providers[idx] = { ...this.providers[idx], id: this.editingProviderId, name, type, endpoint, apiKey, model, models };
+                this.providers[idx] = { ...this.providers[idx], id: this.editingProviderId, name, capability, type, endpoint, apiKey, model, models };
             }
         } else {
             const newProvider = {
                 id: 'api_' + Date.now() + Math.random().toString(36).substr(2, 5),
-                name, type, endpoint, apiKey, model, models
+                name, capability, type, endpoint, apiKey, model, models
             };
             this.providers.push(newProvider);
-            if (this._isImageProvider(newProvider) && !this._isVideoProvider(newProvider)) {
+            if (this._isTextProvider(newProvider)) {
+                this.globalConfig.textProviderId = newProvider.id;
+            } else if (this._isImageProvider(newProvider)) {
                 this.globalConfig.imageProviderId = newProvider.id;
+            } else if (this._isVideoProvider(newProvider)) {
+                this.globalConfig.videoProviderId = newProvider.id;
             }
         }
 
@@ -2831,7 +3696,9 @@ export class AgentSidebar {
     _setActiveProvider(id) {
         const provider = this._findProvider(id);
         if (!provider) return;
-        if (this._isVideoProvider(provider)) {
+        if (this._isTextProvider(provider)) {
+            this._setTextProvider(id);
+        } else if (this._isVideoProvider(provider)) {
             this._setVideoProvider(id);
         } else if (this._isImageProvider(provider)) {
             this._setImageProvider(id);
@@ -2844,9 +3711,10 @@ export class AgentSidebar {
 
         this.providers.forEach(p => {
             const card = document.createElement('div');
+            const isText = this._selectionUsesProvider(this.globalConfig.textProviderId, p.id);
             const isImage = this._selectionUsesProvider(this.globalConfig.imageProviderId, p.id);
             const isVideo = this._selectionUsesProvider(this.globalConfig.videoProviderId, p.id);
-            card.className = `agent-provider-card ${isImage || isVideo ? 'active' : ''}`;
+            card.className = `agent-provider-card ${isText || isImage || isVideo ? 'active' : ''}`;
 
             const info = document.createElement('div');
             info.className = 'agent-provider-info';
@@ -2863,6 +3731,12 @@ export class AgentSidebar {
             metaEl.title = providerModels.join('\n');
             const roleEl = document.createElement('div');
             roleEl.className = 'agent-provider-roles';
+            if (isText) {
+                const badge = document.createElement('span');
+                badge.className = 'agent-provider-role chat';
+                badge.textContent = '文本 / 视觉';
+                roleEl.appendChild(badge);
+            }
             if (isImage) {
                 const badge = document.createElement('span');
                 badge.className = 'agent-provider-role image';
@@ -2918,6 +3792,7 @@ export class AgentSidebar {
 
     _renderModelSelect() {
         const selects = [
+            { el: this.textModelSelectEl, role: 'text', selectedId: this.globalConfig.textProviderId },
             { el: this.imageModelSelectEl, role: 'image', selectedId: this.globalConfig.imageProviderId },
             { el: this.videoModelSelectEl, role: 'video', selectedId: this.globalConfig.videoProviderId }
         ].filter(item => item.el);
@@ -2941,14 +3816,19 @@ export class AgentSidebar {
         selects.forEach(({ el, role, selectedId }) => {
             const opt = document.createElement('option');
             opt.value = "";
-            opt.textContent = role === 'image' ? "-- 选择生图 API --" : "-- 选择视频 API --";
+            opt.textContent = role === 'text'
+                ? '-- 选择文字 API --'
+                : role === 'image'
+                    ? '-- 选择生图 API --'
+                    : '-- 选择视频 API --';
             el.appendChild(opt);
-            if (role === 'video') opt.textContent = '-- \u9009\u62e9\u89c6\u9891 API --';
 
             this._providerVariants().forEach(p => {
                 const matchesRole = role === 'video'
                     ? this._isVideoProvider(p)
-                    : this._isImageProvider(p) && !this._isVideoProvider(p);
+                    : role === 'text'
+                        ? this._isTextProvider(p)
+                        : this._isImageProvider(p);
                 if (!matchesRole) return;
                 const option = document.createElement('option');
                 option.value = p.id;

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flow Canvas 素材采集</title>
+  <link rel="stylesheet" href="capture.css">
+</head>
+<body>
+  <main>
+    <header class="capture-head">
+      <div class="capture-mark" aria-hidden="true"></div>
+      <div class="capture-title">
+        <h1>网页素材采集</h1>
+        <p id="pageTitle">等待扫描当前页面</p>
+      </div>
+      <i id="connectionDot" title="本地连接状态"></i>
+    </header>
+
+    <section class="capture-target" aria-label="导入位置">
+      <label>
+        <span>素材库</span>
+        <select id="librarySelect"></select>
+      </label>
+      <label>
+        <span>保存目录</span>
+        <select id="folderSelect"></select>
+      </label>
+    </section>
+
+    <section class="scan-controls" aria-label="扫描控制">
+      <button id="scanBtn" class="primary" type="button">扫描当前页面</button>
+      <button id="captureBtn" type="button" title="截取当前标签页可见区域">截取画面</button>
+      <label class="switch-row"><input id="autoScrollInput" type="checkbox"><span>扫描前加载长页面</span></label>
+      <label class="switch-row"><input id="filterLowResInput" type="checkbox" checked><span>隐藏小于 320 px 的图片</span></label>
+    </section>
+
+    <section class="category-controls" aria-label="素材分类">
+      <div class="section-title"><span>素材分类</span><small>可多选</small></div>
+      <div class="category-chips" id="categoryChips"></div>
+      <label class="switch-row classify-row">
+        <input id="autoClassifyInput" type="checkbox" checked>
+        <span>导入后由 Flow Canvas 智能分类</span>
+      </label>
+    </section>
+
+    <section class="asset-results">
+      <div class="results-head">
+        <span id="countText">尚未扫描</span>
+        <div>
+          <button id="selectAllBtn" type="button">全选</button>
+          <button id="clearBtn" type="button">清空</button>
+        </div>
+      </div>
+      <div class="asset-grid empty" id="assetGrid">
+        <div class="empty-state">扫描后可批量选择图片、视频和音频。</div>
+      </div>
+    </section>
+
+    <footer>
+      <p id="statusText">正在连接 Flow Canvas</p>
+      <button id="importBtn" class="primary" type="button" disabled>导入所选</button>
+    </footer>
+  </main>
+  <script src="capture.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
 import { PlanService } from './plan-service.js';
+import { UndoStack } from './undo-stack.js';
 
 let storeData = null;
 let canvasManager = null;
@@ -11,12 +12,13 @@ let contextMenu = null;
 let agentSidebar = null;
 let planService = null;
 const HISTORY_LIMIT = 100;
-let undoStack = [];
-let redoStack = [];
+const historyStack = new UndoStack(HISTORY_LIMIT);
 let isRestoringHistory = false;
 let historyCommitTimer = null;
-let lastHistoryKey = '';
 let switchGroupRunId = 0;
+const assetClassificationQueue = [];
+const queuedAssetClassifications = new Set();
+let assetClassificationRunning = false;
 
 document.body.classList.add(`platform-${window.flowCanvas?.platform || 'web'}`);
 if (window.flowCanvas?.platform === 'darwin') {
@@ -37,15 +39,27 @@ async function bootstrap() {
             .filter(item => item?.kind !== 'generation');
         delete storeData.generationNodes;
         storeData.folderGroups = Array.isArray(storeData.folderGroups) ? storeData.folderGroups : [];
+        const assetLibraryContext = await window.flowCanvas.asset.getLibraryContext();
         planService = new PlanService(storeData);
         console.log('[Main] 数据加载完成', storeData);
 
         // 2. 初始化核心模块
-        sidebarManager = initRequiredModule('sidebar', () => new SidebarManager(storeData));
+        sidebarManager = initRequiredModule('sidebar', () => new SidebarManager(storeData, assetLibraryContext));
         contextMenu = initRequiredModule('context-menu', () => new ContextMenu());
         canvasManager = initRequiredModule('canvas', () => new CanvasManager('canvasContainer', storeData, contextMenu, planService, {
-            getImageProvider: () => agentSidebar?.getImageProviderConfig?.() || null,
-            getVideoProvider: () => agentSidebar?.getVideoProviderConfig?.() || null
+            getTextProvider: (binding) => agentSidebar?.getTextProviderConfig?.(binding) || null,
+            getImageProvider: (binding) => agentSidebar?.getImageProviderConfig?.(binding) || null,
+            getVideoProvider: (binding) => agentSidebar?.getVideoProviderConfig?.(binding) || null,
+            getGenerationProviders: (kind) => agentSidebar?.getGenerationProviderOptions?.(kind) || [],
+            getImageModelProfile: (binding) => agentSidebar?.getImageModelProfile?.(binding) || null,
+            getVideoModelProfile: (binding) => agentSidebar?.getVideoModelProfile?.(binding) || null,
+            getPromptPresets: (kind) => agentSidebar?.getPromptPresets?.(kind) || [],
+            savePromptPreset: (kind, value) => agentSidebar?.savePromptPreset?.(kind, value) || null,
+            getImageIntentPipelineMode: () => agentSidebar?.getImageIntentPipelineMode?.() || 'compiled',
+            setImageIntentPipelineEnabled: (enabled) =>
+                agentSidebar?.setImageIntentPipelineEnabled?.(enabled) ?? Promise.resolve(false),
+            prepareImageReferences: (refs) =>
+                agentSidebar?._prepareImageReferencesForGeneration?.(refs) || []
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
             getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
@@ -60,6 +74,10 @@ async function bootstrap() {
             clearMediaReferenceSelections: () => canvasManager?.clearMediaReferenceSelections?.(),
             resolveMediaReferenceEntries: (entries, type) => canvasManager?.resolveMediaReferenceEntries?.(entries, type) || [],
             getActiveProjectId: () => storeData?.activeGroupId || null,
+            getAssetLibrarySettings: () => sidebarManager?.getAssetLibrarySettings?.() || {},
+            chooseAssetLibraryFolder: () => sidebarManager?.chooseAssetLibraryFolder?.({ makeDefault: true }) || null,
+            setDefaultAssetLibraryFolder: (folderPath) => sidebarManager?.setAssetLibraryDefaultFolder?.(folderPath) ?? false,
+            subscribeAssetLibrarySettings: (handler) => sidebarManager?.on?.('assetLibrarySettingsChanged', handler),
             onGenerationTasksChanged: (tasks) => sidebarManager?.setGenerationTaskStates?.(tasks),
             beginImageGeneration: (settings) => canvasManager?.addImageGenerationPlaceholder?.(settings) || null,
             endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
@@ -94,6 +112,14 @@ async function bootstrap() {
             if (plan) {
                 saveStoreThrottled();
                 commitHistory('new-plan');
+            }
+        });
+
+        sidebarManager.on('addOpNode', (nodeType) => {
+            const node = canvasManager.addOpNode(nodeType);
+            if (node) {
+                saveStoreThrottled();
+                commitHistory('add-op-node');
             }
         });
 
@@ -176,6 +202,36 @@ async function bootstrap() {
             showHistoryStatus(count > 1 ? `已复制 ${count} 个文件` : '已复制文件');
         });
 
+        const revealLibraryAsset = ({ filePath, position = null } = {}) => {
+            if (!filePath) return;
+            const normalizedPath = normalizeFsPath(filePath);
+            let entry = [...canvasManager.items.values()].find(item =>
+                normalizeFsPath(item?.data?.filePath) === normalizedPath
+            );
+
+            if (!entry) {
+                restoreRemovedFromBoard(filePath);
+                const data = canvasManager.addFile(filePath);
+                if (data) {
+                    storeData.items.push(data);
+                    entry = canvasManager.items.get(data.id);
+                    saveStoreThrottled();
+                    syncStats();
+                    commitHistory('asset-library-add');
+                }
+            }
+
+            if (!entry) return;
+            canvasManager.focusItemById(entry.data.id, position);
+        };
+
+        sidebarManager.on('revealAsset', revealLibraryAsset);
+        sidebarManager.on('classifyAssets', enqueueAssetClassifications);
+        document.addEventListener('agent-providers-updated', () => sidebarManager.scheduleAssetLibraryRefresh?.(80));
+        document.addEventListener('library-asset-drop', event => {
+            revealLibraryAsset(event.detail || {});
+        });
+
         // ── 文件夹组切换 ──
         sidebarManager.on('switchGroup', async (data = {}) => {
             const currentSwitchRun = ++switchGroupRunId;
@@ -201,6 +257,9 @@ async function bootstrap() {
             } else {
                 canvasManager.renderPlans();
             }
+
+            storeData.connections = cloneData(data.connections || []);
+            canvasManager.graphView?.load(storeData.connections);
 
             if (folders.length > 0) {
                 await reconcileGroupFiles(folders, currentSwitchRun);
@@ -247,8 +306,12 @@ async function bootstrap() {
             const { event, filePath } = msg;
             console.log('[Main] 收到文件变更:', event, filePath);
 
-            if (!isWatchedBoardFile(filePath)) {
-                console.log('[Main] 忽略非当前组或不支持的文件变更:', filePath);
+            const isBoardFile = isWatchedBoardFile(filePath);
+            const isLibraryFile = isAssetLibraryFile(filePath);
+            if (isLibraryFile) sidebarManager.scheduleAssetLibraryRefresh?.();
+
+            if (!isBoardFile) {
+                console.log('[Main] 忽略非当前文件夹组的画布变更:', filePath);
                 return;
             }
 
@@ -303,9 +366,16 @@ async function bootstrap() {
 
         // 监听画布变更
         canvasManager.on('change', () => {
+            // 文件夹组切换是同步发生的，不能等节流保存后才更新顶层连线。
+            // Sidebar 会在切换瞬间把这里的实时快照写回旧组。
+            storeData.connections = cloneData(canvasManager.graphView?.serialize?.() || []);
             saveStoreThrottled();
             syncStats();
             scheduleHistoryCommit('canvas-change');
+        });
+
+        canvasManager.on('mediaDimensionsResolved', () => {
+            saveStoreThrottled();
         });
 
         canvasManager.on('plansChanged', () => {
@@ -366,6 +436,7 @@ async function bootstrap() {
 
         // 初始状态更新
         agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null, { saveCurrent: false });
+        canvasManager.graphView?.load(storeData.connections);
         syncStats();
         updateBodyState();
         resetHistory('initial');
@@ -374,6 +445,41 @@ async function bootstrap() {
     } catch (err) {
         console.error('[Main] 启动失败:', err);
         showStartupError(err);
+    }
+}
+
+function enqueueAssetClassifications(filePaths = []) {
+    (Array.isArray(filePaths) ? filePaths : []).forEach(filePath => {
+        const key = normalizeFsPath(filePath);
+        if (!key || queuedAssetClassifications.has(key)) return;
+        queuedAssetClassifications.add(key);
+        assetClassificationQueue.push({ key, filePath });
+    });
+    void runAssetClassificationQueue();
+}
+
+async function runAssetClassificationQueue() {
+    if (assetClassificationRunning || !agentSidebar?.classifyLibraryAsset) return;
+    assetClassificationRunning = true;
+    try {
+        while (assetClassificationQueue.length > 0) {
+            const next = assetClassificationQueue.shift();
+            if (!next) break;
+            const metadata = sidebarManager?._assetMetadata?.(next.filePath) || {};
+            const result = await agentSidebar.classifyLibraryAsset(next.filePath, metadata);
+            queuedAssetClassifications.delete(next.key);
+            if (result?.metadata) sidebarManager?.applyAssetMetadata?.(next.filePath, result.metadata);
+            if (result?.waiting) {
+                assetClassificationQueue.splice(0).forEach(item => queuedAssetClassifications.delete(item.key));
+                break;
+            }
+            await new Promise(resolve => setTimeout(resolve, 180));
+        }
+    } catch (error) {
+        console.warn('[Main] 素材智能分类队列中断:', error);
+    } finally {
+        assetClassificationRunning = false;
+        if (assetClassificationQueue.length > 0) void runAssetClassificationQueue();
     }
 }
 
@@ -401,7 +507,17 @@ function showStartupError(err, area = 'startup') {
     const status = document.getElementById('titlebarStatus');
     if (status) {
         status.textContent = `Flow Canvas ${area} error: ${err?.message || err}`;
-        status.classList.add('status-visible');
+        status.classList.add('status-visible', 'status-error', 'status-dismissible');
+        status.title = '点击关闭';
+        if (!showStartupError.bound) {
+            showStartupError.bound = true;
+            status.addEventListener('click', () => {
+                status.textContent = '';
+                status.classList.remove('status-visible', 'status-error', 'status-dismissible');
+                status.removeAttribute('title');
+                document.body.classList.remove('app-startup-error');
+            });
+        }
     }
     document.body.classList.add('app-startup-error');
 }
@@ -438,6 +554,7 @@ function handleExternalStoreUpdate(payload) {
         canvasManager.setViewport(storeData.viewport || { x: 0, y: 0, scale: 1 });
         agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null);
         canvasManager.renderInitialItems();
+        canvasManager.graphView?.load(storeData.connections);
         sidebarManager.renderGroups();
         sidebarManager.updateStats(storeData.items?.length || 0);
         updateBodyState();
@@ -466,7 +583,7 @@ function startBoardUsageMonitor() {
             const workingSetKB = usage?.memory?.workingSetSize || usage?.memory?.privateBytes || 0;
             memoryEl.textContent = formatMB(workingSetKB);
             detailEl.textContent = `${stats.loaded || 0}/${stats.total || 0}`;
-            detailEl.title = `loaded ${stats.loaded || 0}, loading ${stats.loading || 0}, queued ${stats.queued || 0}`;
+            detailEl.title = `loaded ${stats.loaded || 0}, loading ${stats.loading || 0}, queued ${stats.queued || 0}, ports ${stats.graphPortNodes || 0}/${stats.graphPortShapes || 0}, edges ${stats.graphEdges || 0}`;
         } catch (err) {
             memoryEl.textContent = '-- MB';
             detailEl.textContent = '0/0';
@@ -524,12 +641,9 @@ function snapshotBoardState() {
         items: cloneData(storeData.items || []),
         removedFromBoardPaths: cloneData(getRemovedFromBoardPaths()),
         plans: cloneData(planService?.listPlans?.() || []),
+        connections: cloneData(canvasManager?.graphView?.serialize?.() || []),
         viewport: cloneData(getCurrentViewport())
     };
-}
-
-function historyKey(snapshot) {
-    return JSON.stringify(snapshot);
 }
 
 function resetHistory(reason = 'reset') {
@@ -537,9 +651,7 @@ function resetHistory(reason = 'reset') {
     const snapshot = snapshotBoardState();
     if (!snapshot) return;
 
-    undoStack = [snapshot];
-    redoStack = [];
-    lastHistoryKey = historyKey(snapshot);
+    historyStack.resetState(snapshot);
     console.log('[History] reset:', reason);
 }
 
@@ -552,16 +664,8 @@ function commitHistory(reason = 'change') {
     const snapshot = snapshotBoardState();
     if (!snapshot) return;
 
-    const key = historyKey(snapshot);
-    if (key === lastHistoryKey) return;
-
-    undoStack.push(snapshot);
-    if (undoStack.length > HISTORY_LIMIT) {
-        undoStack.shift();
-    }
-    redoStack = [];
-    lastHistoryKey = key;
-    console.log('[History] commit:', reason, 'undo:', undoStack.length);
+    if (!historyStack.commitState(snapshot)) return;
+    console.log('[History] commit:', reason, 'undo:', historyStack.past.length);
 }
 
 function scheduleHistoryCommit(reason = 'change') {
@@ -594,15 +698,17 @@ function restoreHistorySnapshot(snapshot) {
     }
     planService?.migrateStoreData?.();
 
+    storeData.connections = cloneData(snapshot.connections || []);
+
     canvasManager.clearAll();
     canvasManager.storeData = storeData;
     canvasManager.setViewport(restoredViewport);
     canvasManager.renderInitialItems();
+    canvasManager.graphView?.load(storeData.connections);
 
     sidebarManager?.updateStats?.(storeData.items.length);
     saveStoreNow();
 
-    lastHistoryKey = historyKey(snapshot);
     isRestoringHistory = false;
 }
 
@@ -610,14 +716,11 @@ function undoHistory() {
     if (isRestoringHistory) return;
 
     commitHistory('before-undo');
-    if (undoStack.length <= 1) {
+    const target = historyStack.undoState();
+    if (!target) {
         showHistoryStatus('没有可撤销的操作');
         return;
     }
-
-    const current = undoStack.pop();
-    redoStack.push(current);
-    const target = undoStack[undoStack.length - 1];
     restoreHistorySnapshot(target);
     showHistoryStatus('已撤销');
 }
@@ -626,16 +729,10 @@ function redoHistory() {
     if (isRestoringHistory) return;
 
     commitHistory('before-redo');
-
-    if (redoStack.length === 0) {
+    const target = historyStack.redoState();
+    if (!target) {
         showHistoryStatus('没有可前进的操作');
         return;
-    }
-
-    const target = redoStack.pop();
-    undoStack.push(target);
-    if (undoStack.length > HISTORY_LIMIT) {
-        undoStack.shift();
     }
     restoreHistorySnapshot(target);
     showHistoryStatus('已前进');
@@ -786,13 +883,22 @@ async function relinkMaterialManually(item) {
         showHistoryStatus('当前版本不支持选择替代文件');
         return 0;
     }
-    const result = await window.flowCanvas.file.selectReplacement({ originalPath: item.filePath });
+    const expectedType = getBoardMediaType(item.filePath, item.mediaType);
+    const result = await window.flowCanvas.file.selectReplacement({
+        originalPath: item.filePath,
+        mediaType: expectedType
+    });
     if (!result?.success || !result.filePath) {
         if (!result?.canceled) showHistoryStatus('未选择替代文件');
         return 0;
     }
     if (!isSupportedBoardFile(result.filePath) || isTemporaryBoardFile(result.filePath)) {
         showHistoryStatus('请选择 Flow Canvas 支持的素材文件');
+        return 0;
+    }
+    const replacementType = getBoardMediaType(result.filePath);
+    if (expectedType && expectedType !== 'other' && replacementType !== expectedType) {
+        showHistoryStatus(`请选择${expectedType === 'image' ? '图片' : expectedType === 'video' ? '视频' : expectedType === 'audio' ? '音频' : '同类型'}素材`);
         return 0;
     }
     applyMaterialRelink(item, result.filePath);
@@ -1019,8 +1125,25 @@ function isWatchedBoardFile(filePath) {
     }
 
     const folders = sidebarManager?.getActiveWatchFolders?.() || storeData?.watchFolders || [];
-    if (folders.length === 0) return true;
+    if (folders.length === 0) return false;
 
+    const normalizedPath = normalizeFsPath(filePath);
+    return folders.some(folder => isPathInsideFolder(normalizedPath, folder));
+}
+
+function getBoardMediaType(filePath, fallback = '') {
+    const ext = String(filePath || '').split('.').pop()?.toLowerCase() || '';
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'svg', 'ico'].includes(ext)) return 'image';
+    if (['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'webm', 'm4v'].includes(ext)) return 'video';
+    if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'wma', 'm4a'].includes(ext)) return 'audio';
+    if (['pdf', 'doc', 'docx', 'txt', 'ppt', 'pptx', 'xls', 'xlsx'].includes(ext)) return 'document';
+    return String(fallback || '').toLowerCase() || 'other';
+}
+
+function isAssetLibraryFile(filePath) {
+    if (!filePath || !isSupportedBoardFile(filePath) || isTemporaryBoardFile(filePath)) return false;
+    const folders = sidebarManager?.getAssetLibraryFolders?.() || [];
+    if (folders.length === 0) return false;
     const normalizedPath = normalizeFsPath(filePath);
     return folders.some(folder => isPathInsideFolder(normalizedPath, folder));
 }
@@ -1129,7 +1252,10 @@ function saveStoreNow(useSync = false) {
         activeGroup.savedItems = cloneData(storeData.items || []);
         activeGroup.savedViewport = cloneData(storeData.viewport);
         activeGroup.plans = cloneData(planService?.listPlans?.() || activeGroup.plans || []);
+        activeGroup.connections = cloneData(canvasManager.graphView?.serialize?.() || []);
     }
+
+    storeData.connections = cloneData(canvasManager.graphView?.serialize?.() || []);
 
     if (useSync && window.flowCanvas?.store?.saveSync) {
         const result = window.flowCanvas.store.saveSync(storeData);

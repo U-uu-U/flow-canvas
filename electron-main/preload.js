@@ -46,7 +46,9 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     },
 
     file: {
+        selectMedia: () => ipcRenderer.invoke('file:selectMedia'),
         selectReplacement: (options) => ipcRenderer.invoke('file:selectReplacement', options),
+        saveCopy: (filePath) => ipcRenderer.invoke('file:saveCopy', filePath),
         inspect: (filePath) => ipcRenderer.invoke('file:inspect', filePath),
     },
 
@@ -54,6 +56,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     win: {
         setAlwaysOnTop: (flag) => ipcRenderer.invoke('window:setAlwaysOnTop', flag),
         getAlwaysOnTop: () => ipcRenderer.invoke('window:getAlwaysOnTop'),
+        setMediaPreviewFullscreen: (enabled) => ipcRenderer.invoke('window:setMediaPreviewFullscreen', enabled),
         collapseToOrb: () => ipcRenderer.invoke('window:collapseToOrb'),
     },
 
@@ -64,12 +67,25 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 网页图片摘取
     ai: {
         fetchModels: (config) => ipcRenderer.invoke('ai:fetchModels', config),
+        generateText: (request) => ipcRenderer.invoke('ai:generateText', request),
+        describeImages: (request) => ipcRenderer.invoke('ai:describeImages', request),
+        planImageEdit: (request) => ipcRenderer.invoke('ai:planImageEdit', request),
+        saveGenerationTrace: (trace) => ipcRenderer.invoke('ai:saveGenerationTrace', trace),
+        classifyAsset: (filePath, provider) => ipcRenderer.invoke('ai:classifyAsset', filePath, provider),
+    },
+
+    asset: {
+        getLibraryContext: () => ipcRenderer.invoke('asset:getLibraryContext'),
+        readMetadata: (filePaths) => ipcRenderer.invoke('asset:readMetadata', filePaths),
+        updateMetadata: (filePath, patch) => ipcRenderer.invoke('asset:updateMetadata', filePath, patch),
     },
 
     image: {
         downloadFromUrl: (url, targetDir) => ipcRenderer.invoke('image:downloadFromUrl', url, targetDir),
         archiveLocalFile: (filePath, targetDir) => ipcRenderer.invoke('image:archiveLocalFile', filePath, targetDir),
+        saveDroppedFile: (file, targetDir) => ipcRenderer.invoke('image:saveDroppedFile', file, targetDir),
         pasteFromClipboard: (targetDir) => ipcRenderer.invoke('image:pasteFromClipboard', targetDir),
+        crop: (body) => ipcRenderer.invoke('image:crop', body),
     },
 
     // 原生文件拖出到外部应用（支持单文件或多文件数组）

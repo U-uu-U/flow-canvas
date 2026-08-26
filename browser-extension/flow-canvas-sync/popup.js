@@ -48,8 +48,18 @@ document.getElementById('scanNow').addEventListener('click', async event => {
   setTimeout(async () => {
     await render();
     event.currentTarget.disabled = false;
-    event.currentTarget.textContent = '立即同步';
+    event.currentTarget.textContent = '立即同步任务';
   }, 1200);
+});
+document.getElementById('openCapture').addEventListener('click', async event => {
+  event.currentTarget.disabled = true;
+  const result = await request({ type: 'OPEN_CAPTURE_PANEL' });
+  if (!result?.success) {
+    connectionText.textContent = result?.error || '无法打开素材采集侧栏';
+    event.currentTarget.disabled = false;
+    return;
+  }
+  window.close();
 });
 
 render();

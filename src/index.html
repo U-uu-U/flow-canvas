@@ -40,7 +40,6 @@
                             <span class="resource-saver-switch" aria-hidden="true"></span>
                         </button>
                     </div>
-                    <!-- 文件夹组 -->
                     <div class="sidebar-section folder-groups-section">
                         <div class="sidebar-header">
                             <span class="sidebar-label">文件夹组</span>
@@ -53,69 +52,83 @@
                         </div>
                     </div>
 
-
-
-                    <!-- 过滤器 -->
-                    <div class="accordion-section" data-accordion>
-                        <div class="accordion-header">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-filter"></use></svg>
-                            <span class="sidebar-label">过滤器</span>
-                            <span class="accordion-chevron">▾</span>
-                        </div>
-                        <div class="accordion-body">
-                            <div class="accordion-body-inner">
-                                <div class="filter-chips" id="filterChips">
-                                    <button class="filter-chip active" data-filter="all">全部</button>
-                                    <button class="filter-chip" data-filter="image">图片</button>
-                                    <button class="filter-chip" data-filter="video">视频</button>
-                                    <button class="filter-chip" data-filter="audio">音频</button>
-                                    <button class="filter-chip" data-filter="document">文档</button>
-                                    <button class="filter-chip" data-filter="other">其他</button>
+                    <div class="sidebar-bottom-tools">
+                        <!-- 过滤器 -->
+                        <div class="accordion-section" data-accordion>
+                            <div class="accordion-header">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-filter"></use></svg>
+                                <span class="sidebar-label">过滤器</span>
+                                <span class="accordion-chevron">▾</span>
+                            </div>
+                            <div class="accordion-body">
+                                <div class="accordion-body-inner">
+                                    <div class="filter-chips" id="filterChips">
+                                        <button class="filter-chip active" data-filter="all">全部</button>
+                                        <button class="filter-chip" data-filter="image">图片</button>
+                                        <button class="filter-chip" data-filter="video">视频</button>
+                                        <button class="filter-chip" data-filter="audio">音频</button>
+                                        <button class="filter-chip" data-filter="document">文档</button>
+                                        <button class="filter-chip" data-filter="other">其他</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- 画布 -->
-                    <div class="accordion-section" data-accordion>
-                        <div class="accordion-header">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
-                            <span class="sidebar-label">画布</span>
-                            <span class="accordion-chevron">▾</span>
-                        </div>
-                        <div class="accordion-body">
-                            <div class="accordion-body-inner">
-                                <div class="canvas-controls">
-                                    <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
-                                    <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
-                                    <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
-                                    <button class="sidebar-action-btn" id="newPlanBtn">新建规划表</button>
-                                    <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成
-                                        .md 引用</button>
+                        <!-- 画布 -->
+                        <div class="accordion-section" data-accordion>
+                            <div class="accordion-header">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                                <span class="sidebar-label">画布</span>
+                                <span class="accordion-chevron">▾</span>
+                            </div>
+                            <div class="accordion-body">
+                                <div class="accordion-body-inner">
+                                    <div class="canvas-controls">
+                                        <button class="sidebar-action-btn" id="fitAllBtn">适配全部</button>
+                                        <button class="sidebar-action-btn" id="packLayoutBtn">紧凑排列</button>
+                                        <button class="sidebar-action-btn" id="seamlessLayoutBtn">无缝拼接</button>
+                                        <button class="sidebar-action-btn" id="newPlanBtn">新建规划表</button>
+                                        <button class="sidebar-action-btn" id="exportMdBtn" title="生成画布文件的 Markdown 引用清单">生成
+                                            .md 引用</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- 窗口 -->
-                    <div class="accordion-section" data-accordion>
-                        <div class="accordion-header">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
-                            <span class="sidebar-label">窗口</span>
-                            <span class="accordion-chevron">▾</span>
+                        <!-- 节点 -->
+                        <div class="accordion-section" data-accordion>
+                            <div class="accordion-header">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                                <span class="sidebar-label">节点</span>
+                                <span class="accordion-chevron">▾</span>
+                            </div>
+                            <div class="accordion-body">
+                                <div class="accordion-body-inner">
+                                    <div class="node-palette" id="nodePalette"></div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="accordion-body">
-                            <div class="accordion-body-inner">
-                                <div class="window-controls">
-                                    <button class="sidebar-action-btn pin-btn" id="alwaysOnTopBtn">
-                                        <svg class="pin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none"
-                                            stroke="currentColor" stroke-width="2">
-                                            <path d="M12 2l0 5" />
-                                            <path d="M5 12l14 0" />
-                                            <path d="M8 7l8 0l-1 5l-2 0l0 7l-2 0l0-7l-2 0z" />
-                                        </svg>
-                                        <span id="alwaysOnTopLabel">置顶窗口</span>
-                                    </button>
+
+                        <!-- 窗口 -->
+                        <div class="accordion-section" data-accordion>
+                            <div class="accordion-header">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
+                                <span class="sidebar-label">窗口</span>
+                                <span class="accordion-chevron">▾</span>
+                            </div>
+                            <div class="accordion-body">
+                                <div class="accordion-body-inner">
+                                    <div class="window-controls">
+                                        <button class="sidebar-action-btn pin-btn" id="alwaysOnTopBtn">
+                                            <svg class="pin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                                                stroke="currentColor" stroke-width="2">
+                                                <path d="M12 2l0 5" />
+                                                <path d="M5 12l14 0" />
+                                                <path d="M8 7l8 0l-1 5l-2 0l0 7l-2 0l0-7l-2 0z" />
+                                            </svg>
+                                            <span id="alwaysOnTopLabel">置顶窗口</span>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -131,7 +144,117 @@
         <!-- 画布区域 -->
         <main class="canvas-area">
             <div class="canvas-grid-overlay" id="canvasGrid"></div>
+            <button class="canvas-project-chip" id="canvasProjectChip" type="button" title="打开文件夹组"
+                aria-label="打开文件夹组" aria-controls="sidebar">
+                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
+                <span id="canvasProjectName">Flow Canvas</span>
+                <svg class="flow-icon flow-icon-xs canvas-project-chevron" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
+            </button>
+            <div class="canvas-tool-rail" id="canvasToolRail" role="toolbar" aria-label="画布工具">
+                <button class="canvas-tool-btn canvas-tool-add" id="canvasToolAdd" type="button" title="添加节点" aria-label="添加节点">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                </button>
+                <span class="canvas-tool-separator" aria-hidden="true"></span>
+                <button class="canvas-tool-btn" id="canvasToolSearch" type="button" title="搜索画布" aria-label="搜索画布">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                </button>
+                <button class="canvas-tool-btn" id="canvasToolLibrary" type="button" title="素材库"
+                    aria-label="打开素材库" aria-controls="canvasAssetLibrary" aria-expanded="false">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg>
+                </button>
+                <button class="canvas-tool-btn" id="canvasToolPlan" type="button" title="新建规划表" aria-label="新建规划表">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                </button>
+                <button class="canvas-tool-btn" id="canvasToolTasks" type="button" title="任务记录" aria-label="任务记录">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
+                </button>
+            </div>
+            <!-- 素材库独立于文件夹组，只从左侧浮动工具栏打开。 -->
+            <section class="canvas-asset-library asset-library-panel" id="canvasAssetLibrary" aria-label="素材库" hidden>
+                <div class="asset-library-head">
+                    <div class="asset-library-title">
+                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg>
+                        <span>素材库</span>
+                    </div>
+                    <div class="asset-library-head-actions">
+                        <button class="asset-library-icon-btn" id="assetLibraryAddFolderBtn" type="button" title="关联素材目录" aria-label="关联素材目录">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                        </button>
+                        <button class="asset-library-icon-btn" id="assetLibraryCloseBtn" type="button" title="关闭素材库" aria-label="关闭素材库">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
+                        </button>
+                    </div>
+                </div>
+                <label class="asset-library-search">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                    <input id="assetLibrarySearch" type="search" autocomplete="off" placeholder="搜索素材库">
+                    <button id="assetLibrarySearchClear" type="button" title="清空搜索" aria-label="清空搜索">
+                        <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
+                    </button>
+                </label>
+                <div class="asset-library-source-toolbar">
+                    <label class="asset-library-source-select-wrap" title="筛选素材来源">
+                        <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
+                        <select id="assetLibrarySourceSelect" aria-label="素材来源">
+                            <option value="">全部来源</option>
+                        </select>
+                    </label>
+                    <button class="asset-library-icon-btn" id="assetLibraryDefaultFolderBtn" type="button" title="设为网页采集默认目录" aria-label="设为网页采集默认目录" disabled>
+                        <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-favorite"></use></svg>
+                    </button>
+                    <button class="asset-library-icon-btn asset-library-remove-source" id="assetLibraryRemoveFolderBtn" type="button" title="取消关联素材目录" aria-label="取消关联素材目录" disabled>
+                        <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                    </button>
+                </div>
+                <div class="asset-library-filters" id="assetLibraryTypeFilters" role="group" aria-label="素材类型">
+                    <button class="filter-chip active" data-filter="all"><span>全部</span><b data-filter-count="all">0</b></button>
+                    <button class="filter-chip" data-filter="image"><span>图片</span><b data-filter-count="image">0</b></button>
+                    <button class="filter-chip" data-filter="video"><span>视频</span><b data-filter-count="video">0</b></button>
+                    <button class="filter-chip" data-filter="audio"><span>音频</span><b data-filter-count="audio">0</b></button>
+                    <button class="filter-chip" data-filter="document"><span>文档</span><b data-filter-count="document">0</b></button>
+                </div>
+                <div class="asset-category-filters" id="assetCategoryFilters" role="group" aria-label="素材分类" hidden></div>
+                <div class="asset-library-results-head">
+                    <span id="assetLibraryScope">全部素材</span>
+                    <span id="assetLibraryResultCount">0</span>
+                </div>
+                <div class="asset-library-grid" id="assetLibraryGrid">
+                    <div class="asset-library-empty">
+                        <svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
+                        <span>暂无素材</span>
+                    </div>
+                </div>
+            </section>
+            <section class="canvas-node-search" id="canvasNodeSearch" aria-label="搜索画布节点" hidden>
+                <label class="canvas-node-search-field">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                    <input id="canvasNodeSearchInput" type="search" placeholder="搜索节点或素材" autocomplete="off">
+                </label>
+                <div class="canvas-node-search-results" id="canvasNodeSearchResults"></div>
+            </section>
             <div id="canvasContainer"></div>
+            <div class="canvas-view-dock" id="canvasViewDock" role="toolbar" aria-label="画布视图控制">
+                <button class="canvas-view-btn" id="canvasMinimapToggle" type="button" title="小地图"
+                    aria-label="显示小地图" aria-pressed="false">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-map"></use></svg>
+                </button>
+                <button class="canvas-view-btn active" id="canvasConnectionsToggle" type="button" title="隐藏节点连线"
+                    aria-label="隐藏节点连线" aria-pressed="true">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-connections"></use></svg>
+                </button>
+                <button class="canvas-view-btn active" id="canvasGridToggle" type="button" title="隐藏点阵"
+                    aria-label="隐藏画布点阵" aria-pressed="true">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-grid"></use></svg>
+                </button>
+                <button class="canvas-view-btn active" id="canvasSnapToggle" type="button" title="关闭自动吸附"
+                    aria-label="关闭自动吸附" aria-pressed="true">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-magnet"></use></svg>
+                </button>
+                <button class="canvas-view-btn" id="canvasFitToggle" type="button" title="适配全部"
+                    aria-label="适配全部画布内容">
+                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-fit"></use></svg>
+                </button>
+            </div>
             <div class="board-usage" id="boardUsage" title="仅统计当前 Flow Canvas 白板窗口">
                 <span class="board-usage-memory" id="boardUsageMemory">-- MB</span>
                 <span class="board-usage-detail" id="boardUsageDetail">0/0</span>
@@ -229,6 +352,12 @@
                 <!-- 模型选择器（头部下方） -->
                 <div class="agent-model-bar">
                     <div class="agent-model-pickers">
+                        <label class="agent-model-picker">
+                            <span class="agent-model-picker-label">文字</span>
+                            <select class="agent-model-select" id="agentTextModelSelect">
+                                <option value="">-- 请先添加 API --</option>
+                            </select>
+                        </label>
                         <label class="agent-model-picker">
                             <span class="agent-model-picker-label">生图</span>
                             <select class="agent-model-select" id="agentImageModelSelect">
@@ -341,6 +470,26 @@
                         </label>
                     </div>
                     <div class="creation-workspace-message" id="videoGenerateMessage" aria-live="polite"></div>
+                    <section class="creation-prompt-presets" data-prompt-preset-kind="video" aria-label="视频提示词预设">
+                        <div class="creation-prompt-presets-head">
+                            <span>提示词预设</span>
+                            <span class="creation-prompt-presets-count" id="videoPromptPresetCount">0</span>
+                        </div>
+                        <select class="creation-prompt-preset-select" id="videoPromptPresetSelect" aria-label="选择视频提示词预设">
+                            <option value="">选择预设提示词</option>
+                        </select>
+                        <div class="creation-prompt-preset-editor">
+                            <input class="creation-prompt-preset-name" id="videoPromptPresetName" type="text" maxlength="60" placeholder="预设名称" aria-label="视频提示词预设名称">
+                            <button class="creation-prompt-preset-save" id="videoPromptPresetSave" type="button">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                <span>保存预设</span>
+                            </button>
+                            <button class="creation-prompt-preset-delete" id="videoPromptPresetDelete" type="button" title="删除当前预设" aria-label="删除当前视频提示词预设" disabled>
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                            </button>
+                        </div>
+                        <div class="creation-prompt-preset-status" id="videoPromptPresetStatus" aria-live="polite"></div>
+                    </section>
                 </section>
 
                 <section class="creation-workspace creation-image-workspace" id="imageWorkspace" hidden>
@@ -410,22 +559,131 @@
                         生成图片
                     </button>
                     <div class="creation-workspace-message" id="imageGenerateMessage" aria-live="polite"></div>
+                    <section class="creation-prompt-presets" data-prompt-preset-kind="image" aria-label="图片提示词预设">
+                        <div class="creation-prompt-presets-head">
+                            <span>提示词预设</span>
+                            <span class="creation-prompt-presets-count" id="imagePromptPresetCount">0</span>
+                        </div>
+                        <select class="creation-prompt-preset-select" id="imagePromptPresetSelect" aria-label="选择图片提示词预设">
+                            <option value="">选择预设提示词</option>
+                        </select>
+                        <div class="creation-prompt-preset-editor">
+                            <input class="creation-prompt-preset-name" id="imagePromptPresetName" type="text" maxlength="60" placeholder="预设名称" aria-label="图片提示词预设名称">
+                            <button class="creation-prompt-preset-save" id="imagePromptPresetSave" type="button">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                <span>保存预设</span>
+                            </button>
+                            <button class="creation-prompt-preset-delete" id="imagePromptPresetDelete" type="button" title="删除当前预设" aria-label="删除当前图片提示词预设" disabled>
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                            </button>
+                        </div>
+                        <div class="creation-prompt-preset-status" id="imagePromptPresetStatus" aria-live="polite"></div>
+                    </section>
                 </section>
 
                 <div class="agent-settings" id="agentSettings">
-                    <!-- 已保存的 API 列表 -->
-                    <div class="agent-provider-list" id="agentProviderList">
-                        <!-- 动态渲染 -->
+                    <div class="agent-settings-heading">
+                        <div>
+                            <strong>设置</strong>
+                            <span>管理画布操作与创作服务</span>
+                        </div>
+                    </div>
+                    <div class="agent-settings-tabs" id="agentSettingsTabs" role="tablist" aria-label="设置分类">
+                        <button class="agent-settings-tab active" id="agentShortcutSettingsTab" type="button"
+                            role="tab" aria-selected="true" aria-controls="agentShortcutSettingsPane" data-settings-tab="shortcuts">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                            快捷键
+                        </button>
+                        <button class="agent-settings-tab" id="agentCreationSettingsTab" type="button"
+                            role="tab" aria-selected="false" aria-controls="agentCreationSettingsPane" data-settings-tab="creation">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
+                            创作
+                        </button>
+                        <button class="agent-settings-tab" id="agentApiSettingsTab" type="button"
+                            role="tab" aria-selected="false" aria-controls="agentApiSettingsPane" data-settings-tab="api">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
+                            API
+                        </button>
                     </div>
 
-                    <!-- 添加 API 按钮 -->
-                    <button class="agent-add-api-btn" id="agentAddApiBtn">
-                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
-                        添加 API
-                    </button>
+                    <section class="agent-settings-pane agent-shortcut-settings" id="agentShortcutSettingsPane"
+                        role="tabpanel" aria-labelledby="agentShortcutSettingsTab">
+                        <div class="agent-settings-section-head">
+                            <div>
+                                <strong>画布快捷键</strong>
+                                <span>点击按键后，直接按下新的组合键</span>
+                            </div>
+                            <button class="agent-shortcut-reset" id="agentShortcutResetBtn" type="button">恢复默认</button>
+                        </div>
+                        <div class="agent-shortcut-list" id="agentShortcutList"></div>
+                        <div class="agent-shortcut-fixed">
+                            <span>复制到系统文件夹</span>
+                            <kbd>Alt + 拖拽</kbd>
+                        </div>
+                        <div class="agent-shortcut-status" id="agentShortcutStatus" aria-live="polite"></div>
+                    </section>
 
-                    <!-- 添加/编辑 API 表单（默认隐藏） -->
-                    <div class="agent-api-form" id="agentApiForm" style="display:none;">
+                    <section class="agent-settings-pane agent-creation-settings" id="agentCreationSettingsPane"
+                        role="tabpanel" aria-labelledby="agentCreationSettingsTab" hidden>
+                        <div class="agent-creation-setting-block">
+                            <div class="agent-settings-section-head">
+                                <div>
+                                    <strong>图片参考图</strong>
+                                    <span>管理提交前的素材处理方式</span>
+                                </div>
+                            </div>
+                            <label class="agent-preference-row" for="agentDefaultTemporaryCompression">
+                                <span class="agent-preference-copy">
+                                    <strong>默认转小但不放画板</strong>
+                                    <small>大图自动保存为可复用缓存，不再弹出选择框</small>
+                                </span>
+                                <span class="agent-preference-switch">
+                                    <input type="checkbox" id="agentDefaultTemporaryCompression">
+                                    <i aria-hidden="true"></i>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="agent-creation-setting-block">
+                            <div class="agent-settings-section-head">
+                                <div>
+                                    <strong>素材库</strong>
+                                    <span>默认保存目录</span>
+                                </div>
+                            </div>
+                            <div class="agent-library-location-control">
+                                <select id="agentAssetLibraryFolderSelect" aria-label="默认素材库目录">
+                                    <option value="">暂无素材库目录</option>
+                                </select>
+                                <button id="agentAssetLibraryFolderChoose" type="button" title="选择素材库目录"
+                                    aria-label="选择素材库目录">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
+                                </button>
+                            </div>
+                            <div class="agent-library-location-status" id="agentAssetLibraryFolderStatus" aria-live="polite"></div>
+                        </div>
+                    </section>
+
+                    <section class="agent-settings-pane agent-api-settings" id="agentApiSettingsPane"
+                        role="tabpanel" aria-labelledby="agentApiSettingsTab" hidden>
+                        <div class="agent-settings-section-head agent-api-settings-head">
+                            <div>
+                                <strong>API 服务</strong>
+                                <span>配置文字、图片与视频模型</span>
+                            </div>
+                        </div>
+
+                        <!-- 已保存的 API 列表 -->
+                        <div class="agent-provider-list" id="agentProviderList">
+                            <!-- 动态渲染 -->
+                        </div>
+
+                        <button class="agent-add-api-btn" id="agentAddApiBtn">
+                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                            添加 API
+                        </button>
+
+                        <!-- 添加/编辑 API 表单（默认隐藏） -->
+                        <div class="agent-api-form" id="agentApiForm" style="display:none;">
                         <div class="agent-api-form-header">
                             <span id="agentApiFormTitle">添加新 API</span>
                             <button class="agent-api-form-close" id="agentApiFormClose">✕</button>
@@ -434,6 +692,7 @@
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">快速模板</label>
                             <div class="agent-template-chips">
+                                <button class="agent-template-chip" data-template="ravenhash-text">RavenHash Text</button>
                                 <button class="agent-template-chip" data-template="ravenhash">RavenHash Image</button>
                                 <button class="agent-template-chip" data-template="ravenhash-video">RavenHash Video</button>
                             </div>
@@ -442,6 +701,17 @@
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">名称</label>
                             <input type="text" class="agent-setting-input" id="agentFormName" placeholder="例：GPT-4o">
+                        </div>
+                        <div class="agent-setting-group">
+                            <label class="agent-setting-label">模型用途</label>
+                            <select class="agent-setting-input" id="agentFormCapability">
+                                <option value="text">文本与视觉理解</option>
+                                <option value="image">图片生成</option>
+                                <option value="video">视频生成</option>
+                            </select>
+                            <div class="agent-setting-help">
+                                文本与视觉理解用于文本生成、画面提取和素材智能分类，需要模型支持图片输入；图片生成和视频生成仅用于对应的生成任务。
+                            </div>
                         </div>
                         <div class="agent-setting-group">
                             <label class="agent-setting-label">API 格式</label>
@@ -494,22 +764,22 @@
                             <div class="agent-model-fetch-status" id="agentModelFetchStatus" aria-live="polite"></div>
                         </div>
 
-                        <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
-                    </div>
-
+                            <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
+                        </div>
+                    </section>
                 </div>
             </aside>
         </div>
 
-        <!-- 视频 / 图片 / 阅览模式切换 -->
+        <!-- 视频 / 设置 / 阅览模式切换；图片创作已迁移到画布节点。 -->
         <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
             <button class="creation-mode-option video" id="creationModeVideoBtn" type="button">
                 <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
                 视频模式
             </button>
-            <button class="creation-mode-option image" id="creationModeImageBtn" type="button">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg>
-                图片模式
+            <button class="creation-mode-option settings" id="creationModeSettingsBtn" type="button">
+                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
+                设置模式
             </button>
             <button class="creation-mode-option review" id="creationModeReviewBtn" type="button">
                 <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
@@ -526,6 +796,21 @@
 
     <!-- 右键菜单 -->
     <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item context-op-only" data-action="editNode">
+            <span class="context-menu-icon icon-open"></span>
+            <span>编辑节点参数</span>
+        </div>
+        <div class="context-menu-item context-op-only" data-action="runNode">
+            <span class="context-menu-icon icon-reference"></span>
+            <span>运行此节点</span>
+            <span class="context-menu-shortcut" data-shortcut-action="run">Ctrl+Enter</span>
+        </div>
+        <div class="context-menu-item context-op-only" data-action="duplicateNode">
+            <span class="context-menu-icon icon-copy"></span>
+            <span>复制节点</span>
+            <span class="context-menu-shortcut" data-shortcut-action="duplicate">Ctrl+D</span>
+        </div>
+        <div class="context-menu-divider context-op-only"></div>
         <div class="context-menu-item" data-action="copy">
             <span class="context-menu-icon icon-copy"></span>
             <span>复制到剪贴板</span>
@@ -571,7 +856,7 @@
         <div class="context-menu-item" data-action="removeFromBoard">
             <span class="context-menu-icon icon-trash"></span>
             <span>从白板移除</span>
-            <span class="context-menu-shortcut">Del</span>
+            <span class="context-menu-shortcut" data-shortcut-action="delete">Del</span>
         </div>
     </div>
 

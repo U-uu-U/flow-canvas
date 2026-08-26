@@ -5,6 +5,25 @@ const crypto = require('crypto');
 const sharp = require('sharp');
 const { app, net } = require('electron');
 const { PlanService, DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
+const {
+    buildImageEditMultipart,
+    buildImageTaskEndpoint,
+    buildMidjourneyImaginePayload,
+    buildMidjourneySubmitEndpoint,
+    buildMidjourneyTaskEndpoint,
+    collectImageEditInputs,
+    getGeneratedImageData,
+    getImageTaskId,
+    imageHttpErrorMessage,
+    imageTaskErrorMessage,
+    imageTaskRetryDelayMs,
+    imageTaskStatus,
+    isCompletedImageTaskStatus,
+    isFailedImageTaskStatus,
+    isImageTaskPayload,
+    isMidjourneyImageModel
+} = require('./openai-image-request');
+const { ReferenceCache } = require('./reference-cache');
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov']);
@@ -38,6 +57,7 @@ const FALLBACK_TEMP_REFERENCE_UPLOAD_PROVIDERS = [
 ];
 const temporaryReferenceUrlCache = new Map();
 const temporaryReferenceUploadTasks = new Map();
+let referenceCache = null;
 const DEFAULT_IMAGE_SIZE_OPTIONS = ['1024x1024', '1536x1024', '1024x1536'];
 const RAVENHASH_IMAGE_SIZE_OPTIONS = [
     ...DEFAULT_IMAGE_SIZE_OPTIONS,
@@ -46,6 +66,13 @@ const RAVENHASH_IMAGE_SIZE_OPTIONS = [
     '3840x2160',
     '2160x3840'
 ];
+
+function getReferenceCache() {
+    if (!referenceCache) {
+        referenceCache = new ReferenceCache(path.join(app.getPath('userData'), 'data', 'reference-cache'));
+    }
+    return referenceCache;
+}
 const ROUTE_TO_TOOL = {
     'GET /health': 'flow_canvas.health',
     'GET /config': 'flow_canvas.config.get',
@@ -474,7 +501,19 @@ class FlowCanvasBridge {
 
         let result = null;
         if (body.provider !== 'builtin') {
-            result = await tryGenerateWithOpenAI(prompt, targetDir, generationOptions);
+            result = await tryGenerateWithOpenAI(prompt, targetDir, {
+                ...generationOptions,
+                onTaskSubmitted: ({ taskId, model, status }) => this.notifyTaskSubmitted?.({
+                    clientTaskId: body.clientTaskId || null,
+                    remoteTaskId: taskId,
+                    targetDir,
+                    model,
+                    prompt,
+                    kind: 'image',
+                    status,
+                    createdAt: new Date().toISOString()
+                })
+            });
             if (!result?.success && (body.provider || body.providerConfig)) {
                 throw new Error(result?.error || 'Image generation API failed');
             }
@@ -485,13 +524,14 @@ class FlowCanvasBridge {
 
         const committed = await this._commitBoardMutation(async () => {
             const { data: latestData, planService: latestPlanService } = this._loadWithPlanService();
-            const shouldAddToCanvas = result.provider !== 'builtin' || body.addToCanvas === true;
+            const shouldAddToCanvas = body.addToCanvas !== false
+                && (result.provider !== 'builtin' || body.addToCanvas === true);
             const item = shouldAddToCanvas
                 ? addBoardItem(latestData, result.filePath, {
                     x: body.x,
                     y: body.y,
-                    width: result.width,
-                    height: result.height
+                    width: Number.isFinite(body.canvasWidth) ? body.canvasWidth : result.width,
+                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height
                 })
                 : null;
 
@@ -514,16 +554,23 @@ class FlowCanvasBridge {
                 }
             }
 
-            this._saveAndNotify(latestData, 'mcp:image-generated');
+            if (item) this._saveAndNotify(latestData, 'mcp:image-generated');
             return {
                 item,
                 plan: body.planId ? latestPlanService.getPlan(body.planId) : null
             };
         });
+        if (result.taskId) {
+            this.notifyTaskCompleted?.({
+                remoteTaskId: result.taskId,
+                filePath: result.filePath
+            });
+        }
         return {
             item: committed.item,
             filePath: result.filePath,
             provider: result.provider,
+            taskId: result.taskId || null,
             image: {
                 width: result.width,
                 height: result.height
@@ -585,8 +632,8 @@ class FlowCanvasBridge {
                 : addBoardItem(latestData, result.filePath, {
                     x: body.x,
                     y: body.y,
-                    width: result.width,
-                    height: result.height
+                    width: Number.isFinite(body.canvasWidth) ? body.canvasWidth : result.width,
+                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height
                 });
 
             if (body.planId && body.rowId && item) {
@@ -605,7 +652,7 @@ class FlowCanvasBridge {
                 latestPlanService.updateRow(body.planId, body.rowId, { references });
             }
 
-            this._saveAndNotify(latestData, 'mcp:video-generated');
+            if (item) this._saveAndNotify(latestData, 'mcp:video-generated');
             return {
                 item,
                 plan: body.planId ? latestPlanService.getPlan(body.planId) : null
@@ -635,7 +682,7 @@ class FlowCanvasBridge {
         if (references.length === 0) throw new Error('\u6ca1\u6709\u53ef\u538b\u7f29\u7684\u53c2\u8003\u56fe\u7247');
 
         const addToCanvas = body?.addToCanvas !== false;
-        const temporaryTargetDir = path.join(app.getPath('temp'), 'flow-canvas-reference-compression');
+        const temporaryTargetDir = path.join(app.getPath('userData'), 'data', 'reference-cache');
         const requestedTargetDir = addToCanvas
             ? (body?.targetDir || this.getDefaultSaveFolder?.(data) || this.getFallbackSaveDir?.())
             : temporaryTargetDir;
@@ -661,14 +708,40 @@ class FlowCanvasBridge {
             const originalBytes = fs.statSync(sourcePath).size;
             if (originalBytes <= targetBytes) continue;
 
-            const compressed = await compressVideoReferenceImage(sourcePath, targetBytes);
-            const extension = compressed.mimeType === 'image/webp' ? '.webp' : '.jpg';
-            const filePath = path.join(
-                targetDir,
-                uniqueImageName('flow_compressed', path.basename(sourcePath, path.extname(sourcePath)), extension)
-            );
-            await fs.promises.writeFile(filePath, compressed.buffer);
-            const metadata = await sharp(compressed.buffer).metadata();
+            let compressed;
+            let filePath;
+            let metadata;
+            let referenceId = null;
+            let cacheReused = false;
+            if (addToCanvas) {
+                compressed = await compressVideoReferenceImage(sourcePath, targetBytes);
+                const extension = compressed.mimeType === 'image/webp' ? '.webp' : '.jpg';
+                filePath = path.join(
+                    targetDir,
+                    uniqueImageName('flow_compressed', path.basename(sourcePath, path.extname(sourcePath)), extension)
+                );
+                await fs.promises.writeFile(filePath, compressed.buffer);
+                metadata = await sharp(compressed.buffer).metadata();
+            } else {
+                const cached = await getReferenceCache().getOrCreateCompressed({
+                    sourcePath,
+                    targetBytes,
+                    compress: async () => {
+                        const output = await compressVideoReferenceImage(sourcePath, targetBytes);
+                        const outputMetadata = await sharp(output.buffer).metadata();
+                        return {
+                            ...output,
+                            width: outputMetadata.width || null,
+                            height: outputMetadata.height || null
+                        };
+                    }
+                });
+                compressed = { buffer: null, mimeType: cached.mimeType };
+                filePath = cached.filePath;
+                metadata = { width: cached.width, height: cached.height };
+                referenceId = cached.referenceId;
+                cacheReused = cached.cacheReused;
+            }
             const sourceItem = findBoardItem(data, reference.itemId)
                 || (data.items || []).find(item => normalizeFsPath(item.filePath) === normalizeFsPath(sourcePath));
             const sourceWidth = Number(sourceItem?.width);
@@ -689,9 +762,11 @@ class FlowCanvasBridge {
                 item: item ? describeBoardItem(item) : null,
                 filePath,
                 originalBytes,
-                compressedBytes: compressed.buffer.length,
+                compressedBytes: compressed.buffer?.length || fs.statSync(filePath).size,
                 width: metadata.width || null,
-                height: metadata.height || null
+                height: metadata.height || null,
+                referenceId,
+                cacheReused
             });
         }
 
@@ -756,7 +831,12 @@ class FlowCanvasBridge {
         this.notifyTaskCompleted?.({ remoteTaskId: resolvedTaskId, filePath });
         const item = body.addToCanvas === false
             ? null
-            : addBoardItem(data, filePath, { x: body.x, y: body.y });
+            : addBoardItem(data, filePath, {
+                x: body.x,
+                y: body.y,
+                width: body.canvasWidth,
+                height: body.canvasHeight
+            });
         this._saveAndNotify(data, 'mcp:video-recovered');
         return {
             item,
@@ -1067,7 +1147,8 @@ function normalizeSourceReference(reference, data) {
         itemId,
         filePath,
         name: String(reference.name || path.basename(filePath)).trim(),
-        kind: reference.kind ? String(reference.kind) : (reference.role ? String(reference.role) : 'source')
+        kind: reference.kind ? String(reference.kind) : (reference.role ? String(reference.role) : 'source'),
+        referenceId: reference.referenceId ? String(reference.referenceId) : null
     };
 }
 
@@ -1076,7 +1157,8 @@ function toRowReference(reference) {
         itemId: reference.itemId || '',
         filePath: reference.filePath,
         name: reference.name || path.basename(reference.filePath),
-        kind: reference.kind || 'source'
+        kind: reference.kind || 'source',
+        referenceId: reference.referenceId || null
     };
 }
 
@@ -1125,26 +1207,6 @@ function buildOpenAiImageEndpoint(endpoint, mode = 'generations') {
     }
 }
 
-function collectImageEditInputs(sourceReferences = []) {
-    return sourceReferences.map(reference => {
-        const filePath = String(reference?.filePath || '').trim();
-        const stats = fs.statSync(filePath);
-        if (stats.size > 50 * 1024 * 1024) {
-            throw new Error(`Image reference is larger than 50 MB: ${path.basename(filePath)}`);
-        }
-        const extension = path.extname(filePath).toLowerCase();
-        const mimeType = extension === '.png'
-            ? 'image/png'
-            : extension === '.webp'
-                ? 'image/webp'
-                : 'image/jpeg';
-        const base64 = fs.readFileSync(filePath).toString('base64');
-        return {
-            image_url: `data:${mimeType};base64,${base64}`
-        };
-    });
-}
-
 async function resolveGeneratedImageBuffer(image, endpoint) {
     const base64Value = String(image?.b64_json || image?.base64 || '').trim();
     if (base64Value) return Buffer.from(base64Value.replace(/\s+/g, ''), 'base64');
@@ -1178,6 +1240,84 @@ async function resolveGeneratedImageBuffer(image, endpoint) {
     return Buffer.from(await imageRes.arrayBuffer());
 }
 
+async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPayload, options = {}) {
+    const standardEndpoint = buildImageTaskEndpoint(generationEndpoint, taskId, options.location);
+    const midjourneyEndpoint = buildMidjourneyTaskEndpoint(generationEndpoint, taskId);
+    const taskEndpoints = (options.nativeMidjourney
+        ? [midjourneyEndpoint]
+        : [
+            standardEndpoint,
+            ...(isMidjourneyImageModel(options.model) ? [midjourneyEndpoint] : [])
+        ]).filter((value, index, values) => values.indexOf(value) === index);
+    let taskEndpointIndex = 0;
+    const deadline = Date.now() + 16 * 60 * 1000;
+    let payload = initialPayload;
+    let retryDelay = imageTaskRetryDelayMs(options.retryAfter);
+    let consecutiveConnectionFailures = 0;
+
+    while (Date.now() < deadline) {
+        const currentImage = getGeneratedImageData(payload);
+        if (currentImage) return { image: currentImage, payload, taskId };
+
+        const status = imageTaskStatus(payload);
+        if (isFailedImageTaskStatus(status)) {
+            const reason = imageTaskErrorMessage(payload) || '服务器未提供失败原因';
+            throw new Error(`图片生成任务失败：${reason}`);
+        }
+        if (isCompletedImageTaskStatus(status)) {
+            throw new Error('图片生成任务已完成，但响应中没有图片数据');
+        }
+
+        await sleep(retryDelay);
+        let response;
+        let text;
+        try {
+            let taskEndpoint = taskEndpoints[taskEndpointIndex];
+            ({ response, text } = await fetchTextWithRetry(taskEndpoint, {
+                method: 'GET',
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    Accept: 'application/json'
+                },
+                redirect: 'follow'
+            }, '查询图片任务状态'));
+            if ([404, 405].includes(response.status) && taskEndpointIndex < taskEndpoints.length - 1) {
+                taskEndpointIndex += 1;
+                taskEndpoint = taskEndpoints[taskEndpointIndex];
+                ({ response, text } = await fetchTextWithRetry(taskEndpoint, {
+                    method: 'GET',
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        Accept: 'application/json'
+                    },
+                    redirect: 'follow'
+                }, '查询 Midjourney 图片任务状态'));
+            }
+            consecutiveConnectionFailures = 0;
+        } catch (error) {
+            consecutiveConnectionFailures += 1;
+            if (consecutiveConnectionFailures < 8) {
+                console.warn('[FlowCanvasBridge] Image task polling interrupted; retrying:', error.message);
+                continue;
+            }
+            throw error;
+        }
+
+        if (!response.ok) {
+            const taskEndpoint = taskEndpoints[taskEndpointIndex];
+            throw new Error(`查询图片任务失败（${describeRemoteEndpoint(taskEndpoint)}）：HTTP ${response.status} ${text.slice(0, 1000)}`);
+        }
+        try {
+            payload = JSON.parse(text);
+        } catch (_) {
+            throw new Error('查询图片任务时，服务器未返回有效 JSON');
+        }
+        retryDelay = imageTaskRetryDelayMs(response.headers.get('retry-after'), retryDelay);
+    }
+
+    throw new Error('图片生成超时：等待 16 分钟后仍未完成');
+}
+
 async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
     try {
         const providerConfig = options.providerConfig || {};
@@ -1188,24 +1328,37 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
 
         const sourceImages = collectImageEditInputs(options.sourceReferences || []);
         const isEdit = sourceImages.length > 0;
-        const endpoint = buildOpenAiImageEndpoint(providerConfig.endpoint, isEdit ? 'edits' : 'generations');
         const model = process.env.FLOW_CANVAS_IMAGE_MODEL || providerConfig.model || options.model || 'gpt-image-2';
         const size = String(options.size || '').trim().replace(/\u00d7/g, 'x');
         const requestedQuality = String(options.quality || 'high').trim().toLowerCase();
         const quality = ['auto', 'low', 'medium', 'high'].includes(requestedQuality) ? requestedQuality : 'high';
-        const requestBody = {
-            model,
-            prompt,
-            n: Math.min(8, Math.max(1, Number(options.n) || 1)),
-            quality,
-            response_format: options.responseFormat === 'b64_json' ? 'b64_json' : 'url',
-            stream: false
-        };
-        if (size) requestBody.size = size;
-        if (isEdit) {
-            requestBody.images = sourceImages;
+        const nativeMidjourney = isMidjourneyImageModel(model);
+        const endpoint = nativeMidjourney
+            ? buildMidjourneySubmitEndpoint(providerConfig.endpoint)
+            : buildOpenAiImageEndpoint(providerConfig.endpoint, isEdit ? 'edits' : 'generations');
+        const requestBody = nativeMidjourney
+            ? buildMidjourneyImaginePayload(prompt, sourceImages, size)
+            : {
+                model,
+                prompt,
+                n: Math.min(8, Math.max(1, Number(options.n) || 1)),
+                quality,
+                response_format: options.responseFormat === 'b64_json' ? 'b64_json' : 'url',
+                stream: false
+            };
+        if (!nativeMidjourney && size) requestBody.size = size;
+        if (!nativeMidjourney && (options.webSearch === true || options.web_search === true)) requestBody.web_search = true;
+        let requestPayload;
+        let contentType;
+        if (isEdit && !nativeMidjourney) {
+            delete requestBody.stream;
+            const multipart = buildImageEditMultipart(requestBody, sourceImages);
+            requestPayload = multipart.body;
+            contentType = multipart.contentType;
         } else {
             requestBody.history_disabled = options.historyDisabled !== false;
+            requestPayload = JSON.stringify(requestBody);
+            contentType = 'application/json';
         }
 
         const controller = new AbortController();
@@ -1217,12 +1370,12 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json',
+                    'Content-Type': contentType,
                     Accept: 'application/json',
                     'Idempotency-Key': requestId,
                     'X-Log-Id': requestId
                 },
-                body: JSON.stringify(requestBody),
+                body: requestPayload,
                 signal: controller.signal,
                 redirect: 'follow'
             });
@@ -1237,10 +1390,50 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     error: '参考图片总大小超过 API 网关限制（HTTP 413）。请使用“批量转小”后重试。'
                 };
             }
-            return { success: false, error: `Image API failed: ${res.status} ${text.slice(0, 2000)}` };
+            return {
+                success: false,
+                error: imageHttpErrorMessage(res.status, text, { nativeMidjourney })
+            };
         }
-        const json = await res.json();
-        const image = json?.data?.[0];
+        let json;
+        try {
+            json = await res.json();
+        } catch (_) {
+            return { success: false, error: 'Image API did not return valid JSON' };
+        }
+        let image = getGeneratedImageData(json);
+        let taskId = '';
+        const location = res.headers.get('location');
+        if (isImageTaskPayload(json, res.status, location)) {
+            taskId = getImageTaskId(json, res.status, location);
+            options.onTaskSubmitted?.({
+                taskId,
+                model,
+                status: imageTaskStatus(json) || 'queued'
+            });
+            if (!image) {
+                const completed = await pollOpenAiImageTask(endpoint, apiKey, taskId, json, {
+                    location,
+                    retryAfter: res.headers.get('retry-after'),
+                    model,
+                    nativeMidjourney
+                });
+                image = completed.image;
+            }
+        } else if (res.status === 202) {
+            const reason = imageTaskErrorMessage(json);
+            return {
+                success: false,
+                error: reason
+                    ? `图片中转接受了任务，但丢失了任务 ID：${reason}`
+                    : '图片中转接受了任务，但没有返回任务 ID；请检查 NewAPI 是否正确转发异步响应的 Location 和响应体。'
+            };
+        } else if (nativeMidjourney) {
+            return {
+                success: false,
+                error: `Midjourney 提交失败：${imageTaskErrorMessage(json) || `code ${String(json?.code ?? 'unknown')}`}`
+            };
+        }
         const buffer = await resolveGeneratedImageBuffer(image, endpoint);
         if (!buffer) return { success: false, error: 'OpenAI response did not include image data' };
         const metadata = await sharp(buffer).metadata().catch(() => ({}));
@@ -1263,7 +1456,8 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             requestedSize: size || null,
             actualSize,
             sizeMatchesRequest: !size || !actualSize || actualSize.toLowerCase() === size.toLowerCase(),
-            endpointMode: isEdit ? 'edits' : 'generations'
+            endpointMode: nativeMidjourney ? 'midjourney-imagine' : (isEdit ? 'edits' : 'generations'),
+            taskId: taskId || null
         };
     } catch (error) {
         return { success: false, error: error.message };
@@ -1636,9 +1830,15 @@ async function uploadTemporaryReferenceBuffer({ buffer, mimeType, contentHash, c
                     ? parseTemporaryUploadUrl(provider, responseText)
                     : '';
                 if (uploadedUrl) {
-                    temporaryReferenceUrlCache.set(cacheKey, {
+                    const cacheEntry = {
                         url: uploadedUrl,
-                        expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS
+                        expiresAt: Date.now() + TEMP_REFERENCE_CACHE_TTL_MS,
+                        referenceId: `ref_${contentHash.slice(0, 24)}`,
+                        providerId: provider.id
+                    };
+                    temporaryReferenceUrlCache.set(cacheKey, cacheEntry);
+                    await getReferenceCache().setUpload(cacheKey, cacheEntry).catch(error => {
+                        console.warn('[FlowCanvasBridge] Failed to persist temporary upload cache:', error.message);
                     });
                     return uploadedUrl;
                 }
@@ -1679,6 +1879,11 @@ async function uploadTemporaryReference(dataUri, label, providers) {
     const cacheKey = `${temporaryUploadProviderFingerprint(providers)}:${contentHash}`;
     const cached = temporaryReferenceUrlCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.url;
+    const persisted = await getReferenceCache().getUpload(cacheKey);
+    if (persisted) {
+        temporaryReferenceUrlCache.set(cacheKey, persisted);
+        return persisted.url;
+    }
 
     const pending = temporaryReferenceUploadTasks.get(cacheKey);
     if (pending) return pending;
