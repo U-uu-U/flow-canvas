@@ -2,7 +2,7 @@
 // Flow Canvas — Electron Main Process
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, Menu, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, Menu, screen, safeStorage } = require('electron');
 const path = require('path');
 const util = require('util');
 const sharp = require('sharp');
@@ -13,6 +13,7 @@ const FlowCanvasBridge = require('./mcp-bridge');
 const BrowserSyncService = require('./browser-sync');
 const { handleLocalResourceRequest } = require('./local-resource');
 const { saveGenerationTrace } = require('./generation-trace-store');
+const { ApiConfigStore } = require('./api-config-store');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 const IS_MAC = process.platform === 'darwin';
@@ -34,6 +35,7 @@ let watcher = null;
 let thumbnailer = null;
 let flowCanvasBridge = null;
 let browserSyncService = null;
+let apiConfigStore = null;
 let mediaPreviewWasFullScreen = null;
 
 const isDev = !app.isPackaged;
@@ -117,8 +119,8 @@ function createWindow() {
             ? { trafficLightPosition: { x: 14, y: 11 } }
             : {
                 titleBarOverlay: {
-                    color: '#0f0f14',
-                    symbolColor: '#8a8f98',
+                    color: '#00000000',
+                    symbolColor: '#777c85',
                     height: 38
                 }
             }),
@@ -371,6 +373,14 @@ function restoreMainWindowFromOrb() {
 // ── 初始化服务 ──────────────────────────────────────────
 function initServices() {
     store = new Store();
+    apiConfigStore = new ApiConfigStore(app.getPath('userData'), {
+        protect: value => safeStorage.isEncryptionAvailable()
+            ? safeStorage.encryptString(value)
+            : null,
+        unprotect: value => safeStorage.isEncryptionAvailable()
+            ? safeStorage.decryptString(value)
+            : null
+    });
     browserSyncService = new BrowserSyncService(store);
     thumbnailer = new Thumbnailer();
     watcher = new Watcher(store, (event, filePath) => {
@@ -409,6 +419,9 @@ function initServices() {
         },
         notifyTaskCompleted: (event) => {
             browserSyncService?.markTaskCompleted(event.remoteTaskId, event.filePath);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('generation:task-completed', event);
+            }
         },
         notifyVideoProgress: (event) => {
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -601,6 +614,107 @@ function extractTextResponse(payload, providerType) {
         .join('');
 }
 
+async function prepareAgentAttachmentPayload(attachments = [], context = null) {
+    const typeLabels = { image: '图片', video: '视频', audio: '音频' };
+    const seen = new Set();
+    const normalized = (Array.isArray(attachments) ? attachments : [])
+        .map(attachment => {
+            const filePath = String(attachment?.filePath || '').trim();
+            const url = String(attachment?.url || '').trim();
+            const mediaType = ['image', 'video', 'audio'].includes(attachment?.mediaType)
+                ? attachment.mediaType
+                : null;
+            if (!mediaType || (!filePath && !url)) return null;
+            const key = `${mediaType}:${(filePath || url).replace(/\\/g, '/').toLowerCase()}`;
+            if (seen.has(key)) return null;
+            seen.add(key);
+            return {
+                filePath,
+                url,
+                mediaType,
+                name: String(attachment?.name || '').trim() || path.basename(filePath || url),
+                width: Number(attachment?.width) || null,
+                height: Number(attachment?.height) || null,
+                depth: Math.max(1, Number(attachment?.depth) || 1)
+            };
+        })
+        .filter(Boolean)
+        .slice(0, 32);
+
+    const imageInputs = [];
+    const lines = normalized.map((attachment, index) => {
+        const dimensions = attachment.width && attachment.height
+            ? `，画布尺寸 ${attachment.width}x${attachment.height}`
+            : '';
+        const location = attachment.filePath || attachment.url;
+        return `${index + 1}. [${typeLabels[attachment.mediaType]}] ${attachment.name}${dimensions}，上游深度 ${attachment.depth}，位置：${location}`;
+    });
+
+    for (let index = 0; index < normalized.length; index += 1) {
+        const attachment = normalized[index];
+        if (attachment.mediaType !== 'image') continue;
+        if (attachment.filePath) {
+            if (!fs.existsSync(attachment.filePath)) {
+                lines[index] += '（本地文件已断联，未作为视觉附件发送）';
+                continue;
+            }
+            try {
+                const preview = await sharp(attachment.filePath, { animated: false })
+                    .rotate()
+                    .resize({ width: 1280, height: 1280, fit: 'inside', withoutEnlargement: true })
+                    .jpeg({ quality: 84 })
+                    .toBuffer();
+                imageInputs.push({
+                    name: attachment.name,
+                    base64: preview.toString('base64')
+                });
+            } catch (error) {
+                lines[index] += `（图片读取失败：${error?.message || error}）`;
+            }
+        } else if (/^https?:\/\//i.test(attachment.url)) {
+            imageInputs.push({ name: attachment.name, url: attachment.url });
+        }
+    }
+
+    const source = context?.nodeId ? {
+        nodeId: String(context.nodeId),
+        nodeType: ['image', 'video'].includes(context.nodeType) ? context.nodeType : 'generation',
+        title: String(context.title || '生成节点').slice(0, 120),
+        prompt: String(context.prompt || '').slice(0, 12000),
+        originalPrompt: String(context.originalPrompt || '').slice(0, 12000),
+        effectivePrompt: String(context.effectivePrompt || context.prompt || '').slice(0, 12000),
+        upstreamPrompts: (Array.isArray(context.upstreamPrompts) ? context.upstreamPrompts : [])
+            .map(prompt => String(prompt || '').slice(0, 6000))
+            .filter(Boolean)
+            .slice(0, 20),
+        parameters: context.parameters && typeof context.parameters === 'object'
+            ? context.parameters
+            : {}
+    } : null;
+    const contextLines = [];
+    if (source) {
+        contextLines.push(`当前目标节点：${source.title}（${source.nodeType}，ID ${source.nodeId}）`);
+        if (source.originalPrompt) contextLines.push(`当前节点原始提示词：${source.originalPrompt}`);
+        if (source.upstreamPrompts.length) {
+            contextLines.push(`当前节点的上游提示词：\n${source.upstreamPrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join('\n')}`);
+        }
+        if (source.effectivePrompt) contextLines.push(`当前合并提示词：${source.effectivePrompt}`);
+        if (Object.keys(source.parameters).length) {
+            contextLines.push(`当前固定生成参数：${JSON.stringify(source.parameters)}`);
+        }
+    }
+    if (lines.length > 0) {
+        contextLines.push(`当前节点的上游素材清单：\n${lines.join('\n')}`);
+        if (imageInputs.length > 0) {
+            contextLines.push(`其中 ${imageInputs.length} 张可读取图片已按清单顺序作为视觉附件发送，请结合图片实际内容回答。`);
+        }
+        if (normalized.some(attachment => attachment.mediaType !== 'image')) {
+            contextLines.push('视频和音频目前以本地素材元数据提供；不要声称已经直接观看或收听其内容。');
+        }
+    }
+    return { contextText: contextLines.join('\n\n'), imageInputs };
+}
+
 async function generateTextWithProvider(request = {}) {
     const provider = request?.provider || {};
     const providerType = String(provider.type || 'openai').toLowerCase();
@@ -623,25 +737,59 @@ async function generateTextWithProvider(request = {}) {
     if (messages.length === 0) return { success: false, error: '文字请求内容为空' };
 
     try {
+        const attachmentPayload = await prepareAgentAttachmentPayload(
+            request.attachments,
+            request.attachmentContext
+        );
+        const lastUserIndex = messages.findLastIndex(message => message.role === 'user');
+        const messageText = lastUserIndex >= 0
+            ? [messages[lastUserIndex].content, attachmentPayload.contextText].filter(Boolean).join('\n\n')
+            : attachmentPayload.contextText;
         const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
         let body;
         if (providerType === 'anthropic') {
             headers['x-api-key'] = provider.apiKey;
             headers['anthropic-version'] = '2023-06-01';
             const system = messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n');
+            const providerMessages = messages
+                .filter(message => message.role !== 'system')
+                .map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content }));
+            const providerUserIndex = providerMessages.findLastIndex(message => message.role === 'user');
+            if (providerUserIndex >= 0 && (attachmentPayload.contextText || attachmentPayload.imageInputs.length > 0)) {
+                providerMessages[providerUserIndex].content = [
+                    ...attachmentPayload.imageInputs.map(image => image.base64
+                        ? {
+                            type: 'image',
+                            source: { type: 'base64', media_type: 'image/jpeg', data: image.base64 }
+                        }
+                        : { type: 'image', source: { type: 'url', url: image.url } }),
+                    { type: 'text', text: messageText }
+                ];
+            }
             body = {
                 model: provider.model,
                 max_tokens: Math.max(1, Math.min(8192, Number(request.maxTokens) || 2048)),
                 ...(system ? { system } : {}),
-                messages: messages
-                    .filter(message => message.role !== 'system')
-                    .map(message => ({ role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content }))
+                messages: providerMessages
             };
         } else {
             headers.Authorization = `Bearer ${provider.apiKey}`;
+            const providerMessages = messages.map(message => ({ ...message }));
+            if (lastUserIndex >= 0 && (attachmentPayload.contextText || attachmentPayload.imageInputs.length > 0)) {
+                providerMessages[lastUserIndex].content = [
+                    { type: 'text', text: messageText },
+                    ...attachmentPayload.imageInputs.map(image => ({
+                        type: 'image_url',
+                        image_url: {
+                            url: image.base64 ? `data:image/jpeg;base64,${image.base64}` : image.url,
+                            detail: 'high'
+                        }
+                    }))
+                ];
+            }
             body = {
                 model: provider.model,
-                messages,
+                messages: providerMessages,
                 stream: false,
                 ...(Number.isFinite(Number(request.temperature)) ? { temperature: Number(request.temperature) } : {})
             };
@@ -1086,6 +1234,20 @@ ipcMain.handle('store:load', () => store.load());
 ipcMain.handle('store:save', (_, data) => store.save(data));
 ipcMain.on('store:saveSync', (event, data) => {
     event.returnValue = store.save(data);
+});
+
+ipcMain.handle('api-config:load', () => {
+    if (!apiConfigStore) return { success: false, error: 'API 配置仓库尚未初始化' };
+    const result = apiConfigStore.load();
+    if (result.recoveredFromBackup) {
+        console.warn('[API Config] 主配置损坏，已从加密备份恢复');
+    }
+    return result;
+});
+
+ipcMain.handle('api-config:save', (_, config) => {
+    if (!apiConfigStore) return { success: false, error: 'API 配置仓库尚未初始化' };
+    return apiConfigStore.save(config || {});
 });
 
 ipcMain.handle('metrics:getBoardUsage', (event) => {

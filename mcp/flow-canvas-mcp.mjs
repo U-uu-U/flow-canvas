@@ -204,8 +204,9 @@ const tools = [
                     description: 'OpenAI-compatible size string, for example 1024x1024, 2880x2880, 3840x2160, or 2160x3840.'
                 },
                 quality: { type: 'string', default: 'high' },
-                responseFormat: { type: 'string', enum: ['url', 'b64_json'], default: 'url' },
-                historyDisabled: { type: 'boolean', default: true }
+                responseFormat: { type: 'string', enum: ['url', 'b64_json'], default: 'b64_json' },
+                historyDisabled: { type: 'boolean', default: true },
+                stream: { type: 'boolean', default: false }
             },
             required: ['prompt']
         }

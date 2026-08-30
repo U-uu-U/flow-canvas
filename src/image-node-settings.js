@@ -32,6 +32,22 @@ function parseRatio(value) {
     return width > 0 && height > 0 ? width / height : null;
 }
 
+export function inferClosestAspectRatio(width, height, candidates = [], fallback = '') {
+    const targetRatio = (Number(width) || 0) / (Number(height) || 0);
+    const supported = (Array.isArray(candidates) ? candidates : [])
+        .map(value => ({ value: String(value), ratio: parseRatio(value) }))
+        .filter(candidate => Number.isFinite(candidate.ratio) && candidate.ratio > 0);
+    if (!Number.isFinite(targetRatio) || targetRatio <= 0 || !supported.length) {
+        return supported.some(candidate => candidate.value === fallback)
+            ? fallback
+            : (supported[0]?.value || fallback);
+    }
+    return supported.reduce((best, candidate) => {
+        const distance = Math.abs(Math.log(candidate.ratio / targetRatio));
+        return !best || distance < best.distance ? { ...candidate, distance } : best;
+    }, null)?.value || fallback;
+}
+
 export function inferImageResolutionTier(width, height) {
     const longest = Math.max(Number(width) || 0, Number(height) || 0);
     if (longest >= 3200) return '4K';

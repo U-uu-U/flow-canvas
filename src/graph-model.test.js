@@ -32,9 +32,9 @@ test('getPorts: media 节点按扩展名推导输出类型', () => {
         [{ name: 'out', dataType: 'video' }]);
     assert.deepStrictEqual(G.getPorts(media('m4', 'C:/a/b.pdf')).outputs,
         [{ name: 'out', dataType: 'file' }]);
-    // media 只有一个 source 输入，用来承接 history 溯源边
+    // media 的 source 输入可以承接多条溯源或参考边
     assert.deepStrictEqual(G.getPorts(media('m5', 'C:/a/b.png')).inputs,
-        [{ name: 'source', dataType: 'any' }]);
+        [{ name: 'source', dataType: 'any', multi: true }]);
 });
 
 test('getPorts: 空媒体节点按持久化 mediaType 推导输出类型', () => {
@@ -115,20 +115,13 @@ test('canConnect: 端口不存在被拒', () => {
     assert.strictEqual(G.canConnect(from, 'text', to, 'nope', []).ok, false);
 });
 
-test('canConnect: input 端口已占用时返回待替换的旧连线', () => {
-    const a = op('t1', 'text');
-    const b = op('t2', 'text');
-    const target = media('m1', 'result.png');
-    const existing = [conn('t1', 'text', 'm1', 'source')];
-
-    const res = G.canConnect(b, 'text', target, 'source', existing);
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.replaces.id, existing[0].id);
-
-    // 完全相同的连线视为重复，不是替换
-    const dup = G.canConnect(a, 'text', target, 'source', existing);
-    assert.strictEqual(dup.ok, false);
-    assert.match(dup.reason, /已存在/);
+test('canConnect: 普通图片 source 端口允许多条参考连线', () => {
+    const a = media('a', 'a.png');
+    const b = media('b', 'b.png');
+    const target = media('target', 'target.png');
+    const existing = [conn('a', 'out', 'target', 'source')];
+    const res = G.canConnect(b, 'out', target, 'source', existing);
+    assert.deepStrictEqual(res, { ok: true });
 });
 
 test('canConnect: 拒绝直接成环', () => {
@@ -278,8 +271,14 @@ test('collectInputs: 统一端口收集文本和多种素材并兼容旧端口�
     assert.deepStrictEqual(got.source, ['local-res://a.png', 'local-res://b.png', '一只猫']);
 });
 
-test('collectInputContext: 保留连接 ID、来源节点和原始值', () => {
-    const source = { ...media('image-a', 'C:/refs/a.png'), fromNodeId: 'older-generator' };
+test('collectInputContext: 保留连接 ID、来源节点、素材尺寸和原始值', () => {
+    const source = {
+        ...media('image-a', 'C:/refs/a.png'),
+        fromNodeId: 'older-generator',
+        mediaType: 'image',
+        width: 300,
+        height: 450
+    };
     const target = op('gen', 'image');
     const edge = conn('image-a', 'out', 'gen', 'source');
     const cache = new Map([['image-a', { out: 'local-res://' + encodeURIComponent('C:/refs/a.png') }]]);
@@ -297,7 +296,10 @@ test('collectInputContext: 保留连接 ID、来源节点和原始值', () => {
             kind: 'media',
             nodeType: null,
             filePath: 'C:/refs/a.png',
-            fromNodeId: 'older-generator'
+            fromNodeId: 'older-generator',
+            mediaType: 'image',
+            width: 300,
+            height: 450
         }
     }]);
 });

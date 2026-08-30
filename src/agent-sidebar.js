@@ -14,12 +14,25 @@ import {
 } from './shortcut-settings.js';
 import {
     IMAGE_RESOLUTION_TIERS,
+    inferClosestAspectRatio,
     inferImageResolutionTier
 } from './image-node-settings.js';
 import {
     inferProviderCapability,
-    providerHasCapability
+    providerHasCapability,
+    isGptImage2Model
 } from './provider-capabilities.js';
+import {
+    getImageGenerationPreferences as readImageGenerationPreferences,
+    normalizeImageGenerationPreferences,
+    saveImageGenerationPreferences as writeImageGenerationPreferences
+} from './image-generation-preferences.js';
+import {
+    buildAgentImageCompilationMessages,
+    normalizeAgentGenerationSource,
+    parseAgentImageCompilationResponse
+} from './agent-image-generation.js';
+import { reconcileApiConfig } from './api-config-recovery.js';
 
 const DEFAULT_TEMPLATES = {
     'ravenhash-text': { name: 'RavenHash Text', capability: 'text', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: '' },
@@ -63,18 +76,20 @@ const VIDEO_MODEL_PROFILES = [
     {
         match: /minimax[^a-z0-9]*h3/i,
         label: 'MiniMax H3',
-        ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
-        resolutions: ['2k'],
-        durations: Array.from({ length: 11 }, (_, index) => index + 5),
+        ratios: ['adaptive', '16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
+        resolutions: ['2k', '4k', '1080p', '768p', '480p'],
+        durations: Array.from({ length: 12 }, (_, index) => index + 4),
         durationControl: 'slider',
         supportsWebSearch: false,
         supportsCameraFixed: false,
         supportsGeneratedAudio: false,
         supportsWatermark: false,
-        referenceLimits: { image: 5, video: 1, audio: 1 },
-        defaultRatio: '16:9',
+        referenceLimits: { image: 9, video: 3, audio: 3 },
+        defaultRatio: 'adaptive',
+        resolveAdaptiveRatio: true,
+        adaptiveFallbackRatio: '16:9',
         defaultResolution: '2k',
-        defaultDuration: 5
+        defaultDuration: 4
     },
     {
         match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
@@ -153,11 +168,56 @@ const IMAGE_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-image-prompt-height';
 const VIDEO_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-video-prompt-height';
 const PROJECT_COMPOSER_CACHE_STORAGE_KEY = 'flow-canvas-project-composer-cache-v1';
 const PROJECT_COMPOSER_DEFAULT_KEY = '__no_project__';
+const AGENT_CONVERSATION_STORAGE_KEY = 'flow-canvas-agent-conversations-v1';
+const AGENT_CONVERSATION_MESSAGE_LIMIT = 80;
+const AGENT_PENDING_ATTACHMENTS_STORAGE_KEY = 'flow-canvas-agent-pending-attachments-v1';
+const AGENT_PENDING_ATTACHMENT_LIMIT = 32;
+const AGENT_SKILLS = Object.freeze([
+    {
+        id: 'board-planning',
+        name: '画板规划',
+        category: 'planning',
+        description: '整理阶段、交付物和执行顺序',
+        instruction: '优先把目标拆成可执行阶段，并检查规划表中的依赖、缺项和交付物。'
+    },
+    {
+        id: 'shot-planning',
+        name: '镜头规划',
+        category: 'planning',
+        description: '组织镜头、节奏和画面衔接',
+        instruction: '涉及视频时，明确镜头目的、景别、运动、时长和前后镜头的连续关系。'
+    },
+    {
+        id: 'prompt-refine',
+        name: '提示词优化',
+        category: 'creative',
+        description: '强化目标、约束和参考图职责',
+        instruction: '优化生成提示词时保留原始意图，明确主体、构图、风格、限制条件和每张参考图的职责。'
+    },
+    {
+        id: 'asset-audit',
+        name: '素材检查',
+        category: 'review',
+        description: '核对素材完整性和引用关系',
+        instruction: '先核对选中素材、文件夹组和引用关系，明确指出缺失、断联、重复或不适合当前任务的素材。'
+    },
+    {
+        id: 'node-diagnosis',
+        name: '节点排错',
+        category: 'review',
+        description: '检查节点输入、连线和生成配置',
+        instruction: '排查节点问题时按输入、连线、模型配置、请求参数、任务状态和输出落地的顺序定位原因。'
+    }
+]);
+const AGENT_SKILL_IDS = new Set(AGENT_SKILLS.map(skill => skill.id));
 const PROMPT_PRESETS_STORAGE_KEY = 'flow-canvas-prompt-presets-v1';
 const PROMPT_PRESET_LIMIT = 100;
 const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
 const GENERATION_TASK_LIMIT = 100;
 const BROWSER_SYNC_EVENT_IDS_KEY = 'flow-canvas-browser-sync-event-ids';
+const API_PROVIDERS_STORAGE_KEY = 'flow-canvas-agent-providers';
+const API_GLOBAL_STORAGE_KEY = 'flow-canvas-agent-global';
+const API_META_STORAGE_KEY = 'flow-canvas-api-config-meta-v1';
 const RESERVED_SHORTCUTS = Object.freeze([
     { binding: 'Mod+C', label: '复制到剪贴板' },
     { binding: 'Mod+V', label: '粘贴素材' },
@@ -177,10 +237,19 @@ export class AgentSidebar {
             videoProviderId: null,
             imageIntentPipelineMode: 'compiled',
             imageIntentPipelineVersion: 2,
-            defaultTemporaryImageCompression: false
+            defaultTemporaryImageCompression: false,
+            imageGenerationPreferences: normalizeImageGenerationPreferences({}),
+            agentExecutionMode: 'auto',
+            agentSkillIds: []
         };
         // 存储所有的 provider { id, name, capability, type, endpoint, apiKey, model }
         this.providers = [];
+        this.apiConfigRevision = 0;
+        this.apiConfigUpdatedAt = '';
+        this.apiConfigHydrated = false;
+        this.apiConfigSaveTimer = null;
+        this.pendingDurableApiConfigSave = false;
+        this.localApiConfigPresent = false;
 
         this.editingProviderId = null;
         this.imageGenerationMode = 'text';
@@ -192,6 +261,12 @@ export class AgentSidebar {
         this.projectComposerSaveTimer = null;
         this.restoringProjectComposer = false;
         this.selectedPromptPresetIds = { image: '', video: '' };
+        this.messages = [];
+        this.pendingAgentAttachments = [];
+        this.pendingAgentSource = null;
+        this.isAgentSending = false;
+        this.agentModelKind = 'text';
+        this.agentSkillCategory = 'all';
 
         // DOM 引用
         this.settingsPanel = document.getElementById('agentSettings');
@@ -221,9 +296,41 @@ export class AgentSidebar {
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
         this.modePicker = document.getElementById('creationModePicker');
         this.modeTitle = document.getElementById('creationModeTitle');
+        this.messagesEl = document.getElementById('agentMessages');
+        this.inputEl = document.getElementById('agentInput');
+        this.agentAttachmentTray = document.getElementById('agentAttachmentTray');
+        this.agentAttachmentList = document.getElementById('agentAttachmentList');
+        this.agentContextSummary = document.getElementById('agentContextSummary');
+        this.agentAttachmentClear = document.getElementById('agentAttachmentClear');
+        this.sendBtn = document.getElementById('agentSendBtn');
+        this.planBtn = document.getElementById('agentPlanBtn');
+        this.clearBtn = document.getElementById('agentClearBtn');
+        this.agentComposerControls = document.getElementById('agentComposerControls');
+        this.agentAddMenuBtn = document.getElementById('agentAddMenuBtn');
+        this.agentAddPopover = document.getElementById('agentAddPopover');
+        this.agentModelMenuBtn = document.getElementById('agentModelMenuBtn');
+        this.agentModelPopover = document.getElementById('agentModelPopover');
+        this.agentModelTabs = document.getElementById('agentModelTabs');
+        this.agentModelSummary = document.getElementById('agentModelSummary');
+        this.agentComposerModelList = document.getElementById('agentComposerModelList');
+        this.agentModelSettingsBtn = document.getElementById('agentModelSettingsBtn');
+        this.agentSkillMenuBtn = document.getElementById('agentSkillMenuBtn');
+        this.agentSkillPopover = document.getElementById('agentSkillPopover');
+        this.agentSkillSearchInput = document.getElementById('agentSkillSearchInput');
+        this.agentSkillTabs = document.getElementById('agentSkillTabs');
+        this.agentSkillList = document.getElementById('agentSkillList');
+        this.agentSkillCount = document.getElementById('agentSkillCount');
+        this.agentSkillClearBtn = document.getElementById('agentSkillClearBtn');
+        this.agentSkillDoneBtn = document.getElementById('agentSkillDoneBtn');
+        this.agentExecutionMenuBtn = document.getElementById('agentExecutionMenuBtn');
+        this.agentExecutionPopover = document.getElementById('agentExecutionPopover');
+        this.agentExecutionModeLabel = document.getElementById('agentExecutionModeLabel');
+        this.taskHistoryDock = document.getElementById('taskHistoryDock');
         this.taskHistoryBtn = document.getElementById('agentTaskHistoryBtn');
         this.taskHistoryBadge = document.getElementById('agentTaskHistoryBadge');
         this.taskHistoryPanel = document.getElementById('agentTaskHistory');
+        this.taskHistoryCloseBtn = document.getElementById('agentTaskHistoryClose');
+        this.taskHistoryFilters = document.getElementById('agentTaskHistoryFilters');
         this.taskHistoryList = document.getElementById('agentTaskHistoryList');
         this.taskHistorySummary = document.getElementById('agentTaskHistorySummary');
         this.agentSidebar = document.getElementById('agentSidebar');
@@ -282,6 +389,10 @@ export class AgentSidebar {
         this.imageClearReferencesBtn = document.getElementById('imageClearReferencesBtn');
         this.imageSizeSelect = document.getElementById('imageSizeSelect');
         this.imageQualitySelect = document.getElementById('imageQualitySelect');
+        this.imageApiOptions = document.getElementById('imageApiOptions');
+        this.imageResponseFormatSelect = document.getElementById('imageResponseFormatSelect');
+        this.imageHistoryDisabled = document.getElementById('imageHistoryDisabled');
+        this.imageStream = document.getElementById('imageStream');
         this.imageWorkspaceStatus = document.getElementById('imageWorkspaceStatus');
         this.imageGenerateBtn = document.getElementById('imageGenerateBtn');
         this.imageGenerateMessage = document.getElementById('imageGenerateMessage');
@@ -293,6 +404,7 @@ export class AgentSidebar {
         this.imagePromptPresetStatus = document.getElementById('imagePromptPresetStatus');
         this.currentMode = 'review';
         this.taskHistoryOpen = false;
+        this.taskHistoryFilter = 'all';
         this.generationTasks = [];
         this.processedBrowserSyncEventIds = new Set();
         this.browserSyncPolling = false;
@@ -324,6 +436,7 @@ export class AgentSidebar {
 
         // 绑定事件
         this._bindEvents();
+        this._syncHudState();
 
         // 渲染 UI
         this._renderProviderList();
@@ -337,7 +450,11 @@ export class AgentSidebar {
         this._renderGenerationTasks();
         this._renderPromptPresets('image');
         this._renderPromptPresets('video');
+        this.apiConfigReady = this._restoreDurableApiConfig();
+        this._restoreAgentConversation(this.activeProjectCacheKey);
+        this._restorePendingAgentAttachments(this.activeProjectCacheKey);
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
+        window.flowCanvas?.browserSync?.onTaskCompleted?.((event) => this._handleTaskCompleted(event));
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
         this._pollBrowserSyncEvents();
         this.browserSyncTimer = setInterval(() => this._pollBrowserSyncEvents(), 4000);
@@ -377,6 +494,807 @@ export class AgentSidebar {
         return value || PROJECT_COMPOSER_DEFAULT_KEY;
     }
 
+    _loadAgentConversationStore() {
+        try {
+            const value = JSON.parse(localStorage.getItem(AGENT_CONVERSATION_STORAGE_KEY) || '{}');
+            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    _normalizeAgentMessages(messages = []) {
+        return (Array.isArray(messages) ? messages : [])
+            .filter(message => ['user', 'assistant'].includes(message?.role)
+                && typeof message.content === 'string'
+                && message.content.trim())
+            .slice(-AGENT_CONVERSATION_MESSAGE_LIMIT)
+            .map(message => ({
+                role: message.role,
+                content: message.content.slice(0, 12000)
+            }));
+    }
+
+    _saveAgentConversation(key = this.activeProjectCacheKey, messages = this.messages) {
+        try {
+            const store = this._loadAgentConversationStore();
+            store[key] = {
+                messages: this._normalizeAgentMessages(messages),
+                updatedAt: new Date().toISOString()
+            };
+            localStorage.setItem(AGENT_CONVERSATION_STORAGE_KEY, JSON.stringify(store));
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to save Agent conversation:', error);
+        }
+    }
+
+    _restoreAgentConversation(key = this.activeProjectCacheKey) {
+        const state = this._loadAgentConversationStore()[key];
+        this.messages = this._normalizeAgentMessages(state?.messages);
+        this._renderAgentMessages();
+    }
+
+    _loadPendingAgentAttachmentStore() {
+        try {
+            const value = JSON.parse(localStorage.getItem(AGENT_PENDING_ATTACHMENTS_STORAGE_KEY) || '{}');
+            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    _normalizePendingAgentAttachments(attachments = []) {
+        const seen = new Set();
+        return (Array.isArray(attachments) ? attachments : [])
+            .map(attachment => {
+                const filePath = String(attachment?.filePath || '').trim();
+                const url = String(attachment?.url || '').trim();
+                const mediaType = ['image', 'video', 'audio'].includes(attachment?.mediaType)
+                    ? attachment.mediaType
+                    : null;
+                if (!mediaType || (!filePath && !url)) return null;
+                const key = `${mediaType}:${(filePath || url).replace(/\\/g, '/').toLowerCase()}`;
+                if (seen.has(key)) return null;
+                seen.add(key);
+                return {
+                    itemId: attachment?.itemId || null,
+                    sourceNodeId: attachment?.sourceNodeId || null,
+                    filePath,
+                    url,
+                    mediaType,
+                    name: String(attachment?.name || '').trim()
+                        || (filePath || url).replace(/\\/g, '/').split('/').pop()
+                        || `${mediaType}素材`,
+                    width: Number(attachment?.width) || null,
+                    height: Number(attachment?.height) || null,
+                    depth: Math.max(1, Number(attachment?.depth) || 1)
+                };
+            })
+            .filter(Boolean)
+            .slice(0, AGENT_PENDING_ATTACHMENT_LIMIT);
+    }
+
+    _normalizePendingAgentSource(source = null) {
+        return normalizeAgentGenerationSource(source);
+    }
+
+    _savePendingAgentAttachments(
+        key = this.activeProjectCacheKey,
+        attachments = this.pendingAgentAttachments,
+        source = this.pendingAgentSource
+    ) {
+        try {
+            const store = this._loadPendingAgentAttachmentStore();
+            const normalized = this._normalizePendingAgentAttachments(attachments);
+            const normalizedSource = this._normalizePendingAgentSource(source);
+            if (normalized.length === 0 && !normalizedSource) delete store[key];
+            else {
+                store[key] = {
+                    attachments: normalized,
+                    source: normalizedSource,
+                    updatedAt: new Date().toISOString()
+                };
+            }
+            localStorage.setItem(AGENT_PENDING_ATTACHMENTS_STORAGE_KEY, JSON.stringify(store));
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to save pending Agent attachments:', error);
+        }
+    }
+
+    _restorePendingAgentAttachments(key = this.activeProjectCacheKey) {
+        const state = this._loadPendingAgentAttachmentStore()[key];
+        this.pendingAgentAttachments = this._normalizePendingAgentAttachments(state?.attachments);
+        this.pendingAgentSource = this._normalizePendingAgentSource(state?.source);
+        this._renderPendingAgentAttachments();
+    }
+
+    _pendingAgentAttachmentPreview(attachment) {
+        const preview = document.createElement('span');
+        preview.className = 'agent-attachment-preview';
+        if (attachment.mediaType === 'image') {
+            const image = document.createElement('img');
+            image.alt = '';
+            image.draggable = false;
+            image.src = attachment.filePath
+                ? `local-res://${encodeURIComponent(attachment.filePath)}`
+                : attachment.url;
+            image.addEventListener('error', () => preview.classList.add('failed'));
+            preview.appendChild(image);
+        }
+        const icon = document.createElement('svg');
+        icon.className = 'flow-icon agent-attachment-fallback';
+        icon.setAttribute('aria-hidden', 'true');
+        const use = document.createElement('use');
+        use.setAttribute('href', `./icons/flow-icons.svg#icon-${attachment.mediaType}`);
+        icon.appendChild(use);
+        preview.appendChild(icon);
+        return preview;
+    }
+
+    _renderPendingAgentAttachments() {
+        if (!this.agentAttachmentTray || !this.agentAttachmentList) return;
+        const attachments = this.pendingAgentAttachments;
+        const source = this.pendingAgentSource;
+        this.agentAttachmentTray.hidden = attachments.length === 0 && !source;
+        this.agentAttachmentList.hidden = attachments.length === 0;
+        if (this.agentContextSummary) {
+            const summary = [];
+            if (source?.effectivePrompt) summary.push('提示词');
+            const parameterCount = Object.keys(source?.parameters || {}).length;
+            if (parameterCount) summary.push(`${parameterCount} 项参数`);
+            if (attachments.length) summary.push(`${attachments.length} 个素材`);
+            this.agentContextSummary.textContent = summary.join(' · ') || '节点上下文';
+        }
+        this.agentAttachmentList.replaceChildren();
+        attachments.forEach((attachment, index) => {
+            const item = document.createElement('div');
+            item.className = `agent-attachment-item ${attachment.mediaType}`;
+            item.title = attachment.name;
+            item.appendChild(this._pendingAgentAttachmentPreview(attachment));
+
+            const type = document.createElement('span');
+            type.className = 'agent-attachment-type';
+            type.textContent = { image: '图片', video: '视频', audio: '音频' }[attachment.mediaType];
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.dataset.removeAgentAttachment = String(index);
+            remove.title = `移除 ${attachment.name}`;
+            remove.setAttribute('aria-label', `移除 ${attachment.name}`);
+            remove.innerHTML = '<svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>';
+            item.append(type, remove);
+            this.agentAttachmentList.appendChild(item);
+        });
+    }
+
+    _removePendingAgentAttachment(index) {
+        if (!Number.isInteger(index) || index < 0 || index >= this.pendingAgentAttachments.length) return;
+        this.pendingAgentAttachments.splice(index, 1);
+        if (this.pendingAgentAttachments.length === 0) this.pendingAgentSource = null;
+        this._savePendingAgentAttachments();
+        this._renderPendingAgentAttachments();
+        this.inputEl?.focus();
+    }
+
+    _clearPendingAgentAttachments(key = this.activeProjectCacheKey) {
+        if (key === this.activeProjectCacheKey) {
+            this.pendingAgentAttachments = [];
+            this.pendingAgentSource = null;
+            this._renderPendingAgentAttachments();
+        }
+        this._savePendingAgentAttachments(key, [], null);
+    }
+
+    _pendingAgentAttachmentSignature(attachments = [], source = null) {
+        const normalized = this._normalizePendingAgentAttachments(attachments);
+        const sourceId = this._normalizePendingAgentSource(source)?.nodeId || '';
+        const keys = normalized.map(attachment =>
+            `${attachment.mediaType}:${(attachment.filePath || attachment.url).replace(/\\/g, '/').toLowerCase()}`
+        );
+        return `${sourceId}|${keys.join('\u0000')}`;
+    }
+
+    _consumePendingAgentAttachments(key, attachments, source) {
+        const expectedSignature = this._pendingAgentAttachmentSignature(attachments, source);
+        if (key === this.activeProjectCacheKey) {
+            const currentSignature = this._pendingAgentAttachmentSignature(
+                this.pendingAgentAttachments,
+                this.pendingAgentSource
+            );
+            if (currentSignature === expectedSignature) this._clearPendingAgentAttachments(key);
+            return;
+        }
+        const state = this._loadPendingAgentAttachmentStore()[key];
+        const storedSignature = this._pendingAgentAttachmentSignature(state?.attachments, state?.source);
+        if (storedSignature === expectedSignature) this._clearPendingAgentAttachments(key);
+    }
+
+    prepareAgentFromNode(details = {}) {
+        const previousSourceId = this.pendingAgentSource?.nodeId || null;
+        this.pendingAgentAttachments = this._normalizePendingAgentAttachments(details.attachments);
+        this.pendingAgentSource = this._normalizePendingAgentSource(details);
+        this._savePendingAgentAttachments();
+        this._renderPendingAgentAttachments();
+        this.setMode('agent');
+        if (this.inputEl && (!this.inputEl.value.trim() || previousSourceId !== this.pendingAgentSource?.nodeId)) {
+            this.inputEl.value = this.pendingAgentSource?.effectivePrompt || '';
+            this.inputEl.style.height = 'auto';
+            this.inputEl.style.height = `${Math.min(this.inputEl.scrollHeight, 120)}px`;
+        }
+        setTimeout(() => this.inputEl?.focus(), 140);
+        return {
+            count: this.pendingAgentAttachments.length,
+            nodeId: this.pendingAgentSource?.nodeId || null
+        };
+    }
+
+    _renderAgentWelcome() {
+        if (!this.messagesEl) return;
+        const welcome = document.createElement('div');
+        welcome.className = 'agent-welcome';
+        welcome.innerHTML = `
+            <div class="agent-welcome-icon" aria-hidden="true">
+                <svg class="flow-icon"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+            </div>
+            <div class="agent-welcome-text">
+                <strong>开始一项画板任务</strong>
+                <span>AI Agent</span>
+            </div>
+        `;
+        this.messagesEl.appendChild(welcome);
+    }
+
+    _renderAgentMessages() {
+        if (!this.messagesEl) return;
+        this.messagesEl.innerHTML = '';
+        if (this.messages.length === 0) {
+            this._renderAgentWelcome();
+            return;
+        }
+        this.messages.forEach(message => {
+            const element = this._appendAgentMessageElement(message.role, message.content);
+            if (message.role === 'assistant') this._attachAgentPlanAction(element, message.content);
+        });
+        this._scrollAgentMessages();
+    }
+
+    _appendAgentMessageElement(role, content) {
+        if (!this.messagesEl) return null;
+        this.messagesEl.querySelector('.agent-welcome')?.remove();
+        const element = document.createElement('div');
+        element.className = `agent-msg ${role}`;
+
+        const roleElement = document.createElement('span');
+        roleElement.className = 'agent-msg-role';
+        roleElement.setAttribute('aria-hidden', 'true');
+        if (role === 'assistant') {
+            roleElement.innerHTML = '<svg class="flow-icon flow-icon-sm"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>';
+        } else {
+            roleElement.textContent = role === 'user' ? '你' : '!';
+        }
+
+        const body = document.createElement('div');
+        body.className = 'agent-msg-body';
+        const label = document.createElement('span');
+        label.className = 'agent-msg-label';
+        label.textContent = role === 'assistant' ? 'AI Agent' : role === 'user' ? '你' : '请求错误';
+        const contentElement = document.createElement('div');
+        contentElement.className = 'agent-msg-content';
+        contentElement.textContent = content;
+        body.append(label, contentElement);
+        element.append(roleElement, body);
+        this.messagesEl.appendChild(element);
+        this._scrollAgentMessages();
+        return element;
+    }
+
+    _appendAgentError(message) {
+        return this._appendAgentMessageElement('error', message);
+    }
+
+    _appendAgentTyping() {
+        if (!this.messagesEl) return null;
+        const element = this._appendAgentMessageElement('assistant', '');
+        if (!element) return null;
+        element.classList.add('agent-typing');
+        const contentElement = element.querySelector('.agent-msg-content');
+        if (contentElement) {
+            contentElement.innerHTML = '<span class="agent-loading-ring" aria-hidden="true"></span><span class="agent-typing-line"></span>';
+        }
+        this._scrollAgentMessages();
+        return element;
+    }
+
+    _scrollAgentMessages() {
+        requestAnimationFrame(() => {
+            if (this.messagesEl) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+        });
+    }
+
+    _clearAgentConversation() {
+        this.messages = [];
+        this._saveAgentConversation();
+        this._renderAgentMessages();
+        this.inputEl?.focus();
+    }
+
+    _agentComposerPopoverEntries() {
+        return [
+            { name: 'add', button: this.agentAddMenuBtn, popover: this.agentAddPopover },
+            { name: 'model', button: this.agentModelMenuBtn, popover: this.agentModelPopover },
+            { name: 'skill', button: this.agentSkillMenuBtn, popover: this.agentSkillPopover },
+            { name: 'execution', button: this.agentExecutionMenuBtn, popover: this.agentExecutionPopover }
+        ];
+    }
+
+    _closeAgentComposerPopovers(except = null) {
+        this._agentComposerPopoverEntries().forEach(entry => {
+            if (!entry.popover || entry.name === except) return;
+            entry.popover.hidden = true;
+            entry.button?.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    _toggleAgentComposerPopover(name) {
+        const entry = this._agentComposerPopoverEntries().find(candidate => candidate.name === name);
+        if (!entry?.popover) return;
+        const shouldOpen = entry.popover.hidden;
+        this._closeAgentComposerPopovers();
+        if (!shouldOpen) return;
+
+        if (name === 'model') this._renderAgentComposerModels();
+        if (name === 'skill') this._renderAgentSkillList();
+        if (name === 'execution') this._renderAgentExecutionMode();
+        entry.popover.hidden = false;
+        entry.button?.setAttribute('aria-expanded', 'true');
+        if (name === 'skill') requestAnimationFrame(() => this.agentSkillSearchInput?.focus());
+    }
+
+    _setAgentModelKind(kind) {
+        this.agentModelKind = ['image', 'video'].includes(kind) ? kind : 'text';
+        this._renderAgentComposerModels();
+    }
+
+    _renderAgentComposerModels() {
+        if (!this.agentComposerModelList) return;
+        const kind = this.agentModelKind;
+        const allProviders = this._providerVariants();
+        const providers = allProviders.filter(provider => kind === 'video'
+            ? this._isVideoProvider(provider)
+            : kind === 'image'
+                ? this._isImageProvider(provider)
+                : this._isTextProvider(provider));
+        const selectedId = kind === 'video'
+            ? this.globalConfig.videoProviderId
+            : kind === 'image'
+                ? this.globalConfig.imageProviderId
+                : this.globalConfig.textProviderId;
+
+        this.agentModelTabs?.querySelectorAll('[data-agent-model-kind]').forEach(button => {
+            const selected = button.dataset.agentModelKind === kind;
+            button.classList.toggle('active', selected);
+            button.setAttribute('aria-selected', String(selected));
+        });
+        if (this.agentModelSummary) {
+            const configured = new Set(allProviders.map(provider => provider.id)).size;
+            this.agentModelSummary.textContent = configured > 0 ? `已配置 ${configured}` : '尚未配置';
+        }
+
+        this.agentComposerModelList.innerHTML = '';
+        if (providers.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'agent-composer-empty';
+            const title = document.createElement('strong');
+            title.textContent = `没有可用的${kind === 'text' ? '文字' : kind === 'image' ? '图片' : '视频'}模型`;
+            const detail = document.createElement('span');
+            detail.textContent = '请先在 API 设置中添加模型。';
+            empty.append(title, detail);
+            this.agentComposerModelList.appendChild(empty);
+            return;
+        }
+
+        const iconId = kind === 'video' ? 'icon-video' : kind === 'image' ? 'icon-image' : 'icon-sparkles';
+        providers.forEach(provider => {
+            const selected = provider.id === selectedId;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'agent-composer-list-item agent-model-list-item';
+            button.classList.toggle('selected', selected);
+            button.dataset.agentProviderId = provider.id;
+            button.dataset.agentModelKind = kind;
+            button.setAttribute('aria-pressed', String(selected));
+
+            const icon = document.createElement('span');
+            icon.className = 'agent-composer-list-icon';
+            icon.innerHTML = `<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#${iconId}"></use></svg>`;
+            const copy = document.createElement('span');
+            copy.className = 'agent-composer-list-copy';
+            const name = document.createElement('strong');
+            name.textContent = provider.model || provider.name || '未命名模型';
+            const meta = document.createElement('small');
+            meta.textContent = provider.name || '未命名 API';
+            copy.append(name, meta);
+            const check = document.createElement('span');
+            check.className = 'agent-composer-list-check';
+            check.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>';
+            button.append(icon, copy, check);
+            this.agentComposerModelList.appendChild(button);
+        });
+    }
+
+    _selectAgentComposerModel(kind, providerId) {
+        if (kind === 'video') this._setVideoProvider(providerId);
+        else if (kind === 'image') this._setImageProvider(providerId);
+        else this._setTextProvider(providerId);
+        this._renderAgentComposerModels();
+    }
+
+    _selectedAgentSkillIds() {
+        return (Array.isArray(this.globalConfig.agentSkillIds) ? this.globalConfig.agentSkillIds : [])
+            .filter(id => AGENT_SKILL_IDS.has(id));
+    }
+
+    _activeAgentSkills() {
+        const selectedIds = new Set(this._selectedAgentSkillIds());
+        return AGENT_SKILLS.filter(skill => selectedIds.has(skill.id));
+    }
+
+    _renderAgentSkillList() {
+        if (!this.agentSkillList) return;
+        const selectedIds = new Set(this._selectedAgentSkillIds());
+        const keyword = String(this.agentSkillSearchInput?.value || '').trim().toLowerCase();
+        const category = this.agentSkillCategory;
+        const skills = AGENT_SKILLS.filter(skill => {
+            const matchesCategory = category === 'all' || skill.category === category;
+            const searchable = `${skill.name} ${skill.description}`.toLowerCase();
+            return matchesCategory && (!keyword || searchable.includes(keyword));
+        });
+
+        this.agentSkillTabs?.querySelectorAll('[data-agent-skill-category]').forEach(button => {
+            const selected = button.dataset.agentSkillCategory === category;
+            button.classList.toggle('active', selected);
+            button.setAttribute('aria-selected', String(selected));
+        });
+        if (this.agentSkillCount) {
+            this.agentSkillCount.textContent = String(selectedIds.size);
+            this.agentSkillCount.hidden = selectedIds.size === 0;
+        }
+        if (this.agentSkillClearBtn) this.agentSkillClearBtn.disabled = selectedIds.size === 0;
+
+        this.agentSkillList.innerHTML = '';
+        if (skills.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'agent-composer-empty';
+            const title = document.createElement('strong');
+            title.textContent = '没有匹配的 Skill';
+            const detail = document.createElement('span');
+            detail.textContent = '换一个关键词或分类。';
+            empty.append(title, detail);
+            this.agentSkillList.appendChild(empty);
+            return;
+        }
+
+        skills.forEach(skill => {
+            const selected = selectedIds.has(skill.id);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'agent-composer-list-item agent-skill-list-item';
+            button.classList.toggle('selected', selected);
+            button.dataset.agentSkillId = skill.id;
+            button.setAttribute('aria-pressed', String(selected));
+            const icon = document.createElement('span');
+            icon.className = 'agent-composer-list-icon';
+            icon.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-skill"></use></svg>';
+            const copy = document.createElement('span');
+            copy.className = 'agent-composer-list-copy';
+            const name = document.createElement('strong');
+            name.textContent = skill.name;
+            const meta = document.createElement('small');
+            meta.textContent = skill.description;
+            copy.append(name, meta);
+            const check = document.createElement('span');
+            check.className = 'agent-composer-list-check';
+            check.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>';
+            button.append(icon, copy, check);
+            this.agentSkillList.appendChild(button);
+        });
+    }
+
+    _toggleAgentSkill(skillId) {
+        if (!AGENT_SKILL_IDS.has(skillId)) return;
+        const selectedIds = new Set(this._selectedAgentSkillIds());
+        if (selectedIds.has(skillId)) selectedIds.delete(skillId);
+        else selectedIds.add(skillId);
+        this.globalConfig.agentSkillIds = [...selectedIds];
+        this._saveConfig();
+        this._renderAgentSkillList();
+    }
+
+    _renderAgentExecutionMode() {
+        const mode = this.globalConfig.agentExecutionMode === 'ask' ? 'ask' : 'auto';
+        if (this.agentExecutionModeLabel) this.agentExecutionModeLabel.textContent = mode === 'ask' ? '询问' : '自动';
+        this.agentExecutionPopover?.querySelectorAll('[data-agent-execution-mode]').forEach(button => {
+            const selected = button.dataset.agentExecutionMode === mode;
+            button.classList.toggle('selected', selected);
+            button.setAttribute('aria-pressed', String(selected));
+        });
+    }
+
+    _setAgentExecutionMode(mode) {
+        this.globalConfig.agentExecutionMode = mode === 'ask' ? 'ask' : 'auto';
+        this._saveConfig();
+        this._renderAgentExecutionMode();
+        this._closeAgentComposerPopovers();
+        this.inputEl?.focus();
+    }
+
+    _agentBoardContext() {
+        try {
+            return this.options.getPlanningContext?.() || null;
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to read planning context:', error);
+            return null;
+        }
+    }
+
+    _agentSystemPrompt() {
+        const context = this._agentBoardContext();
+        const serialized = context ? JSON.stringify(context) : '{}';
+        const executionInstruction = this.globalConfig.agentExecutionMode === 'ask'
+            ? '当前为“询问”模式。涉及应用规划、批量修改或改变画板结构时，先提出一个明确的确认问题；用户确认前不要输出可应用的 JSON 规划。'
+            : '当前为“自动”模式。可以直接完成分析并返回可应用的规划结果，但不要声称已经执行用户尚未触发的操作。';
+        const skillInstructions = this._activeAgentSkills().map(skill => `${skill.name}：${skill.instruction}`);
+        return [
+            '你是 Flow Canvas 的 AI Agent。回答要直接、可执行，并以当前画板数据为准。',
+            '你可以读取当前项目的规划表、文件夹组和用户选中的素材。不要声称看不到已经出现在上下文中的内容。',
+            '当用户要求补全规划表时，最后输出一个 JSON 数组；每项可使用 stage、title、role、content、assets、output、status、notes 字段。',
+            executionInstruction,
+            ...(skillInstructions.length > 0 ? [`已启用 Skill：\n${skillInstructions.join('\n')}`] : []),
+            `当前画板上下文：${serialized.slice(0, 24000)}`
+        ].join('\n\n');
+    }
+
+    _extractAgentPlanRows(content) {
+        const text = String(content || '');
+        const candidates = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match => match[1]);
+        candidates.push(text);
+        for (const candidate of candidates) {
+            const start = candidate.indexOf('[');
+            const end = candidate.lastIndexOf(']');
+            if (start < 0 || end <= start) continue;
+            try {
+                const rows = JSON.parse(candidate.slice(start, end + 1));
+                if (Array.isArray(rows) && rows.length > 0) return rows;
+            } catch (_) { }
+        }
+        return null;
+    }
+
+    _attachAgentPlanAction(messageElement, content) {
+        const rows = this._extractAgentPlanRows(content);
+        if (!messageElement || !rows || !this.options.applyPlanSuggestion) return;
+        const actions = document.createElement('div');
+        actions.className = 'agent-msg-actions';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'agent-apply-plan-btn';
+        button.textContent = '应用到规划表';
+        button.addEventListener('click', () => {
+            const applied = this.options.applyPlanSuggestion(rows);
+            button.textContent = applied ? '已应用' : '应用失败';
+            button.disabled = true;
+        });
+        actions.appendChild(button);
+        (messageElement.querySelector('.agent-msg-body') || messageElement).appendChild(actions);
+    }
+
+    _agentImageSkillInstructions() {
+        return this._activeAgentSkills().map(skill => `${skill.name}：${skill.instruction}`);
+    }
+
+    async generateImageFromNode(details = {}, instruction = '', { fromSidebar = false } = {}) {
+        const canRefreshContext = details?.nodeId && typeof this.options.getAgentNodeContext === 'function';
+        const latest = canRefreshContext ? this.options.getAgentNodeContext(details.nodeId) : null;
+        if (canRefreshContext && !latest) {
+            const reason = '当前图片生成节点已不存在，请重新选择节点。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+        const context = latest || details;
+        const attachments = this._normalizePendingAgentAttachments(
+            context?.attachments?.length ? context.attachments : this.pendingAgentAttachments
+        );
+        const source = this._normalizePendingAgentSource(context || this.pendingAgentSource);
+        if (!source || source.nodeType !== 'image') {
+            const reason = '当前 Agent 上下文没有可执行的图片生成节点。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+        if (this.isAgentSending) {
+            return { ok: false, reason: 'Agent 正在整理上一条请求' };
+        }
+
+        this.pendingAgentAttachments = attachments;
+        this.pendingAgentSource = source;
+        this._savePendingAgentAttachments();
+        this._renderPendingAgentAttachments();
+        this.setMode('agent');
+
+        const provider = this._getTextProvider();
+        if (!provider?.endpoint || !provider?.apiKey || !provider?.model) {
+            const reason = '请先通过设置配置并选择文字 API。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+        if (!window.flowCanvas?.ai?.generateText) {
+            const reason = '本地文字 AI 接口不可用，请完全退出并重新启动 Flow Canvas。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+
+        const userInstruction = String(instruction || '').trim();
+        const displayPrompt = userInstruction || source.effectivePrompt || source.prompt;
+        const conversationKey = this.activeProjectCacheKey;
+        const requestMessages = this._normalizeAgentMessages([
+            ...this.messages,
+            { role: 'user', content: displayPrompt }
+        ]);
+        this.messages = requestMessages;
+        this._appendAgentMessageElement('user', displayPrompt);
+        this._saveAgentConversation(conversationKey, requestMessages);
+        if (fromSidebar && this.inputEl) {
+            this.inputEl.value = '';
+            this.inputEl.style.height = 'auto';
+        }
+
+        const compilationMessages = buildAgentImageCompilationMessages({
+            source,
+            instruction: userInstruction,
+            skillInstructions: this._agentImageSkillInstructions()
+        });
+        this.isAgentSending = true;
+        if (this.sendBtn) this.sendBtn.disabled = true;
+        const typing = this._appendAgentTyping();
+        let compilation;
+        try {
+            const result = await window.flowCanvas.ai.generateText({
+                provider,
+                attachments,
+                attachmentContext: source,
+                messages: compilationMessages,
+                maxTokens: 4096,
+                temperature: 0.2
+            });
+            if (!result?.success) throw new Error(result?.error || '文字 API 请求失败');
+            compilation = parseAgentImageCompilationResponse(result.text, source.effectivePrompt || source.prompt);
+            if (!compilation.prompt) throw new Error('Agent 没有返回可执行的生图提示词');
+        } catch (error) {
+            typing?.remove();
+            const reason = `Agent 整理失败：${error?.message || error}`;
+            if (this.activeProjectCacheKey === conversationKey) this._appendAgentError(reason);
+            return { ok: false, reason };
+        } finally {
+            this.isAgentSending = false;
+            if (this.sendBtn) this.sendBtn.disabled = false;
+        }
+
+        typing?.remove();
+        const assistantContent = compilation.summary
+            ? `已整理并提交生图：${compilation.summary}\n\n${compilation.prompt}`
+            : `已整理并提交生图：\n\n${compilation.prompt}`;
+        const completedMessages = this._normalizeAgentMessages([
+            ...requestMessages,
+            { role: 'assistant', content: assistantContent }
+        ]);
+        if (this.activeProjectCacheKey === conversationKey) {
+            this.messages = completedMessages;
+            this._appendAgentMessageElement('assistant', assistantContent);
+        }
+        this._saveAgentConversation(conversationKey, completedMessages);
+
+        try {
+            const execution = await this.options.executeImageNodeFromAgent?.({
+                nodeId: source.nodeId,
+                prompt: compilation.prompt,
+                summary: compilation.summary,
+                source,
+                attachments
+            });
+            if (!execution) throw new Error('画布没有接收 Agent 生图任务');
+            if (execution.ok === false) throw new Error(execution.reason || '图片生成失败');
+            return execution;
+        } catch (error) {
+            const reason = `图片生成失败：${error?.message || error}`;
+            if (this.activeProjectCacheKey === conversationKey) this._appendAgentError(reason);
+            return { ok: false, reason };
+        } finally {
+            if (this.activeProjectCacheKey === conversationKey) this.inputEl?.focus();
+        }
+    }
+
+    async _sendAgentMessage(prompt = null) {
+        if (prompt == null && this.pendingAgentSource?.nodeType === 'image' && this.getImageIntentPipelineMode() !== 'off') {
+            const latest = this.options.getAgentNodeContext?.(this.pendingAgentSource.nodeId) || {
+                ...this.pendingAgentSource,
+                attachments: this.pendingAgentAttachments
+            };
+            return this.generateImageFromNode(latest, this.inputEl?.value || '', { fromSidebar: true });
+        }
+        const text = String(prompt ?? this.inputEl?.value ?? '').trim();
+        if (!text || this.isAgentSending) return;
+        const conversationKey = this.activeProjectCacheKey;
+        const pendingAttachments = this._normalizePendingAgentAttachments(this.pendingAgentAttachments);
+        const pendingSource = this._normalizePendingAgentSource(this.pendingAgentSource);
+        const provider = this._getTextProvider();
+        if (!provider?.endpoint || !provider?.apiKey || !provider?.model) {
+            this._appendAgentError('请先通过右上角设置配置并选择文字 API。');
+            return;
+        }
+        if (!window.flowCanvas?.ai?.generateText) {
+            this._appendAgentError('本地文字 AI 接口不可用，请完全退出并重新启动 Flow Canvas。');
+            return;
+        }
+
+        const requestMessages = this._normalizeAgentMessages([
+            ...this.messages,
+            { role: 'user', content: text }
+        ]);
+        this.messages = requestMessages;
+        this._appendAgentMessageElement('user', text);
+        this._saveAgentConversation(conversationKey, requestMessages);
+        if (this.inputEl) {
+            this.inputEl.value = '';
+            this.inputEl.style.height = 'auto';
+        }
+
+        this.isAgentSending = true;
+        if (this.sendBtn) this.sendBtn.disabled = true;
+        const typing = this._appendAgentTyping();
+        try {
+            const result = await window.flowCanvas.ai.generateText({
+                provider,
+                attachments: pendingAttachments,
+                attachmentContext: pendingSource,
+                messages: [
+                    { role: 'system', content: this._agentSystemPrompt() },
+                    ...requestMessages.slice(-24)
+                ],
+                maxTokens: 4096
+            });
+            if (!result?.success) throw new Error(result?.error || '文字 API 请求失败');
+            const content = String(result.text || '').trim() || '模型没有返回可显示的文本。';
+            const completedMessages = this._normalizeAgentMessages([
+                ...requestMessages,
+                { role: 'assistant', content }
+            ]);
+            typing?.remove();
+            if (this.activeProjectCacheKey === conversationKey) {
+                this.messages = completedMessages;
+                const messageElement = this._appendAgentMessageElement('assistant', content);
+                this._attachAgentPlanAction(messageElement, content);
+            }
+            this._saveAgentConversation(conversationKey, completedMessages);
+            this._consumePendingAgentAttachments(conversationKey, pendingAttachments, pendingSource);
+        } catch (error) {
+            typing?.remove();
+            if (this.activeProjectCacheKey === conversationKey) {
+                this._appendAgentError(`请求失败：${error?.message || error}`);
+            }
+        } finally {
+            this.isAgentSending = false;
+            if (this.sendBtn) this.sendBtn.disabled = false;
+            if (this.activeProjectCacheKey === conversationKey) this.inputEl?.focus();
+        }
+    }
+
+    _assistAgentPlanning() {
+        const context = this._agentBoardContext();
+        const hasPlan = Array.isArray(context?.plans) && context.plans.length > 0;
+        const prompt = hasPlan
+            ? '请检查当前项目的规划表，找出缺项和不合理之处并给出可直接应用的优化版本。'
+            : '请结合当前项目和选中素材，建立一份 3 到 6 行的通用创作规划表。';
+        void this._sendAgentMessage(prompt);
+    }
+
     _loadProjectComposerCache() {
         try {
             const value = JSON.parse(localStorage.getItem(PROJECT_COMPOSER_CACHE_STORAGE_KEY) || '{}');
@@ -389,7 +1307,9 @@ export class AgentSidebar {
     _serializeReferenceEntries(entries = []) {
         return (Array.isArray(entries) ? entries : []).map(entry => ({
             id: entry?.id || entry?.itemId || null,
-            filePath: entry?.filePath || null
+            filePath: entry?.filePath || null,
+            width: Number(entry?.width) || null,
+            height: Number(entry?.height) || null
         })).filter(entry => entry.id || entry.filePath);
     }
 
@@ -402,10 +1322,14 @@ export class AgentSidebar {
             imageGenerationMode: this.imageGenerationMode,
             imageSettings: {
                 size: this.imageSizeSelect?.value || '',
-                quality: this.imageQualitySelect?.value || ''
+                quality: this.imageQualitySelect?.value || '',
+                responseFormat: this.imageResponseFormatSelect?.value || 'url',
+                historyDisabled: this.imageHistoryDisabled?.checked !== false,
+                stream: Boolean(this.imageStream?.checked)
             },
             videoSettings: {
                 ratio: this.videoRatioSelect?.value || '',
+                ratioMode: this.videoRatioSelect?.value === 'adaptive' ? 'auto' : 'manual',
                 resolution: this.videoResolutionSelect?.value || '',
                 duration: this.videoDurationSelect?.value || '',
                 cameraFixed: Boolean(this.videoCameraFixed?.checked),
@@ -467,9 +1391,20 @@ export class AgentSidebar {
         };
         setSelectValue(this.imageSizeSelect, state?.imageSettings?.size);
         setSelectValue(this.imageQualitySelect, state?.imageSettings?.quality);
+        setSelectValue(this.imageResponseFormatSelect, state?.imageSettings?.responseFormat);
+        if (this.imageHistoryDisabled && state?.imageSettings?.historyDisabled != null) {
+            this.imageHistoryDisabled.checked = Boolean(state.imageSettings.historyDisabled);
+        }
+        if (this.imageStream && state?.imageSettings?.stream != null) {
+            this.imageStream.checked = Boolean(state.imageSettings.stream);
+        }
         setSelectValue(this.videoResolutionSelect, state?.videoSettings?.resolution);
 
-        const ratio = String(state?.videoSettings?.ratio || '');
+        const videoProfile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
+        const legacyH3Ratio = videoProfile.resolveAdaptiveRatio === true && !state?.videoSettings?.ratioMode;
+        const ratio = legacyH3Ratio
+            ? 'adaptive'
+            : String(state?.videoSettings?.ratio || '');
         if (ratio && this.videoRatioGrid?.querySelector(`[data-ratio="${CSS.escape(ratio)}"]`)) {
             this.videoRatioSelect.value = ratio;
             this.videoRatioGrid.querySelectorAll('[data-ratio]').forEach(button => {
@@ -506,9 +1441,15 @@ export class AgentSidebar {
         const nextKey = this._projectCacheKey(projectId);
         clearTimeout(this.projectComposerSaveTimer);
         this.projectComposerSaveTimer = null;
-        if (saveCurrent) this._saveProjectComposer(this.activeProjectCacheKey);
+        if (saveCurrent) {
+            this._saveProjectComposer(this.activeProjectCacheKey);
+            this._saveAgentConversation(this.activeProjectCacheKey);
+            this._savePendingAgentAttachments(this.activeProjectCacheKey);
+        }
         this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
         this.activeProjectCacheKey = nextKey;
+        this._restoreAgentConversation(nextKey);
+        this._restorePendingAgentAttachments(nextKey);
 
         const state = this._loadProjectComposerCache()[nextKey] || null;
         this.restoringProjectComposer = true;
@@ -621,6 +1562,23 @@ export class AgentSidebar {
         this.selectedPromptPresetIds[normalizedKind] = preset.id;
         this._renderPromptPresets(normalizedKind);
         return { ...preset };
+    }
+
+    deletePromptPreset(kind, presetId) {
+        const normalizedKind = kind === 'video' ? 'video' : 'image';
+        const requestedId = String(presetId || '').trim();
+        if (!requestedId) return false;
+        const presets = this._getPromptPresets(normalizedKind);
+        if (!presets.some(preset => preset.id === requestedId)) return false;
+        this._storePromptPresets(
+            normalizedKind,
+            presets.filter(preset => preset.id !== requestedId)
+        );
+        if (this.selectedPromptPresetIds[normalizedKind] === requestedId) {
+            this.selectedPromptPresetIds[normalizedKind] = '';
+        }
+        this._renderPromptPresets(normalizedKind);
+        return true;
     }
 
     _setPromptPresetStatus(kind, message, state = '') {
@@ -937,14 +1895,10 @@ export class AgentSidebar {
     }
 
     _bindEvents() {
-        const exitCreationMode = () => {
-            this.setMode('review');
-        };
-
-        // 悬停选择创作模式，点击则把主窗口收进置顶浮动按钮。
+        // 主 HUD：左键打开 Agent，右键把主窗口收进置顶浮动按钮。
         const toggleBtn = document.getElementById('agentToggleBtn');
         let collapsingToOrb = false;
-        toggleBtn?.addEventListener('click', async () => {
+        const collapseToOrb = async () => {
             if (collapsingToOrb) return;
             collapsingToOrb = true;
             toggleBtn.classList.add('activating');
@@ -961,13 +1915,32 @@ export class AgentSidebar {
                 toggleBtn.removeAttribute('aria-busy');
                 collapsingToOrb = false;
             }
+        };
+        toggleBtn?.addEventListener('click', event => {
+            if (event.button !== 0) return;
+            if (document.body.classList.contains('agent-open')) {
+                this.modePicker?.classList.remove('mode-picker-visible');
+                if (this.currentMode === 'settings') {
+                    this.setMode('review');
+                    return;
+                }
+                this.close();
+                return;
+            }
+            this.setMode('agent');
         });
-
-        toggleBtn?.addEventListener('mouseenter', () => this._showModePicker());
-        toggleBtn?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
-        this.modePicker?.addEventListener('mouseenter', () => this._showModePicker());
-        this.modePicker?.addEventListener('mouseleave', () => this._scheduleModePickerHide());
-        document.getElementById('creationModeVideoBtn')?.addEventListener('click', () => this.setMode('video'));
+        toggleBtn?.addEventListener('contextmenu', event => {
+            event.preventDefault();
+            void collapseToOrb();
+        });
+        toggleBtn?.addEventListener('pointerenter', () => this._showModePicker());
+        toggleBtn?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
+        toggleBtn?.addEventListener('focusin', () => this._showModePicker());
+        toggleBtn?.addEventListener('focusout', () => this._scheduleModePickerHide());
+        this.modePicker?.addEventListener('pointerenter', () => this._showModePicker());
+        this.modePicker?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
+        this.modePicker?.addEventListener('focusin', () => this._showModePicker());
+        this.modePicker?.addEventListener('focusout', () => this._scheduleModePickerHide());
         document.getElementById('creationModeSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
         document.getElementById('creationModeReviewBtn')?.addEventListener('click', () => this.setMode('review'));
         this.settingsTabs?.addEventListener('click', event => {
@@ -988,7 +1961,95 @@ export class AgentSidebar {
             void this._setDefaultAssetLibraryFolder(this.assetLibraryFolderSelect.value);
         });
         document.addEventListener('keydown', event => this._captureShortcut(event), true);
-        this.taskHistoryBtn?.addEventListener('click', () => this._setTaskHistoryOpen(!this.taskHistoryOpen));
+        this.sendBtn?.addEventListener('click', () => {
+            this._closeAgentComposerPopovers();
+            void this._sendAgentMessage();
+        });
+        this.planBtn?.addEventListener('click', () => {
+            this._closeAgentComposerPopovers();
+            this._assistAgentPlanning();
+        });
+        this.clearBtn?.addEventListener('click', () => {
+            this._closeAgentComposerPopovers();
+            this._clearAgentConversation();
+        });
+        this.agentAddMenuBtn?.addEventListener('click', () => this._toggleAgentComposerPopover('add'));
+        this.agentModelMenuBtn?.addEventListener('click', () => this._toggleAgentComposerPopover('model'));
+        this.agentSkillMenuBtn?.addEventListener('click', () => this._toggleAgentComposerPopover('skill'));
+        this.agentExecutionMenuBtn?.addEventListener('click', () => this._toggleAgentComposerPopover('execution'));
+        this.agentModelTabs?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-model-kind]');
+            if (button) this._setAgentModelKind(button.dataset.agentModelKind);
+        });
+        this.agentComposerModelList?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-provider-id]');
+            if (button) this._selectAgentComposerModel(button.dataset.agentModelKind, button.dataset.agentProviderId);
+        });
+        this.agentModelSettingsBtn?.addEventListener('click', () => {
+            this._closeAgentComposerPopovers();
+            this.setMode('settings', 'api');
+        });
+        this.agentSkillSearchInput?.addEventListener('input', () => this._renderAgentSkillList());
+        this.agentSkillTabs?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-skill-category]');
+            if (!button) return;
+            this.agentSkillCategory = ['planning', 'creative', 'review'].includes(button.dataset.agentSkillCategory)
+                ? button.dataset.agentSkillCategory
+                : 'all';
+            this._renderAgentSkillList();
+        });
+        this.agentSkillList?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-skill-id]');
+            if (button) this._toggleAgentSkill(button.dataset.agentSkillId);
+        });
+        this.agentSkillClearBtn?.addEventListener('click', () => {
+            this.globalConfig.agentSkillIds = [];
+            this._saveConfig();
+            this._renderAgentSkillList();
+        });
+        this.agentSkillDoneBtn?.addEventListener('click', () => {
+            this._closeAgentComposerPopovers();
+            this.inputEl?.focus();
+        });
+        this.agentExecutionPopover?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-execution-mode]');
+            if (button) this._setAgentExecutionMode(button.dataset.agentExecutionMode);
+        });
+        this.agentAttachmentList?.addEventListener('click', event => {
+            const button = event.target.closest('[data-remove-agent-attachment]');
+            if (button) this._removePendingAgentAttachment(Number(button.dataset.removeAgentAttachment));
+        });
+        this.agentAttachmentClear?.addEventListener('click', () => this._clearPendingAgentAttachments());
+        this.inputEl?.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+            event.preventDefault();
+            void this._sendAgentMessage();
+        });
+        this.inputEl?.addEventListener('input', () => {
+            this.inputEl.style.height = 'auto';
+            this.inputEl.style.height = `${Math.min(this.inputEl.scrollHeight, 120)}px`;
+        });
+        this.taskHistoryBtn?.addEventListener('click', event => {
+            event.stopPropagation();
+            const open = !this.taskHistoryOpen;
+            if (open && this.currentMode !== 'review') this.setMode('review');
+            this._setTaskHistoryOpen(open);
+            this.modePicker?.classList.remove('mode-picker-visible');
+        });
+        this.taskHistoryCloseBtn?.addEventListener('click', () => this._setTaskHistoryOpen(false));
+        this.taskHistoryFilters?.addEventListener('click', event => {
+            const button = event.target.closest('[data-task-kind]');
+            if (!button) return;
+            this.taskHistoryFilter = ['image', 'video'].includes(button.dataset.taskKind)
+                ? button.dataset.taskKind
+                : 'all';
+            this.taskHistoryFilters.querySelectorAll('[data-task-kind]').forEach(candidate => {
+                const selected = candidate.dataset.taskKind === this.taskHistoryFilter;
+                candidate.classList.toggle('active', selected);
+                candidate.setAttribute('aria-selected', String(selected));
+            });
+            this._renderGenerationTasks();
+        });
         this.taskHistoryList?.addEventListener('click', (event) => {
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
             if (copyPromptButton) {
@@ -997,6 +2058,20 @@ export class AgentSidebar {
             }
             const retryButton = event.target.closest('[data-retry-task]');
             if (retryButton) this._retryGenerationTask(retryButton.dataset.retryTask);
+        });
+        document.addEventListener('pointerdown', event => {
+            if (!this.taskHistoryOpen
+                || this.taskHistoryDock?.contains(event.target)
+                || this.taskHistoryBtn?.contains(event.target)) return;
+            this._setTaskHistoryOpen(false);
+        });
+        document.addEventListener('pointerdown', event => {
+            if (this.agentComposerControls?.contains(event.target)) return;
+            this._closeAgentComposerPopovers();
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && this.taskHistoryOpen) this._setTaskHistoryOpen(false);
+            if (event.key === 'Escape') this._closeAgentComposerPopovers();
         });
         this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
         ['image', 'video'].forEach(kind => {
@@ -1016,6 +2091,9 @@ export class AgentSidebar {
         [
             this.imageSizeSelect,
             this.imageQualitySelect,
+            this.imageResponseFormatSelect,
+            this.imageHistoryDisabled,
+            this.imageStream,
             this.videoResolutionSelect,
             this.videoCameraFixed,
             this.videoGenerateAudio,
@@ -1054,11 +2132,6 @@ export class AgentSidebar {
         document.getElementById('videoPromptModelChip')?.addEventListener('click', () => this._showVideoModelPicker());
         document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings', 'api'));
         this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
-
-        document.getElementById('agentCollapseBtn')?.addEventListener('click', () => this.close());
-
-        // 退出当前模式并回到普通画板。
-        document.getElementById('creationModeCloseBtn')?.addEventListener('click', exitCreationMode);
 
         // 右上角齿轮与圆球菜单都可进入设置模式。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
@@ -1128,6 +2201,10 @@ export class AgentSidebar {
     }
 
     _showModePicker() {
+        if (document.body.classList.contains('agent-open')) {
+            this.modePicker?.classList.remove('mode-picker-visible');
+            return;
+        }
         if (this.modePickerHideTimer) {
             clearTimeout(this.modePickerHideTimer);
             this.modePickerHideTimer = null;
@@ -1138,27 +2215,36 @@ export class AgentSidebar {
     _scheduleModePickerHide() {
         if (this.modePickerHideTimer) clearTimeout(this.modePickerHideTimer);
         this.modePickerHideTimer = setTimeout(() => {
+            const toggleBtn = document.getElementById('agentToggleBtn');
+            const activeElement = document.activeElement;
+            const remainsInteractive = toggleBtn?.matches(':hover')
+                || this.modePicker?.matches(':hover')
+                || toggleBtn?.contains(activeElement)
+                || this.modePicker?.contains(activeElement);
+            if (remainsInteractive) {
+                this.modePickerHideTimer = null;
+                return;
+            }
             this.modePicker?.classList.remove('mode-picker-visible');
             this.modePickerHideTimer = null;
         }, 160);
     }
 
     setMode(mode = 'review', settingsTab = null) {
-        const nextMode = ['settings', 'video', 'review'].includes(mode) ? mode : 'review';
+        const nextMode = ['agent', 'settings', 'review'].includes(mode) ? mode : 'review';
         const body = document.body;
-        if (this.currentMode === 'video' && nextMode !== this.currentMode) {
-            this.options.endMediaReferencePick?.({ clearHighlights: true });
-        }
-        this.currentMode = nextMode;
+        this._closeAgentComposerPopovers();
         this._setTaskHistoryOpen(false);
+        this.options.endMediaReferencePick?.({ clearHighlights: true });
+        this.currentMode = nextMode;
         if (this.modeTitle) {
             this.modeTitle.textContent = {
-                settings: '\u8bbe\u7f6e\u6a21\u5f0f',
-                video: '\u89c6\u9891\u6a21\u5f0f'
+                agent: 'AI Agent',
+                settings: '\u8bbe\u7f6e\u6a21\u5f0f'
             }[nextMode] || '';
         }
 
-        body.classList.remove('settings-mode', 'image-mode', 'video-mode');
+        body.classList.remove('agent-mode', 'settings-mode', 'image-mode', 'video-mode');
         document.querySelectorAll('.creation-mode-option').forEach(option => {
             const optionId = 'creationMode' + nextMode[0].toUpperCase() + nextMode.slice(1) + 'Btn';
             option.classList.toggle('active', option.id === optionId);
@@ -1178,22 +2264,15 @@ export class AgentSidebar {
 
         body.classList.add('creation-mode', nextMode + '-mode');
         body.classList.add('agent-open');
-        if (nextMode === 'video') {
-            body.classList.remove('sidebar-closed');
-        }
         this.settingsPanel?.classList.toggle('show', nextMode === 'settings');
         if (nextMode === 'settings') this._setSettingsTab(settingsTab || this.activeSettingsTab);
         if (this.videoWorkspace) this.videoWorkspace.hidden = true;
         if (this.videoModelPicker) this.videoModelPicker.hidden = true;
-        if (this.videoPromptDock) this.videoPromptDock.hidden = nextMode !== 'video';
+        if (this.videoPromptDock) this.videoPromptDock.hidden = true;
         if (this.imageWorkspace) this.imageWorkspace.hidden = true;
-
-        if (nextMode === 'video') {
-            this._renderVideoSourcePreview();
-            this._renderVideoStage();
-        }
         this.modePicker?.classList.remove('mode-picker-visible');
         this.open();
+        if (nextMode === 'agent') setTimeout(() => this.inputEl?.focus(), 120);
     }
 
     _selectedImagePaths() {
@@ -1303,48 +2382,14 @@ export class AgentSidebar {
     }
 
     _addCanvasGenerationReference(entry) {
-        const mediaType = ['image', 'video', 'audio'].includes(entry?.mediaType)
-            ? entry.mediaType
-            : null;
-        const filePath = String(entry?.filePath || '');
         const feedback = message => document.dispatchEvent(new CustomEvent('canvas-reference-feedback', {
             detail: { message }
         }));
-        if (!mediaType || !filePath) {
+        if (!['image', 'video', 'audio'].includes(entry?.mediaType) || !entry?.filePath) {
             feedback('该素材不能作为创作参考');
             return;
         }
-
-        const normalizedEntry = {
-            id: entry.id || entry.itemId || filePath,
-            itemId: entry.itemId || entry.id || null,
-            filePath,
-            mediaType
-        };
-        const identity = candidate => String(candidate?.itemId || candidate?.id || candidate?.filePath || '');
-
-        if (mediaType === 'image' && this.currentMode !== 'video') {
-            feedback('图片创作已迁移到画布节点，请选择“生成图片”');
-            return;
-        }
-
-        const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const limit = Math.max(0, Number(this._getVideoReferenceLimits(profile)[mediaType]) || 0);
-        if (limit === 0) {
-            feedback('当前视频模型不支持这类参考素材');
-            return;
-        }
-        const selections = this.videoReferenceSelections[mediaType] || [];
-        const exists = selections.some(candidate => identity(candidate) === identity(normalizedEntry));
-        if (!exists && selections.length >= limit) {
-            feedback(`当前模型最多添加 ${limit} 个${mediaType === 'image' ? '图片' : mediaType === 'video' ? '视频' : '音频'}参考`);
-            return;
-        }
-        if (!exists) this.videoReferenceSelections[mediaType] = [...selections, normalizedEntry];
-        this.setMode('video');
-        this.options.updateMediaReferencePick?.(mediaType, this.videoReferenceSelections[mediaType]);
-        this._renderVideoSourcePreview();
-        feedback(exists ? '该素材已在视频参考中' : '已加入视频创作参考');
+        feedback('图片和视频创作已迁移到画布节点，请使用素材上方的“生成”菜单');
     }
 
     _removeVideoReference(type, id) {
@@ -1631,6 +2676,7 @@ export class AgentSidebar {
 
     _renderImageModelCapabilities(provider = this._getImageProvider()) {
         if (!this.imageSizeSelect) return;
+        const gptImage2 = isGptImage2Model(provider?.model);
         const sizes = this._getImageModelSizes(provider);
         const previousValue = this.imageSizeSelect.value;
         this.imageSizeSelect.innerHTML = '';
@@ -1640,7 +2686,25 @@ export class AgentSidebar {
             option.textContent = size.label;
             this.imageSizeSelect.appendChild(option);
         });
-        this.imageSizeSelect.value = sizes.some(size => size.value === previousValue) ? previousValue : '';
+        const largestSize = sizes
+            .filter(size => /^\d+x\d+$/i.test(String(size.value || '')))
+            .sort((left, right) => {
+                const area = value => {
+                    const [width, height] = String(value.value).split('x').map(Number);
+                    return width * height;
+                };
+                return area(right) - area(left);
+            })[0]?.value || '';
+        this.imageSizeSelect.value = gptImage2
+            ? (previousValue && sizes.some(size => size.value === previousValue) ? previousValue : largestSize)
+            : (sizes.some(size => size.value === previousValue) ? previousValue : '');
+        if (this.imageApiOptions) this.imageApiOptions.hidden = !gptImage2;
+        if (gptImage2) {
+            if (this.imageResponseFormatSelect && !this.imageResponseFormatSelect.value) {
+                this.imageResponseFormatSelect.value = 'url';
+            }
+            if (this.imageHistoryDisabled) this.imageHistoryDisabled.checked = this.imageHistoryDisabled.checked !== false;
+        }
     }
 
     _getImageModelSizes(provider = this._getImageProvider()) {
@@ -1846,6 +2910,18 @@ export class AgentSidebar {
             });
             this.videoRatioGrid.appendChild(button);
         });
+    }
+
+    _resolveVideoRequestRatio(profile, imageReferences = []) {
+        const selected = this.videoRatioSelect?.value || profile?.defaultRatio || '16:9';
+        if (selected !== 'adaptive' || profile?.resolveAdaptiveRatio !== true) return selected;
+        const first = imageReferences[0] || null;
+        return inferClosestAspectRatio(
+            first?.width,
+            first?.height,
+            profile?.ratios,
+            profile?.adaptiveFallbackRatio || '16:9'
+        );
     }
 
     _setVideoDurationValue(value) {
@@ -2064,6 +3140,20 @@ export class AgentSidebar {
         }
     }
 
+    _handleTaskCompleted(event = {}) {
+        const clientTaskId = String(event.clientTaskId || '').trim();
+        const remoteTaskId = String(event.remoteTaskId || event.taskId || '').trim();
+        const task = this.generationTasks.find(item => item.id === clientTaskId)
+            || this.generationTasks.find(item => item.taskId === remoteTaskId);
+        if (!task) return;
+        this._updateGenerationTask(task.id, {
+            status: 'success',
+            taskId: remoteTaskId || task.taskId || null,
+            filePath: event.filePath || task.filePath || null,
+            error: null
+        });
+    }
+
     async _pollBrowserSyncEvents() {
         if (this.browserSyncPolling || !window.flowCanvas?.browserSync?.getEvents) return;
         this.browserSyncPolling = true;
@@ -2185,17 +3275,29 @@ export class AgentSidebar {
         return task;
     }
 
+    createGenerationTask({ kind = 'image', provider = null, prompt = '', params = {}, sourcePaths = [] } = {}) {
+        return this._createGenerationTask(kind, provider, prompt, params, sourcePaths);
+    }
+
     _updateGenerationTask(id, patch = {}) {
         const index = this.generationTasks.findIndex(task => task.id === id);
         if (index < 0) return null;
+        const current = this.generationTasks[index];
         this.generationTasks[index] = {
-            ...this.generationTasks[index],
+            ...current,
             ...patch,
+            ...(patch.params && typeof patch.params === 'object' ? {
+                params: { ...(current.params || {}), ...patch.params }
+            } : {}),
             updatedAt: new Date().toISOString()
         };
         this._saveGenerationTasks();
         this._renderGenerationTasks();
         return this.generationTasks[index];
+    }
+
+    updateGenerationTask(id, patch = {}) {
+        return this._updateGenerationTask(id, patch);
     }
 
     _isGenerationDisconnect(error) {
@@ -2211,20 +3313,18 @@ export class AgentSidebar {
         });
     }
 
+    recordGenerationError(taskId, error) {
+        return this._recordGenerationError(taskId, error);
+    }
+
     _setTaskHistoryOpen(open) {
-        const nextOpen = Boolean(open) && this.currentMode === 'video';
-        const modeLabel = '视频模式';
+        const nextOpen = Boolean(open);
         this.taskHistoryOpen = nextOpen;
-        document.body.classList.toggle('task-history-open', nextOpen);
         if (this.taskHistoryPanel) this.taskHistoryPanel.hidden = !nextOpen;
-        if (this.modeTitle && this.currentMode === 'video') {
-            this.modeTitle.textContent = nextOpen ? '任务记录' : modeLabel;
-        }
         if (this.taskHistoryBtn) {
             this.taskHistoryBtn.classList.toggle('active', nextOpen);
             this.taskHistoryBtn.setAttribute('aria-expanded', String(nextOpen));
-            this.taskHistoryBtn.querySelector('.agent-task-history-label').textContent = nextOpen ? modeLabel : '任务记录';
-            this.taskHistoryBtn.title = nextOpen ? `返回${modeLabel}` : '打开任务记录';
+            this.taskHistoryBtn.title = nextOpen ? '关闭任务记录' : '打开任务记录';
             this.taskHistoryBtn.setAttribute('aria-label', this.taskHistoryBtn.title);
         }
         if (nextOpen) this._renderGenerationTasks();
@@ -2269,31 +3369,36 @@ export class AgentSidebar {
 
     _renderGenerationTasks() {
         this.options.onGenerationTasksChanged?.(this.generationTasks);
-        const pendingCount = this.generationTasks.filter(task => task.status === 'running').length;
-        const readyCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'ready').length;
-        const downloadingCount = this.generationTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'downloading').length;
+        const visibleTasks = this.taskHistoryFilter === 'all'
+            ? this.generationTasks
+            : this.generationTasks.filter(task => task.kind === this.taskHistoryFilter);
+        const pendingCount = visibleTasks.filter(task => task.status === 'running').length;
+        const readyCount = visibleTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'ready').length;
+        const downloadingCount = visibleTasks.filter(task => task.status === 'running' && task.params?.syncStage === 'downloading').length;
         const generatingCount = Math.max(0, pendingCount - readyCount - downloadingCount);
-        const disconnectedCount = this.generationTasks.filter(task => task.status === 'disconnected').length;
-        const badgeCount = pendingCount + disconnectedCount;
+        const disconnectedCount = visibleTasks.filter(task => task.status === 'disconnected').length;
+        const badgeCount = this.generationTasks.filter(task => ['running', 'disconnected'].includes(task.status)).length;
         if (this.taskHistoryBadge) {
             this.taskHistoryBadge.hidden = badgeCount === 0;
             this.taskHistoryBadge.textContent = String(badgeCount);
         }
         if (this.taskHistorySummary) {
-            const pieces = [`共 ${this.generationTasks.length} 条`];
+            const pieces = [this.taskHistoryFilter === 'all'
+                ? `共 ${this.generationTasks.length} 条`
+                : `${this.taskHistoryFilter === 'image' ? '图片' : '视频'} ${visibleTasks.length} 条`];
             if (generatingCount) pieces.push(`${generatingCount} 条生成中`);
             if (readyCount) pieces.push(`${readyCount} 条待下载`);
             if (downloadingCount) pieces.push(`${downloadingCount} 条下载中`);
             if (disconnectedCount) pieces.push(`${disconnectedCount} 条待重传`);
-            this.taskHistorySummary.textContent = this.generationTasks.length ? pieces.join(' · ') : '还没有生成任务';
+            this.taskHistorySummary.textContent = visibleTasks.length ? pieces.join(' · ') : '还没有生成任务';
         }
         if (!this.taskHistoryList) return;
-        if (this.generationTasks.length === 0) {
+        if (visibleTasks.length === 0) {
             this.taskHistoryList.innerHTML = `
                 <div class="agent-task-history-empty">
                     <svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
                     <strong>暂无任务记录</strong>
-                    <span>图片和视频生成任务会显示在这里</span>
+                    <span>${this.taskHistoryFilter === 'all' ? '图片和视频生成任务会显示在这里' : `还没有${this.taskHistoryFilter === 'image' ? '图片' : '视频'}任务`}</span>
                 </div>`;
             return;
         }
@@ -2304,7 +3409,7 @@ export class AgentSidebar {
             failed: '失败',
             disconnected: '待重传'
         };
-        this.taskHistoryList.innerHTML = this.generationTasks.map(task => {
+        this.taskHistoryList.innerHTML = visibleTasks.map(task => {
             const status = statusLabels[task.status] ? task.status : 'failed';
             let syncStageLabel = status === 'running' && task.params?.syncStage === 'ready'
                 ? '待下载'
@@ -2457,7 +3562,9 @@ export class AgentSidebar {
                     prompt: task.prompt,
                     size: task.params?.size || undefined,
                     quality: task.params?.quality || 'high',
-                    responseFormat: 'url',
+                    responseFormat: task.params?.responseFormat || 'url',
+                    historyDisabled: task.params?.historyDisabled !== false,
+                    stream: task.params?.stream === true,
                     sourceReferences: retryImageReferences,
                     x: placeholder?.x,
                     y: placeholder?.y,
@@ -2639,7 +3746,9 @@ export class AgentSidebar {
 
         const imageReferences = this.videoReferenceSelections.image.map(entry => ({
             itemId: entry.itemId || entry.id,
-            filePath: entry.filePath
+            filePath: entry.filePath,
+            width: Number(entry.width) || null,
+            height: Number(entry.height) || null
         }));
         const videoReferences = this.videoReferenceSelections.video.map(entry => ({
             itemId: entry.itemId || entry.id,
@@ -2684,7 +3793,9 @@ export class AgentSidebar {
                             id: replacement.item.id,
                             itemId: replacement.item.id,
                             filePath: replacement.filePath,
-                            mediaType: 'image'
+                            mediaType: 'image',
+                            width: Number(replacement.item.width) || null,
+                            height: Number(replacement.item.height) || null
                         };
                     });
                     this.options.clearMediaReferenceSelections?.();
@@ -2708,10 +3819,11 @@ export class AgentSidebar {
         if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
         const durationValue = this.videoDurationSelect?.value;
         const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const ratio = this.videoRatioSelect?.value || '16:9';
+        const ratio = this._resolveVideoRequestRatio(profile, imageReferences);
         const videoParams = {
             resolution: this.videoResolutionSelect?.value || null,
             ratio,
+            ratioMode: this.videoRatioSelect?.value === 'adaptive' ? 'auto' : 'manual',
             duration: durationValue === '' || durationValue == null ? null : Number(durationValue),
             cameraFixed: Boolean(this.videoCameraFixed?.checked),
             generateAudio: Boolean(this.videoGenerateAudio?.checked),
@@ -2962,6 +4074,10 @@ export class AgentSidebar {
 
         const size = this.imageSizeSelect?.value || undefined;
         const quality = this.imageQualitySelect?.value || 'high';
+        const gptImage2 = isGptImage2Model(provider.model);
+        const responseFormat = gptImage2 ? (this.imageResponseFormatSelect?.value || 'url') : 'url';
+        const historyDisabled = gptImage2 ? this.imageHistoryDisabled?.checked !== false : true;
+        const stream = gptImage2 ? Boolean(this.imageStream?.checked) : false;
         let sourceReferences = this.imageGenerationMode === 'reference'
             ? this.imageReferenceSelections
                 .filter(entry => entry?.filePath)
@@ -3000,7 +4116,10 @@ export class AgentSidebar {
         const sourcePaths = sourceReferences.map(reference => reference.filePath).filter(Boolean);
         const generationTask = this._createGenerationTask('image', provider, prompt, {
             size: size || null,
-            quality
+            quality,
+            responseFormat,
+            historyDisabled,
+            stream
         }, sourcePaths);
         this._setImageWorkspaceStatus('running', '\u751f\u6210\u4e2d');
         this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
@@ -3018,7 +4137,9 @@ export class AgentSidebar {
                 prompt,
                 size,
                 quality,
-                responseFormat: 'url',
+                responseFormat,
+                historyDisabled,
+                stream,
                 sourceReferences,
                 x: placeholder?.x,
                 y: placeholder?.y,
@@ -3053,24 +4174,40 @@ export class AgentSidebar {
 
     open() {
         document.body.classList.add('agent-open');
-        const focusTarget = this.currentMode === 'video'
-            ? (this._hasSelectedVideoProvider() ? this.videoPromptInput : this.videoModelSearchInput)
-            : null;
+        this._syncHudState();
+        const focusTarget = null;
         if (focusTarget) setTimeout(() => focusTarget.focus(), 120);
     }
 
     close() {
         document.body.classList.remove('agent-open');
+        this._syncHudState();
     }
 
     toggle() {
         document.body.classList.toggle('agent-open');
+        this._syncHudState();
+    }
+
+    _syncHudState() {
+        const button = document.getElementById('agentToggleBtn');
+        if (!button) return;
+        const isOpen = document.body.classList.contains('agent-open');
+        const label = isOpen
+            ? '左键关闭侧边栏，右键收起画布'
+            : '左键打开 AI Agent，右键收起画布';
+        button.setAttribute('aria-expanded', String(isOpen));
+        button.setAttribute('aria-label', label);
+        button.title = label;
     }
 
     // ── 配置管理 ──
     _loadConfig() {
         try {
-            const savedProviders = localStorage.getItem('flow-canvas-agent-providers');
+            const savedProviders = localStorage.getItem(API_PROVIDERS_STORAGE_KEY);
+            const savedGlobal = localStorage.getItem(API_GLOBAL_STORAGE_KEY);
+            const savedMeta = localStorage.getItem(API_META_STORAGE_KEY);
+            this.localApiConfigPresent = savedProviders !== null || savedGlobal !== null;
             if (savedProviders) {
                 const providers = JSON.parse(savedProviders);
                 this.providers = (Array.isArray(providers) ? providers : []).map(provider => ({
@@ -3079,15 +4216,13 @@ export class AgentSidebar {
                 }));
             }
 
-            const savedGlobal = localStorage.getItem('flow-canvas-agent-global');
             if (savedGlobal) {
-                const globalConfig = JSON.parse(savedGlobal);
-                Object.assign(this.globalConfig, globalConfig);
-                this.globalConfig.textProviderId ||= globalConfig?.chatProviderId || null;
-                if (Number(globalConfig?.imageIntentPipelineVersion) < 2) {
-                    this.globalConfig.imageIntentPipelineMode = 'compiled';
-                    this.globalConfig.imageIntentPipelineVersion = 2;
-                }
+                this._applyLoadedGlobalConfig(JSON.parse(savedGlobal));
+            }
+            if (savedMeta) {
+                const meta = JSON.parse(savedMeta);
+                this.apiConfigRevision = Math.max(0, Number(meta?.revision) || 0);
+                this.apiConfigUpdatedAt = typeof meta?.updatedAt === 'string' ? meta.updatedAt : '';
             }
         } catch (e) {
             console.warn('[Agent] 配置加载失败', e);
@@ -3096,11 +4231,117 @@ export class AgentSidebar {
         this._ensureProviderRoles();
     }
 
+    _applyLoadedGlobalConfig(globalConfig = {}) {
+        const source = globalConfig && typeof globalConfig === 'object' ? globalConfig : {};
+        Object.assign(this.globalConfig, source);
+        this.globalConfig.textProviderId ||= source.chatProviderId || null;
+        this.globalConfig.agentExecutionMode = source.agentExecutionMode === 'ask' ? 'ask' : 'auto';
+        this.globalConfig.agentSkillIds = (Array.isArray(source.agentSkillIds)
+            ? source.agentSkillIds
+            : []).filter(id => AGENT_SKILL_IDS.has(id));
+        this.globalConfig.imageGenerationPreferences = normalizeImageGenerationPreferences(
+            source.imageGenerationPreferences
+        );
+        if (Number(source.imageIntentPipelineVersion) < 2) {
+            this.globalConfig.imageIntentPipelineMode = 'compiled';
+            this.globalConfig.imageIntentPipelineVersion = 2;
+        }
+    }
+
+    _apiConfigSnapshot() {
+        return {
+            revision: Math.max(1, Number(this.apiConfigRevision) || 1),
+            updatedAt: this.apiConfigUpdatedAt || new Date().toISOString(),
+            providers: this.providers,
+            globalConfig: this.globalConfig
+        };
+    }
+
+    _writeLocalApiConfig() {
+        localStorage.setItem(API_PROVIDERS_STORAGE_KEY, JSON.stringify(this.providers));
+        localStorage.setItem(API_GLOBAL_STORAGE_KEY, JSON.stringify(this.globalConfig));
+        localStorage.setItem(API_META_STORAGE_KEY, JSON.stringify({
+            version: 1,
+            revision: this.apiConfigRevision,
+            updatedAt: this.apiConfigUpdatedAt
+        }));
+        this.localApiConfigPresent = true;
+        document.dispatchEvent(new CustomEvent('agent-providers-updated'));
+    }
+
+    async _restoreDurableApiConfig() {
+        const bridge = window.flowCanvas?.apiConfig;
+        if (!bridge?.load || !bridge?.save) {
+            this.apiConfigHydrated = true;
+            return { success: false, unavailable: true };
+        }
+
+        try {
+            const loaded = await bridge.load();
+            if (!loaded?.success) throw new Error(loaded?.error || '耐久配置读取失败');
+            const reconciled = reconcileApiConfig({
+                localProviders: this.providers,
+                localGlobalConfig: this.globalConfig,
+                localPresent: this.localApiConfigPresent,
+                localRevision: this.apiConfigRevision,
+                durableConfig: loaded.config
+            });
+            this.providers = reconciled.providers.map(provider => ({
+                ...provider,
+                capability: inferProviderCapability(provider)
+            }));
+            this._applyLoadedGlobalConfig(reconciled.globalConfig);
+            this.apiConfigRevision = Math.max(1, Number(reconciled.revision) || 1);
+            this.apiConfigUpdatedAt = loaded.config?.updatedAt || this.apiConfigUpdatedAt || new Date().toISOString();
+            this._ensureProviderRoles();
+            this.apiConfigHydrated = true;
+            this._writeLocalApiConfig();
+            this._renderProviderList();
+            this._renderModelSelect();
+            this._renderAgentSkillList();
+            this._renderAgentExecutionMode();
+            if (this.defaultTemporaryCompressionToggle) {
+                this.defaultTemporaryCompressionToggle.checked = this.globalConfig.defaultTemporaryImageCompression === true;
+            }
+
+            const saved = await bridge.save(this._apiConfigSnapshot());
+            if (!saved?.success) throw new Error(saved?.error || '耐久配置保存失败');
+            if (this.pendingDurableApiConfigSave) this._queueDurableApiConfigSave();
+            return {
+                success: true,
+                source: reconciled.source,
+                recoveredFromBackup: loaded.recoveredFromBackup === true
+            };
+        } catch (error) {
+            this.apiConfigHydrated = true;
+            console.warn('[Agent] API 自动恢复失败，已保留当前 Local Storage 配置', error);
+            return { success: false, error: error?.message || String(error) };
+        }
+    }
+
+    _queueDurableApiConfigSave() {
+        if (!this.apiConfigHydrated) {
+            this.pendingDurableApiConfigSave = true;
+            return;
+        }
+        const bridge = window.flowCanvas?.apiConfig;
+        if (!bridge?.save) return;
+        this.pendingDurableApiConfigSave = false;
+        clearTimeout(this.apiConfigSaveTimer);
+        this.apiConfigSaveTimer = setTimeout(async () => {
+            const result = await bridge.save(this._apiConfigSnapshot());
+            if (!result?.success) {
+                console.warn('[Agent] API 耐久配置保存失败', result?.error || '未知错误');
+            }
+        }, 160);
+    }
+
     _saveConfig() {
         try {
-            localStorage.setItem('flow-canvas-agent-providers', JSON.stringify(this.providers));
-            localStorage.setItem('flow-canvas-agent-global', JSON.stringify(this.globalConfig));
-            document.dispatchEvent(new CustomEvent('agent-providers-updated'));
+            this.apiConfigRevision = Math.max(1, Number(this.apiConfigRevision) + 1 || 1);
+            this.apiConfigUpdatedAt = new Date().toISOString();
+            this._writeLocalApiConfig();
+            this._queueDurableApiConfigSave();
         } catch (e) {
             console.warn('[Agent] 配置保存失败', e);
         }
@@ -3189,11 +4430,21 @@ export class AgentSidebar {
     }
 
     _setImageProvider(id) {
-        if (!this._findProvider(id)) return;
+        const provider = this._findProvider(id);
+        if (!provider || !this._isImageProvider(provider)) return;
         this.globalConfig.imageProviderId = id;
         this._saveConfig();
         this._renderProviderList();
         this._renderModelSelect();
+        this._renderAgentSkillList();
+        this._renderAgentExecutionMode();
+    }
+
+    setImageProvider(id) {
+        const provider = this._findProvider(id);
+        if (!provider || !this._isImageProvider(provider)) return false;
+        this._setImageProvider(id);
+        return true;
     }
 
     _setVideoProvider(id) {
@@ -3257,6 +4508,27 @@ export class AgentSidebar {
     getImageProviderConfig(binding = null) {
         const provider = this._getBoundProvider(binding, this._getImageProvider());
         return provider ? { ...provider } : null;
+    }
+
+    getImageGenerationPreferences(binding = null) {
+        return readImageGenerationPreferences(this.globalConfig.imageGenerationPreferences, binding || {});
+    }
+
+    saveImageGenerationPreferences(config = {}, binding = null) {
+        const selected = binding || this._findProvider(config.providerId) || this._getImageProvider();
+        const preferenceBinding = {
+            providerId: config.providerId || selected?.id || null,
+            sourceProviderId: config.sourceProviderId || selected?.sourceProviderId || selected?.id || null,
+            model: config.model || selected?.model || ''
+        };
+        if (!preferenceBinding.model) return false;
+        this.globalConfig.imageGenerationPreferences = writeImageGenerationPreferences(
+            this.globalConfig.imageGenerationPreferences,
+            config,
+            preferenceBinding
+        );
+        this._saveConfig();
+        return true;
     }
 
     getTextProviderConfig(binding = null) {
@@ -3521,6 +4793,7 @@ export class AgentSidebar {
             this.fetchedModelSelect.appendChild(placeholder);
             this.fetchedModelSelect.hidden = true;
         }
+        if (this.formModel) this.formModel.hidden = false;
         if (clearStatus) {
             this._setModelFetchStatus('', '');
         }
@@ -3541,7 +4814,9 @@ export class AgentSidebar {
                 this.fetchedModelOptions.appendChild(datalistOption);
             }
         });
-        this.fetchedModelSelect.hidden = models.length === 0;
+        const hasModels = models.length > 0;
+        this.fetchedModelSelect.hidden = !hasModels;
+        if (this.formModel) this.formModel.hidden = hasModels;
 
         const currentModel = this.formModel?.value?.trim();
         if (currentModel && models.includes(currentModel)) {
@@ -3808,6 +5083,7 @@ export class AgentSidebar {
                 opt.textContent = "-- 请先添加 API --";
                 el.appendChild(opt);
             });
+            this._renderAgentComposerModels();
             this._renderVideoProviderContext();
             if (this.currentMode === 'video') this._renderVideoStage();
             return;
@@ -3839,6 +5115,7 @@ export class AgentSidebar {
                 el.appendChild(option);
             });
         });
+        this._renderAgentComposerModels();
         this._renderVideoProviderContext();
         this._renderImageModelCapabilities();
         if (this.currentMode === 'video') this._renderVideoStage();

@@ -8,7 +8,8 @@ import {
     extractDeterministicSignals,
     validateEditPlan
 } from './image-intent-pipeline.js';
-import { isMidjourneyImageModel } from './provider-capabilities.js';
+import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
+import { inferClosestAspectRatio } from './image-node-settings.js';
 
 // ============================================================
 // Flow Canvas — Node Type Definitions (节点类型注册表)
@@ -30,7 +31,7 @@ import { isMidjourneyImageModel } from './provider-capabilities.js';
 // - execute: async (inputs, config, ctx) => outputs
 //
 // ctx 由 graph-runner 注入：{ item, getTextProvider, getImageProvider, getVideoProvider,
-// prepareImageReferences }。
+// prepareImageReferences, createGenerationTask, updateGenerationTask, recordGenerationError }。
 // ============================================================
 
 const NODE_TYPES = {};
@@ -164,6 +165,7 @@ function cachedPlannerRequest(cacheKey, requestFactory) {
 }
 
 function startImageIntentPipeline({ prompt, config, ctx, references, imageProvider }) {
+    if (config?.skipImageIntentPipeline === true) return null;
     const requestedMode = ctx?.getImageIntentPipelineMode?.() || 'compiled';
     const mode = requestedMode === 'shadow' ? 'shadow' : requestedMode === 'off' ? 'off' : 'compiled';
     if (mode === 'off' || !references.length) return null;
@@ -299,6 +301,15 @@ async function prepareGenerationReferences(references, prepare) {
 }
 
 function expandGenerationPrompts(inputs, config = {}) {
+    const agentCompiledPrompt = typeof config.agentCompiledPrompt === 'string'
+        ? config.agentCompiledPrompt.trim()
+        : '';
+    if (agentCompiledPrompt) {
+        const count = Math.max(1, Math.min(20, Number(config.count) || 1));
+        const citationPrefix = referenceCitationGuide(config);
+        const prompt = citationPrefix ? `${citationPrefix}\n${agentCompiledPrompt}` : agentCompiledPrompt;
+        return Array.from({ length: count }, () => prompt);
+    }
     const upstream = asArray(inputs?.prompt)
         .filter(value => typeof value === 'string' && value.trim());
     const configured = typeof config.prompt === 'string' && config.prompt.trim()
@@ -425,11 +436,14 @@ NODE_TYPES['image'] = {
         { key: 'prompt', label: '节点提示词', type: 'textarea', default: '' },
         { key: 'promptMergeMode', label: '上游提示词', type: 'select', default: 'append', options: ['append', 'prepend', 'replace'] },
         { key: 'negativePrompt', label: '反向提示词', type: 'textarea', default: '' },
-        { key: 'resolutionTier', label: '画质', type: 'select', default: '1K', options: ['1K', '2K', '4K'] },
+        { key: 'resolutionTier', label: '画质', type: 'select', default: '4K', options: ['1K', '2K', '4K'] },
         { key: 'ratio', label: '画面比例', type: 'select', default: 'adaptive', options: ['adaptive', '1:1', '9:16', '16:9', '3:4', '4:3', '3:2', '2:3', '5:4', '4:5', '21:9'] },
-        { key: 'width', label: '宽度', type: 'number', default: 1024 },
-        { key: 'height', label: '高度', type: 'number', default: 1024 },
-        { key: 'quality', label: '生成质量', type: 'select', default: 'high', options: ['auto', 'medium', 'high'] },
+        { key: 'width', label: '宽度', type: 'number', default: 3840 },
+        { key: 'height', label: '高度', type: 'number', default: 2160 },
+        { key: 'quality', label: '生成质量', type: 'select', default: 'high', options: ['auto', 'low', 'medium', 'high'] },
+        { key: 'responseFormat', label: '返回格式', type: 'select', default: 'url', options: ['url', 'b64_json'], gptImage2Only: true },
+        { key: 'historyDisabled', label: '关闭历史记录', type: 'checkbox', default: true, gptImage2Only: true },
+        { key: 'stream', label: '流式返回', type: 'checkbox', default: false, gptImage2Only: true },
         { key: 'style', label: '风格', type: 'select', default: '', options: ['', '写实', '产品摄影', '电影感', '插画', '极简'] },
         { key: 'cameraControl', label: '摄影机控制', type: 'select', default: '', options: ['', '自动', '特写', '近景', '中景', '广角', '俯拍'] },
         { key: 'webSearch', label: '联网搜索', type: 'checkbox', default: false },
@@ -479,17 +493,38 @@ NODE_TYPES['image'] = {
             const requestPrompt = config.negativePrompt && !midjourneyModel
                 ? `${providerPrompt}\n\nNegative: ${config.negativePrompt}`
                 : providerPrompt;
+            const imageModel = provider?.model || config.model;
+            const gptImage2 = isGptImage2Model(imageModel);
+            const imageRequestParams = {
+                size: `${config.width || 1024}x${config.height || 1024}`,
+                quality: config.quality || 'high',
+                responseFormat: gptImage2 ? (config.responseFormat || 'url') : 'url',
+                historyDisabled: gptImage2 ? config.historyDisabled !== false : true,
+                stream: gptImage2 ? config.stream === true : false,
+                nodeId: ctx?.item?.id || null
+            };
+            const generationTask = ctx?.createGenerationTask?.({
+                kind: 'image',
+                provider,
+                prompt: requestPrompt,
+                params: imageRequestParams,
+                sourcePaths: sourceReferences.map(reference => reference.filePath).filter(Boolean)
+            });
+            const clientTaskId = typeof generationTask === 'string' ? generationTask : generationTask?.id;
             const generationStartedAt = Date.now();
             let result;
             try {
                 result = await window.flowCanvas.mcp.generateImage({
                     provider: 'openai',
                     providerConfig: provider,
+                    clientTaskId: clientTaskId || undefined,
                     prompt: requestPrompt,
-                    size: `${config.width || 1024}x${config.height || 1024}`,
-                    quality: config.quality || 'high',
+                    size: imageRequestParams.size,
+                    quality: imageRequestParams.quality,
                     webSearch: config.webSearch === true ? true : undefined,
-                    responseFormat: 'url',
+                    responseFormat: imageRequestParams.responseFormat,
+                    historyDisabled: imageRequestParams.historyDisabled,
+                    stream: imageRequestParams.stream,
                     midjourney: midjourneyModel ? {
                         ratio: config.ratio,
                         version: config.midjourneyVersion,
@@ -518,6 +553,7 @@ NODE_TYPES['image'] = {
                     addToCanvas: false
                 });
             } catch (error) {
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
                 intent?.finish({
                     ...imageProviderSummary(provider),
                     status: 'failed',
@@ -536,6 +572,7 @@ NODE_TYPES['image'] = {
                 ? filePaths.map(filePath => 'local-res://' + encodeURIComponent(filePath))
                 : [result?.url].filter(Boolean);
             if (!imageUrls.length) {
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, new Error(result?.error || '生图未返回图片'));
                 intent?.finish({
                     ...imageProviderSummary(provider),
                     status: 'failed',
@@ -545,6 +582,15 @@ NODE_TYPES['image'] = {
                     error: result?.error || '生图未返回图片'
                 }, intentOutcome);
                 throw new Error(result?.error || '生图未返回图片');
+            }
+            if (clientTaskId) {
+                ctx?.updateGenerationTask?.(clientTaskId, {
+                    status: 'success',
+                    error: null,
+                    filePath: filePaths[0] || null,
+                    ...(result?.taskId ? { taskId: result.taskId } : {}),
+                    params: { ...imageRequestParams, filePaths }
+                });
             }
             intent?.finish({
                 ...imageProviderSummary(provider),
@@ -560,6 +606,9 @@ NODE_TYPES['image'] = {
             return imageUrls.map((imageUrl, index) => ({
                 image: imageUrl,
                 _resultFilePath: filePaths[index] || null,
+                _resultMediaType: result?.images?.[index]?.mediaType
+                    || result?.mediaType
+                    || localResourceType(imageUrl),
                 _resultItem: index === 0 ? (result?.item || null) : null,
                 _resultUrl: filePaths.length ? null : (result?.url || null),
                 _midjourney: result?.midjourney || null,
@@ -625,32 +674,100 @@ NODE_TYPES['video'] = {
         // 统一输入口按扩展名分流为图片、视频和音频参考。
         const frames = toFileList(sources.filter(value => localResourceType(value) === 'image'));
         if (!frames.length && own) frames.push({ filePath: own });
+        const firstFrameContext = (ctx?.inputContext || []).find(entry =>
+            entry?.source?.filePath && entry.source.filePath === frames[0]?.filePath
+        );
+        const h3Model = /minimax[^a-z0-9]*h3/i.test(String(provider.model || config.model || ''));
+        const useAdaptiveH3Ratio = h3Model
+            && (config.ratio === 'adaptive' || config.ratioMode !== 'manual');
+        const ratio = useAdaptiveH3Ratio
+            ? inferClosestAspectRatio(
+                firstFrameContext?.source?.width,
+                firstFrameContext?.source?.height,
+                ['16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
+                '16:9'
+            )
+            : (config.ratio || undefined);
         const sourceReferences = await prepareGenerationReferences(frames, ctx?.prepareImageReferences);
         const videoReferences = toFileList(sources.filter(value => localResourceType(value) === 'video'));
         const audioReferences = toFileList(sources.filter(value => localResourceType(value) === 'file'));
 
         const results = await mapWithConcurrency(prompts, config.concurrency, async prompt => {
-            const result = await window.flowCanvas.mcp.generateVideo({
-                providerConfig: provider,
+            const generationTask = ctx?.createGenerationTask?.({
+                kind: 'video',
+                provider,
                 prompt,
-                resolution: config.resolution || undefined,
-                ratio: config.ratio || undefined,
-                duration: Number(config.duration) || 5,
-                cameraFixed: Boolean(config.cameraFixed),
-                generateAudio: Boolean(config.generateAudio),
-                webSearch: Boolean(config.webSearch),
-                watermark: Boolean(config.watermark),
-                sourceReferences,
-                videoReferences,
-                audioReferences,
-                addToCanvas: false
+                params: {
+                    resolution: config.resolution || null,
+                    ratio: ratio || null,
+                    duration: Number(config.duration) || 5,
+                    cameraFixed: Boolean(config.cameraFixed),
+                    generateAudio: Boolean(config.generateAudio),
+                    webSearch: Boolean(config.webSearch),
+                    watermark: Boolean(config.watermark),
+                    compressReferenceImages: false,
+                    nodeId: ctx?.item?.id || null,
+                    videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
+                    audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
+                },
+                sourcePaths: sourceReferences.map(reference => reference.filePath).filter(Boolean)
             });
+            const clientTaskId = typeof generationTask === 'string' ? generationTask : generationTask?.id;
+            let result;
+            try {
+                result = await window.flowCanvas.mcp.generateVideo({
+                    provider: 'openai-video',
+                    providerConfig: provider,
+                    clientTaskId: clientTaskId || undefined,
+                    prompt,
+                    resolution: config.resolution || undefined,
+                    ratio,
+                    duration: Number(config.duration) || 5,
+                    cameraFixed: Boolean(config.cameraFixed),
+                    generateAudio: Boolean(config.generateAudio),
+                    webSearch: Boolean(config.webSearch),
+                    watermark: Boolean(config.watermark),
+                    sourceReferences,
+                    videoReferences,
+                    audioReferences,
+                    addToCanvas: false
+                });
+                if (result?.success === false) throw new Error(result.error || '视频生成请求失败');
+            } catch (error) {
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
+                throw error;
+            }
 
             const filePath = result?.filePath || result?.item?.filePath || null;
             const videoUrl = filePath
                 ? 'local-res://' + encodeURIComponent(filePath)
                 : (result?.url || null);
-            if (!videoUrl) throw new Error('视频生成未返回结果');
+            if (!videoUrl) {
+                const error = new Error('视频生成未返回结果');
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
+                throw error;
+            }
+            if (clientTaskId) {
+                ctx?.updateGenerationTask?.(clientTaskId, {
+                    status: 'success',
+                    error: null,
+                    filePath,
+                    ...(result?.taskId ? { taskId: result.taskId } : {}),
+                    params: {
+                        resolution: config.resolution || null,
+                        ratio: ratio || null,
+                        duration: Number(config.duration) || 5,
+                        cameraFixed: Boolean(config.cameraFixed),
+                        generateAudio: Boolean(config.generateAudio),
+                        webSearch: Boolean(config.webSearch),
+                        watermark: Boolean(config.watermark),
+                        compressReferenceImages: false,
+                        nodeId: ctx?.item?.id || null,
+                        videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
+                        audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
+                    }
+                });
+            }
             return {
                 video: videoUrl,
                 _resultFilePath: filePath,

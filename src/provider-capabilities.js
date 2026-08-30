@@ -35,3 +35,8 @@ export function isMidjourneyImageModel(model) {
     const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
     return normalized === 'mjimagine' || normalized === 'midjourney';
 }
+
+export function isGptImage2Model(model) {
+    const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    return normalized === 'gptimage2';
+}

@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 let normalizeWheelDelta;
+let getCanvasTextFontSize;
 let isCanvasTextContentVisible;
 let scaleToSliderValue;
 let sliderValueToScale;
@@ -10,6 +11,7 @@ let zoomViewportAtPoint;
 
 test.before(async () => {
     ({
+        getCanvasTextFontSize,
         isCanvasTextContentVisible,
         normalizeWheelDelta,
         scaleToSliderValue,
@@ -19,10 +21,16 @@ test.before(async () => {
     } = await import('./viewport-zoom.js'));
 });
 
-test('text content: 低于可读缩放临界值时隐藏，达到临界值后显示', () => {
-    assert.equal(isCanvasTextContentVisible(0.59), false);
-    assert.equal(isCanvasTextContentVisible(0.6), true);
+test('text content: 默认节点一行不足十个汉字时才隐藏', () => {
+    assert.equal(isCanvasTextContentVisible(0.43), false);
+    assert.equal(isCanvasTextContentVisible(0.44), true);
     assert.equal(isCanvasTextContentVisible(1), true);
+});
+
+test('text content: 可见阈值跟随节点真实内容宽度', () => {
+    assert.equal(isCanvasTextContentVisible(0.3, 300), false);
+    assert.equal(isCanvasTextContentVisible(0.3, 600), true);
+    assert.equal(getCanvasTextFontSize(0.3), 11);
 });
 
 test('normalizeWheelDelta: 忽略近零和横向滚动', () => {

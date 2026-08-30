@@ -160,6 +160,151 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
     }
 });
 
+test('expandGenerationPrompts: Agent 编译提示词覆盖本次运行但保留生成数量', () => {
+    assert.deepEqual(
+        helpers.expandGenerationPrompts({ prompt: ['上游旧提示词'] }, {
+            prompt: '节点旧提示词',
+            agentCompiledPrompt: 'Agent 最终提示词',
+            count: 2
+        }),
+        ['Agent 最终提示词', 'Agent 最终提示词']
+    );
+});
+
+test('image execute: 上游返回视频时标记真实媒体类型供画布转换', async () => {
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateImage: async () => ({
+                    filePath: 'C:/output/result.mp4',
+                    filePaths: ['C:/output/result.mp4'],
+                    mediaType: 'video',
+                    images: [{ filePath: 'C:/output/result.mp4', mediaType: 'video' }]
+                })
+            }
+        }
+    };
+
+    try {
+        const output = await helpers.NODE_TYPES.image.execute({}, {
+            prompt: 'animate this image',
+            count: 1,
+            concurrency: 1
+        }, {
+            item: {},
+            getImageProvider: () => ({ apiKey: 'test-key', endpoint: 'https://example.test/v1', model: 'image-model' })
+        });
+
+        assert.equal(output._resultFilePath, 'C:/output/result.mp4');
+        assert.equal(output._resultMediaType, 'video');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('image execute: 画布生成请求创建并完成一条可追踪任务记录', async () => {
+    const calls = [];
+    const created = [];
+    const updates = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateImage: async options => {
+                    calls.push(options);
+                    return { filePath: 'C:/output/tracked-result.png' };
+                }
+            }
+        }
+    };
+
+    try {
+        await helpers.NODE_TYPES.image.execute({}, {
+            prompt: 'tracked image',
+            width: 1024,
+            height: 1024,
+            count: 1,
+            concurrency: 1
+        }, {
+            item: { id: 'image-node-1' },
+            getImageProvider: () => ({
+                id: 'image-provider',
+                apiKey: 'test-key',
+                endpoint: 'https://example.test/v1',
+                model: 'gpt-image-2'
+            }),
+            createGenerationTask: details => {
+                created.push(details);
+                return { id: 'client-image-task-1' };
+            },
+            updateGenerationTask: (id, patch) => updates.push({ id, patch })
+        });
+
+        assert.equal(created.length, 1);
+        assert.equal(created[0].kind, 'image');
+        assert.equal(created[0].prompt, 'tracked image');
+        assert.equal(calls[0].clientTaskId, 'client-image-task-1');
+        assert.equal(updates.at(-1).id, 'client-image-task-1');
+        assert.equal(updates.at(-1).patch.status, 'success');
+        assert.equal(updates.at(-1).patch.filePath, 'C:/output/tracked-result.png');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('image execute: 连续生成两张图片分别创建并完成任务记录', async () => {
+    const created = [];
+    const updates = [];
+    const previousWindow = global.window;
+    let requestIndex = 0;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateImage: async options => ({
+                    filePath: `C:/output/tracked-result-${++requestIndex}.png`,
+                    clientTaskId: options.clientTaskId
+                })
+            }
+        }
+    };
+
+    try {
+        const output = await helpers.NODE_TYPES.image.execute({}, {
+            prompt: 'two tracked images',
+            width: 1024,
+            height: 1024,
+            count: 2,
+            concurrency: 2
+        }, {
+            item: { id: 'image-node-2' },
+            getImageProvider: () => ({
+                id: 'image-provider',
+                apiKey: 'test-key',
+                endpoint: 'https://example.test/v1',
+                model: 'gpt-image-2'
+            }),
+            createGenerationTask: details => {
+                const task = { id: `client-image-task-${created.length + 1}`, details };
+                created.push(task);
+                return task;
+            },
+            updateGenerationTask: (id, patch) => updates.push({ id, patch })
+        });
+
+        assert.equal(created.length, 2);
+        assert.deepEqual(created.map(task => task.details.kind), ['image', 'image']);
+        assert.deepEqual(updates.map(update => update.id).sort(), [
+            'client-image-task-1',
+            'client-image-task-2'
+        ]);
+        assert.ok(updates.every(update => update.patch.status === 'success'));
+        assert.equal(output._batchResults.length, 2);
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
 test('image execute: mj_imagine 一次请求展开为四张候选并保留结果堆叠', async () => {
     const calls = [];
     const previousWindow = global.window;
@@ -498,6 +643,8 @@ test('image execute: 编译模式等待有效计划并把强约束 Prompt 交给
 
 test('video execute: 使用节点绑定模型并透传完整参数与参考素材', async () => {
     const calls = [];
+    const createdTasks = [];
+    const taskUpdates = [];
     const previousWindow = global.window;
     global.window = {
         flowCanvas: {
@@ -534,12 +681,17 @@ test('video execute: 使用节点绑定模型并透传完整参数与参考素�
             count: 1,
             concurrency: 2
         }, {
-            item: {},
+            item: { id: 'video-node-1' },
             getVideoProvider: binding => {
                 bindingCalls.push(binding);
-                return { apiKey: 'test-key', endpoint: 'https://example.test/v1', model: binding.model };
+                return { id: 'provider', apiKey: 'test-key', endpoint: 'https://example.test/v1', model: binding.model };
             },
-            prepareImageReferences: refs => refs
+            prepareImageReferences: refs => refs,
+            createGenerationTask: details => {
+                createdTasks.push(details);
+                return { id: 'client-video-task-1' };
+            },
+            updateGenerationTask: (id, patch) => taskUpdates.push({ id, patch })
         });
 
         assert.equal(bindingCalls[0].model, 'seedance-2.0');
@@ -554,8 +706,140 @@ test('video execute: 使用节点绑定模型并透传完整参数与参考素�
         assert.equal(calls[0].generateAudio, true);
         assert.equal(calls[0].webSearch, true);
         assert.equal(calls[0].watermark, true);
+        assert.equal(calls[0].provider, 'openai-video');
+        assert.equal(calls[0].clientTaskId, 'client-video-task-1');
         assert.equal(calls[0].addToCanvas, false);
+        assert.equal(createdTasks.length, 1);
+        assert.deepEqual(createdTasks[0].params, {
+            resolution: '1080p',
+            ratio: '9:16',
+            duration: 8,
+            cameraFixed: true,
+            generateAudio: true,
+            webSearch: true,
+            watermark: true,
+            compressReferenceImages: false,
+            nodeId: 'video-node-1',
+            videoSourcePaths: ['C:/refs/motion.mp4'],
+            audioSourcePaths: ['C:/refs/music.wav']
+        });
+        assert.equal(taskUpdates.at(-1).id, 'client-video-task-1');
+        assert.equal(taskUpdates.at(-1).patch.status, 'success');
+        assert.equal(taskUpdates.at(-1).patch.params.generateAudio, true);
+        assert.equal(taskUpdates.at(-1).patch.params.webSearch, true);
         assert.equal(output._resultItem.id, 'video-item');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('video execute: MiniMax H3 旧节点自动继承第一张参考图比例', async () => {
+    const calls = [];
+    const createdTasks = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateVideo: async options => {
+                    calls.push(options);
+                    return { filePath: 'C:/output/h3-result.mp4' };
+                }
+            }
+        }
+    };
+
+    try {
+        await helpers.NODE_TYPES.video.execute({
+            source: [
+                '测试提示词',
+                'local-res://' + encodeURIComponent('C:/refs/portrait.png')
+            ]
+        }, {
+            model: 'minimax-h3',
+            ratio: '16:9',
+            resolution: '2k',
+            duration: 5,
+            count: 1,
+            concurrency: 1
+        }, {
+            item: { id: 'h3-video-node' },
+            inputContext: [{
+                source: {
+                    filePath: 'C:/refs/portrait.png',
+                    mediaType: 'image',
+                    width: 300,
+                    height: 450
+                }
+            }],
+            getVideoProvider: () => ({
+                id: 'h3-provider',
+                apiKey: 'test-key',
+                endpoint: 'https://example.test/v1',
+                model: 'minimax-h3'
+            }),
+            prepareImageReferences: refs => refs,
+            createGenerationTask: details => {
+                createdTasks.push(details);
+                return { id: 'h3-client-task' };
+            },
+            updateGenerationTask: () => {}
+        });
+
+        assert.equal(calls[0].ratio, '2:3');
+        assert.equal(createdTasks[0].params.ratio, '2:3');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('video execute: MiniMax H3 尊重明确选择的固定比例', async () => {
+    const calls = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateVideo: async options => {
+                    calls.push(options);
+                    return { filePath: 'C:/output/h3-manual-result.mp4' };
+                }
+            }
+        }
+    };
+
+    try {
+        await helpers.NODE_TYPES.video.execute({
+            source: [
+                '测试提示词',
+                'local-res://' + encodeURIComponent('C:/refs/portrait.png')
+            ]
+        }, {
+            model: 'minimax-h3',
+            ratio: '16:9',
+            ratioMode: 'manual',
+            resolution: '2k',
+            duration: 5,
+            count: 1,
+            concurrency: 1
+        }, {
+            item: { id: 'h3-manual-video-node' },
+            inputContext: [{
+                source: {
+                    filePath: 'C:/refs/portrait.png',
+                    mediaType: 'image',
+                    width: 300,
+                    height: 450
+                }
+            }],
+            getVideoProvider: () => ({
+                id: 'h3-provider',
+                apiKey: 'test-key',
+                endpoint: 'https://example.test/v1',
+                model: 'minimax-h3'
+            }),
+            prepareImageReferences: refs => refs
+        });
+
+        assert.equal(calls[0].ratio, '16:9');
     } finally {
         global.window = previousWindow;
     }

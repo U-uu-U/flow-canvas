@@ -19,7 +19,8 @@ export const STATUS = {
 export class GraphRunner {
     /**
      * @param ctx {{ getItems, getConnections, onStatus, onResult?,
-     *              getTextProvider?, getImageProvider?, getVideoProvider?, prepareImageReferences? }}
+     *              getTextProvider?, getImageProvider?, getVideoProvider?, prepareImageReferences?,
+     *              createGenerationTask?, updateGenerationTask?, recordGenerationError? }}
      *   getItems()       → Map<id, itemData> 或 itemData[]
      *   getConnections() → connection[]
      *   onStatus(id)     → 通知外部重绘该节点
@@ -48,7 +49,7 @@ export class GraphRunner {
      * 执行 targetId 及其全部上游依赖。
      * @returns {{ ok: boolean, reason?: string, ran?: string[] }}
      */
-    async runFrom(targetId) {
+    async runFrom(targetId, options = {}) {
         const items = this._items();
         const connections = this.ctx.getConnections() || [];
         const target = items.get(targetId);
@@ -86,7 +87,10 @@ export class GraphRunner {
                 this._setStatus(item, STATUS.RUNNING);
 
                 try {
-                    const output = await this._execute(item, connections, runCache);
+                    const configOverride = options?.configOverrides instanceof Map
+                        ? options.configOverrides.get(id)
+                        : options?.configOverrides?.[id];
+                    const output = await this._execute(item, connections, runCache, configOverride);
                     runCache.set(id, output);
                     this.resultCache.set(id, output);
                     this._setStatus(item, STATUS.DONE);
@@ -138,7 +142,7 @@ export class GraphRunner {
     /**
      * 单节点执行。media 是特例，不走 NODE_TYPES。
      */
-    async _execute(item, connections, resultCache = this.resultCache) {
+    async _execute(item, connections, resultCache = this.resultCache, configOverride = null) {
         if (item.kind !== 'op') {
             const out = mediaOutput(item);
             if (!Object.keys(out).length) throw new Error('素材缺少文件路径');
@@ -152,7 +156,10 @@ export class GraphRunner {
         const items = this._items();
         const inputs = collectInputs(item, connections, resultCache);
         const inputContext = collectInputContext(item, connections, resultCache, items);
-        const config = this._resolvedConfig(def, item.config);
+        const config = this._resolvedConfig(def, {
+            ...(item.config || {}),
+            ...(configOverride && typeof configOverride === 'object' ? configOverride : {})
+        });
 
         // execute 需要 provider 与参考图预处理。之前只传 { item }，
         // 生成类节点必然在 getImageProvider() 处抛错。
@@ -163,6 +170,9 @@ export class GraphRunner {
             getVideoProvider: this.ctx.getVideoProvider,
             prepareImageReferences: this.ctx.prepareImageReferences,
             getImageIntentPipelineMode: this.ctx.getImageIntentPipelineMode,
+            createGenerationTask: this.ctx.createGenerationTask,
+            updateGenerationTask: this.ctx.updateGenerationTask,
+            recordGenerationError: this.ctx.recordGenerationError,
             inputContext
         });
         return result || {};

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    inferClosestAspectRatio,
     inferImageAspectRatio,
     inferImageResolutionTier,
     resolveGenerationDisplaySize,
@@ -17,6 +18,14 @@ test('infers known aspect ratios and falls back to adaptive', () => {
     assert.equal(inferImageAspectRatio(1920, 1080), '16:9');
     assert.equal(inferImageAspectRatio(1024, 1536), '2:3');
     assert.equal(inferImageAspectRatio(1377, 1000), 'adaptive');
+});
+
+test('infers the closest provider-supported video ratio from a reference', () => {
+    const ratios = ['adaptive', '16:9', '9:16', '1:1', '2:3', '3:2'];
+    assert.equal(inferClosestAspectRatio(1280, 1920, ratios, '16:9'), '2:3');
+    assert.equal(inferClosestAspectRatio(1080, 1920, ratios, '16:9'), '9:16');
+    assert.equal(inferClosestAspectRatio(1920, 1080, ratios, '16:9'), '16:9');
+    assert.equal(inferClosestAspectRatio(0, 0, ratios, '16:9'), '16:9');
 });
 
 test('resolves image dimensions from quality and ratio', () => {

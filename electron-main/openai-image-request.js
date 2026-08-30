@@ -24,6 +24,87 @@ function collectImageEditInputs(sourceReferences = []) {
     });
 }
 
+function isGptImage2Model(model) {
+    const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    return normalized === 'gptimage2';
+}
+
+function buildOpenAiImageRequestBody({ model, prompt, size, n = 1, responseFormat = 'b64_json', options = {} } = {}) {
+    const stream = options.stream === true;
+    const body = {
+        model,
+        prompt,
+        n: Math.min(8, Math.max(1, Number(n) || 1)),
+        quality: ['auto', 'low', 'medium', 'high'].includes(String(options.quality || '').toLowerCase())
+            ? String(options.quality).toLowerCase()
+            : 'high',
+        response_format: responseFormat === 'b64_json' ? 'b64_json' : 'url',
+        history_disabled: options.historyDisabled !== false,
+        stream
+    };
+    if (size) body.size = size;
+    return body;
+}
+
+function parseImageApiResponseText(responseText = '', contentType = '') {
+    const text = String(responseText || '').trim();
+    if (!text) return null;
+
+    try {
+        return JSON.parse(text);
+    } catch (_) {
+        // Streamed image responses are usually Server-Sent Events rather than one JSON document.
+    }
+
+    const events = [];
+    let dataLines = [];
+    const flushEvent = () => {
+        const data = dataLines.join('\n').trim();
+        dataLines = [];
+        if (!data || data === '[DONE]') return;
+        try {
+            const parsed = JSON.parse(data);
+            if (parsed && typeof parsed === 'object') events.push(parsed);
+            return;
+        } catch (_) {
+            // Some relays send the final image source as plain SSE data.
+        }
+        if (/^(?:https?:|data:image\/)/i.test(data)) {
+            events.push({ data: [{ url: data }] });
+        } else if (data.length > 512 && /^[A-Za-z0-9+/=\s]+$/.test(data)) {
+            events.push({ data: [{ b64_json: data }] });
+        }
+    };
+    text.replace(/\r\n?/g, '\n').split('\n').forEach(line => {
+        if (!line.trim()) {
+            flushEvent();
+            return;
+        }
+        const match = line.match(/^\s*data\s*:\s?(.*)$/i);
+        if (match) dataLines.push(match[1]);
+    });
+    flushEvent();
+    if (events.length === 1) return events[0];
+    if (events.length > 1) {
+        const aggregate = {};
+        events.forEach(event => {
+            Object.entries(event).forEach(([key, value]) => {
+                if (['data', 'output', 'images', 'results', 'content'].includes(key)) {
+                    const previous = Array.isArray(aggregate[key]) ? aggregate[key] : [];
+                    aggregate[key] = previous.concat(Array.isArray(value) ? value : [value]);
+                } else if (value !== undefined) {
+                    aggregate[key] = value;
+                }
+            });
+        });
+        aggregate.output = events;
+        return aggregate;
+    }
+
+    if (/event-stream/i.test(String(contentType))) return null;
+    return null;
+}
+
 function safeDispositionValue(value) {
     return String(value || '').replace(/[\r\n"]/g, '_');
 }
@@ -66,7 +147,15 @@ const IMAGE_TASK_COMPLETED_STATUSES = new Set(['completed', 'success', 'succeede
 const IMAGE_TASK_FAILED_STATUSES = new Set(['failed', 'failure', 'error', 'cancelled', 'canceled', 'rejected']);
 
 function imageTaskStatus(payload = {}) {
-    return String(payload?.status || payload?.data?.status || '').trim().toLowerCase();
+    return String(
+        payload?.status
+        || payload?.data?.status
+        || payload?.result?.status
+        || payload?.output?.status
+        || payload?.response?.status
+        || payload?.task?.status
+        || ''
+    ).trim().toLowerCase();
 }
 
 function normalizeImageTaskId(value) {
@@ -123,9 +212,21 @@ function getImageTaskId(payload = {}, statusCode = 0, location = '') {
         || payload?.data?.task_id
         || payload?.data?.taskId
         || payload?.data?.id
+        || payload?.data?.output?.task_id
+        || payload?.data?.output?.taskId
+        || payload?.data?.output?.id
         || payload?.result?.task_id
         || payload?.result?.taskId
         || payload?.result?.id
+        || payload?.result?.output?.task_id
+        || payload?.result?.output?.taskId
+        || payload?.result?.output?.id
+        || payload?.output?.task_id
+        || payload?.output?.taskId
+        || payload?.output?.id
+        || payload?.response?.task_id
+        || payload?.response?.taskId
+        || payload?.response?.id
         || payload?.task?.id;
     const explicitId = normalizeImageTaskId(explicit);
     if (explicitId) return explicitId;
@@ -137,8 +238,17 @@ function getImageTaskId(payload = {}, statusCode = 0, location = '') {
     if (locationId) return locationId;
 
     const status = imageTaskStatus(payload);
-    const objectType = String(payload?.object || '').trim().toLowerCase();
-    if (payload?.id != null && (status || objectType.includes('task'))) {
+    const objectTypes = [
+        payload?.object,
+        payload?.data?.object,
+        payload?.result?.object,
+        payload?.output?.object,
+        payload?.response?.object
+    ].map(value => String(value || '').trim().toLowerCase());
+    const looksLikeImageTask = objectTypes.some(value =>
+        /(?:image|generation).*(?:task|job|generation)|(?:task|job|generation).*(?:image|generation)/i.test(value)
+    );
+    if (payload?.id != null && (status || looksLikeImageTask)) {
         return normalizeImageTaskId(payload.id);
     }
 
@@ -156,42 +266,189 @@ function isImageTaskPayload(payload, statusCode = 0, location = '') {
     const taskId = getImageTaskId(payload, statusCode, location);
     if (!taskId) return false;
     const status = imageTaskStatus(payload);
-    const objectType = String(payload?.object || '').trim().toLowerCase();
+    const objectTypes = [
+        payload?.object,
+        payload?.data?.object,
+        payload?.result?.object,
+        payload?.output?.object,
+        payload?.response?.object
+    ].map(value => String(value || '').trim().toLowerCase());
     const midjourneyCode = Number(payload?.code);
+    const looksLikeImageTask = objectTypes.some(value =>
+        /(?:image|generation).*(?:task|job|generation)|(?:task|job|generation).*(?:image|generation)/i.test(value)
+    );
+    const hasImage = Boolean(getGeneratedImageData(payload));
     return Number(statusCode) === 202
-        || objectType.includes('image.generation.task')
+        || looksLikeImageTask
         || [1, 21, 22].includes(midjourneyCode)
         || IMAGE_TASK_PENDING_STATUSES.has(status)
         || IMAGE_TASK_COMPLETED_STATUSES.has(status)
-        || IMAGE_TASK_FAILED_STATUSES.has(status);
+        || IMAGE_TASK_FAILED_STATUSES.has(status)
+        || (!hasImage && Boolean(status || payload?.id) && objectTypes.some(value => /image|generation/i.test(value)));
 }
 
 function getGeneratedImageData(payload = {}) {
     return getGeneratedImageDataList(payload)[0] || null;
 }
 
-function getGeneratedImageDataList(payload = {}) {
-    const collections = [
-        payload?.data,
-        payload?.result?.data,
-        payload?.output?.data,
-        payload?.result?.output?.data,
-        payload?.images,
-        payload?.result?.images
-    ];
-    const collection = collections.find(value => Array.isArray(value) && value.length);
-    if (collection) {
-        return collection.map(value => {
-            if (value && typeof value === 'object') return value;
-            return typeof value === 'string' && value.trim() ? { url: value.trim() } : null;
-        }).filter(Boolean);
+const IMAGE_SOURCE_KEYS = [
+    'url', 'image_url', 'imageUrl', 'output_url', 'outputUrl',
+    'video_url', 'videoUrl',
+    'signed_url', 'signedUrl', 'src', 'b64_json', 'base64',
+    'base64_image', 'image_base64', 'base64Data'
+];
+const IMAGE_CONTAINER_KEYS = [
+    'data', 'images', 'image', 'output', 'outputs', 'result', 'results',
+    'content', 'artifacts', 'choices', 'message', 'response', 'body', 'payload'
+];
+
+const GENERATED_VIDEO_EXTENSIONS = new Set([
+    '.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mpeg', '.mpg'
+]);
+
+function generatedSourceExtension(source = '') {
+    const value = String(source || '').trim();
+    if (!value || /^data:/i.test(value)) return '';
+    try {
+        return path.extname(new URL(value, 'https://flow-canvas.invalid').pathname).toLowerCase();
+    } catch (_) {
+        return path.extname(value.split(/[?#]/, 1)[0]).toLowerCase();
+    }
+}
+
+function generatedVideoExtensionFromBuffer(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 4) return '';
+    if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+        return buffer.subarray(8, 12).toString('ascii').trim().toLowerCase() === 'qt' ? '.mov' : '.mp4';
+    }
+    if (buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return '.webm';
+    if (buffer.length >= 12
+        && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+        && buffer.subarray(8, 12).toString('ascii') === 'AVI ') {
+        return '.avi';
+    }
+    return '';
+}
+
+function describeGeneratedMedia(buffer, metadata = {}, hints = {}) {
+    const signatureExtension = generatedVideoExtensionFromBuffer(buffer);
+    if (signatureExtension) return { mediaType: 'video', extension: signatureExtension };
+
+    const format = String(metadata?.format || '').trim().toLowerCase();
+    if (format) {
+        const extension = format === 'jpeg' ? '.jpg' : format === 'webp' ? '.webp' : '.png';
+        return { mediaType: 'image', extension };
     }
 
-    const source = payload?.imageUrl
-        || payload?.image_url
-        || payload?.result?.imageUrl
-        || payload?.result?.image_url;
-    return typeof source === 'string' && source.trim() ? [{ url: source.trim() }] : [];
+    const contentType = String(hints?.contentType || '').trim().toLowerCase();
+    const sourceExtension = generatedSourceExtension(hints?.source);
+    if (contentType.startsWith('video/') || GENERATED_VIDEO_EXTENSIONS.has(sourceExtension)) {
+        const extension = GENERATED_VIDEO_EXTENSIONS.has(sourceExtension)
+            ? sourceExtension
+            : contentType.includes('webm')
+                ? '.webm'
+                : contentType.includes('quicktime')
+                    ? '.mov'
+                    : '.mp4';
+        return { mediaType: 'video', extension };
+    }
+
+    return { mediaType: 'image', extension: '.png' };
+}
+
+function imageSourceString(value) {
+    if (typeof value !== 'string') return '';
+    const source = value.trim();
+    if (!source) return '';
+    if (/^(?:https?:|data:image\/)/i.test(source)) return source;
+    if (source.length > 512 && /^[A-Za-z0-9+/=\s]+$/.test(source)) return source;
+    return '';
+}
+
+function normalizeImageEntry(value) {
+    if (typeof value === 'string') {
+        const source = imageSourceString(value);
+        return source ? { url: source } : null;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+    for (const key of IMAGE_SOURCE_KEYS) {
+        const candidate = value[key];
+        if (typeof candidate === 'string') {
+            const source = key.includes('base64') || key === 'b64_json'
+                ? candidate.trim()
+                : candidate.trim();
+            if (!source) continue;
+            if (key.includes('base64') || key === 'b64_json') {
+                return { ...value, b64_json: source };
+            }
+            return { ...value, url: source };
+        }
+        if (candidate && typeof candidate === 'object') {
+            const nested = normalizeImageEntry(candidate);
+            if (nested) return { ...value, ...nested };
+        }
+    }
+
+    // Responses-style image generation calls put the Base64 result in `result`.
+    const resultSource = imageSourceString(value.result);
+    if (resultSource) return { ...value, b64_json: resultSource };
+    return null;
+}
+
+function imageEntryIdentity(entry) {
+    return String(entry?.url || entry?.b64_json || '').trim();
+}
+
+function getGeneratedImageDataList(payload = {}) {
+    const results = [];
+    const seenObjects = new Set();
+    const seenSources = new Set();
+    const add = entry => {
+        if (!entry) return;
+        const identity = imageEntryIdentity(entry);
+        if (identity && seenSources.has(identity)) return;
+        if (identity) seenSources.add(identity);
+        results.push(entry);
+    };
+    const visit = (value, depth = 0, allowPlainString = false) => {
+        if (value == null || depth > 8) return;
+        if (typeof value === 'string') {
+            const source = value.trim();
+            if (/^[\[{]/.test(source)) {
+                try {
+                    visit(JSON.parse(source), depth + 1, allowPlainString);
+                    return;
+                } catch (_) {
+                    // Continue with normal URL/Base64 handling for non-JSON strings.
+                }
+            }
+            add(normalizeImageEntry(value) || (allowPlainString && source ? { url: source } : null));
+            return;
+        }
+        if (typeof value !== 'object') return;
+        if (seenObjects.has(value)) return;
+        seenObjects.add(value);
+
+        const direct = normalizeImageEntry(value);
+        if (direct) {
+            add(direct);
+            return;
+        }
+        if (Array.isArray(value)) {
+            value.forEach(item => visit(item, depth + 1, allowPlainString));
+            return;
+        }
+        IMAGE_CONTAINER_KEYS.forEach(key => {
+            if (value[key] !== undefined) {
+                const acceptsPlainString = ['data', 'images', 'image', 'output', 'outputs', 'artifacts'].includes(key);
+                visit(value[key], depth + 1, acceptsPlainString);
+            }
+        });
+    };
+
+    visit(payload);
+    return results;
 }
 
 function isCompletedImageTaskStatus(status) {
@@ -224,6 +481,17 @@ function imageHttpErrorMessage(statusCode, responseText = '', options = {}) {
         payload = null;
     }
     const reason = payload ? imageTaskErrorMessage(payload) : '';
+    const errorCode = String(payload?.error?.code || payload?.code || '').trim().toLowerCase();
+    const errorType = String(payload?.error?.type || payload?.type || '').trim().toLowerCase();
+    if (errorCode === 'all_vendors_failed' || (Number(statusCode) === 503 && errorType === 'yamlrunner_error')) {
+        if (options.midjourneyModel && options.compatibilityFallbackUsed) {
+            return `Midjourney 上游提交失败（HTTP ${statusCode}）。Flow Canvas 已先后尝试完整参数和仅保留提示词、画幅比例的兼容参数，但 RavenHash/上游 MJ 通道均未创建任务；请检查中转站的 MJ 渠道或账号池状态。`;
+        }
+        const retries = Math.max(0, Number(options.attempts || 1) - 1);
+        const retryText = retries > 0 ? `，已自动重试 ${retries} 次` : '';
+        const subject = options.midjourneyModel ? 'Midjourney' : '图片';
+        return `${subject}上游通道暂时全部不可用（HTTP ${statusCode}${retryText}）。请求已到达 RavenHash，但所有上游供应商都执行失败；请稍后重试，或在模型栏切换其他可用 API。`;
+    }
     if (options.nativeMidjourney && reason === 'unmarshal_response_body_failed') {
         return 'RavenHash 的 NewAPI 无法解析上游 Midjourney 响应。当前原生 MJ 转发使用 mj-api-secret，但该上游要求 Authorization: Bearer；需要修改 RavenHash 服务端的上游鉴权头。';
     }
@@ -231,6 +499,21 @@ function imageHttpErrorMessage(statusCode, responseText = '', options = {}) {
         return `Midjourney 提交失败（HTTP ${statusCode}）：${reason}`;
     }
     return `Image API failed: ${statusCode}${text ? ` ${text.slice(0, 2000)}` : ''}`;
+}
+
+function isAllVendorsFailedImageResponse(statusCode, responseText = '') {
+    if (Number(statusCode) !== 503) return false;
+    const text = String(responseText || '').trim();
+    if (!text) return false;
+    try {
+        const payload = JSON.parse(text);
+        const errorCode = String(payload?.error?.code || payload?.code || '').trim().toLowerCase();
+        const errorType = String(payload?.error?.type || payload?.type || '').trim().toLowerCase();
+        return errorCode === 'all_vendors_failed' || errorType === 'yamlrunner_error';
+    } catch (_) {
+        const normalized = text.toLowerCase();
+        return normalized.includes('all_vendors_failed') || normalized.includes('yamlrunner_error');
+    }
 }
 
 function buildImageTaskEndpoint(generationEndpoint, taskId, location = '') {
@@ -406,6 +689,40 @@ function appendMidjourneyParameters(prompt, options = {}, size = '') {
     return value;
 }
 
+function buildMidjourneyCompatibilityPrompt(prompt, options = {}, size = '') {
+    const source = String(prompt || '').trim();
+    if (!source) return '';
+
+    const ratioMatch = source.match(/(?:^|\s)--(?:ar|aspect)(?:\s+|=)(\d+(?:\.\d+)?:\d+(?:\.\d+)?)(?=\s|$)/i);
+    const optionRatio = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.test(String(options.ratio || '').trim())
+        ? String(options.ratio).trim()
+        : '';
+    const ratio = ratioMatch?.[1] || optionRatio || midjourneyAspectRatio(size);
+    const parameterStart = source.search(/(?:^|\s)--(?:ar|aspect|v|version|niji|raw|s|stylize|c|chaos|w|weird|q|quality|iw|sref|sw|sv|oref|ow|p|profile|seed|tile|draft|r|repeat|fast|relax|turbo|public|stealth|hd|sd|no)(?=\s|=|$)/i);
+    const plainPrompt = (parameterStart >= 0 ? source.slice(0, parameterStart) : source).trim();
+    if (!plainPrompt) return source;
+    return ratio ? `${plainPrompt} --ar ${ratio}` : plainPrompt;
+}
+
+function prependMidjourneyImagePrompts(prompt, imageUrls = []) {
+    const urls = [];
+    const seen = new Set();
+    for (const value of imageUrls) {
+        try {
+            const url = new URL(String(value || '').trim());
+            if (!['http:', 'https:'].includes(url.protocol)) continue;
+            const normalized = url.toString();
+            if (seen.has(normalized)) continue;
+            seen.add(normalized);
+            urls.push(normalized);
+        } catch (_) {
+            // Midjourney image prompts require public HTTP(S) URLs.
+        }
+    }
+    const text = String(prompt || '').trim();
+    return [...urls, text].filter(Boolean).join(' ');
+}
+
 function buildMidjourneyImaginePayload(prompt, images = [], size = '', options = {}) {
     return {
         base64Array: images.map(image => `data:${image.mimeType || 'application/octet-stream'};base64,${image.buffer.toString('base64')}`),
@@ -471,19 +788,40 @@ function imageTaskRetryDelayMs(value, fallbackMs = 2000, now = Date.now()) {
     return Math.max(500, Math.min(10000, Math.round(delay)));
 }
 
+function isRetryableImageHttpStatus(statusCode) {
+    return [429, 502, 503, 504].includes(Number(statusCode));
+}
+
+function isRetryableImageNetworkError(error) {
+    const details = [
+        error?.name,
+        error?.code,
+        error?.message,
+        error?.cause?.name,
+        error?.cause?.code,
+        error?.cause?.message
+    ].filter(Boolean).join(' ');
+    return /AbortError|ERR_(?:CONNECTION_(?:TIMED_OUT|CLOSED|RESET|REFUSED)|TIMED_OUT|NETWORK_CHANGED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|HTTP2_PROTOCOL_ERROR)|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|fetch failed|network error/i.test(details);
+}
+
 module.exports = {
     appendMidjourneyParameters,
+    buildMidjourneyCompatibilityPrompt,
     buildImageEditMultipart,
+    buildOpenAiImageRequestBody,
     buildImageTaskEndpoint,
     buildMidjourneyImaginePayload,
     buildMidjourneySubmitEndpoint,
     buildMidjourneyTaskEndpoint,
     collectImageEditInputs,
+    describeGeneratedMedia,
     getGeneratedImageData,
     getGeneratedImageDataList,
     getImageTaskId,
     getImageTaskIdFromLocation,
     imageHttpErrorMessage,
+    isAllVendorsFailedImageResponse,
+    parseImageApiResponseText,
     imageTaskErrorMessage,
     imageTaskRetryDelayMs,
     imageTaskStatus,
@@ -493,6 +831,9 @@ module.exports = {
     isMidjourneyImagineModel,
     isMidjourneyImageModel,
     isNativeMidjourneyEndpoint,
+    isRetryableImageHttpStatus,
+    isRetryableImageNetworkError,
     midjourneyGridRegions,
+    prependMidjourneyImagePrompts,
     shouldUseNativeMidjourneyRoute
 };

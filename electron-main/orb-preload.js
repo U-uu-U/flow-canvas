@@ -7,6 +7,8 @@ window.addEventListener('DOMContentLoaded', () => {
     let restoring = false;
     let dragging = false;
     let dragPointerId = null;
+    let dragStart = null;
+    let dragMoved = false;
     let dragDepth = 0;
     let dropStateTimer = null;
 
@@ -70,6 +72,8 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!dragging) return;
         dragging = false;
         dragPointerId = null;
+        dragStart = null;
+        dragMoved = false;
         button.classList.remove('dragging');
         ipcRenderer.send('window:stopOrbDrag');
     };
@@ -80,12 +84,27 @@ window.addEventListener('DOMContentLoaded', () => {
         button.classList.remove('restoring', 'dragging');
     };
 
+    const restoreFromOrb = async () => {
+        if (restoring || dragging) return;
+        restoring = true;
+        button.classList.add('restoring');
+        try {
+            await ipcRenderer.invoke('window:restoreFromOrb');
+        } catch (err) {
+            console.error('[Orb] Failed to restore Flow Canvas:', err);
+        } finally {
+            button.classList.remove('restoring');
+            restoring = false;
+        }
+    };
+
     button.addEventListener('pointerdown', event => {
-        if (event.button === 0 && dragging) stopDragging();
-        if (event.button !== 2 || restoring) return;
+        if (event.button !== 0 || restoring) return;
         event.preventDefault();
         dragging = true;
         dragPointerId = event.pointerId;
+        dragStart = { x: event.screenX, y: event.screenY };
+        dragMoved = false;
         button.classList.add('dragging');
         button.setPointerCapture(event.pointerId);
         ipcRenderer.send('window:startOrbDrag');
@@ -94,13 +113,19 @@ window.addEventListener('DOMContentLoaded', () => {
     button.addEventListener('pointermove', event => {
         if (!dragging || event.pointerId !== dragPointerId) return;
         event.preventDefault();
+        if (dragStart && Math.hypot(event.screenX - dragStart.x, event.screenY - dragStart.y) >= 4) {
+            dragMoved = true;
+        }
     });
 
     button.addEventListener('pointerup', event => {
         if (event.pointerId !== dragPointerId) return;
         event.preventDefault();
+        const moved = dragMoved || (dragStart
+            && Math.hypot(event.screenX - dragStart.x, event.screenY - dragStart.y) >= 4);
         if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId);
         stopDragging();
+        if (!moved) void restoreFromOrb();
     });
     button.addEventListener('pointercancel', stopDragging);
     button.addEventListener('lostpointercapture', stopDragging);
@@ -149,18 +174,4 @@ window.addEventListener('DOMContentLoaded', () => {
         dropStateTimer = setTimeout(() => setDropState(), 900);
     });
 
-    button.addEventListener('click', async event => {
-        if (event.button !== 0 || restoring || dragging) return;
-        restoring = true;
-        button.classList.add('restoring');
-
-        try {
-            await ipcRenderer.invoke('window:restoreFromOrb');
-        } catch (err) {
-            console.error('[Orb] Failed to restore Flow Canvas:', err);
-        } finally {
-            button.classList.remove('restoring');
-            restoring = false;
-        }
-    });
 });

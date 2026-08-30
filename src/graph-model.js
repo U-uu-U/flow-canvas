@@ -44,11 +44,12 @@ export function getPorts(item) {
         };
     }
 
-    // media：单个输出端口，外加一个 source 输入承接溯源边。
+    // media：单个输出端口，外加一个可多连的 source 输入承接溯源边
+    // 或普通图片生成的上游参考边。
     // source 不参与执行（mediaOutput 只看 filePath），存在的意义是让
     // 「这张图是从哪个节点生成的」有个可视化落点。
     return {
-        inputs: [{ name: 'source', dataType: 'any' }],
+        inputs: [{ name: 'source', dataType: 'any', multi: true }],
         outputs: [{ name: 'out', dataType: mediaItemDataType(item) }]
     };
 }
@@ -326,7 +327,10 @@ export function collectInputContext(item, allConnections = [], resultCache = new
                     kind: source.kind || 'media',
                     nodeType: source.nodeType || null,
                     filePath: source.filePath || null,
-                    fromNodeId: source.fromNodeId || null
+                    fromNodeId: source.fromNodeId || null,
+                    mediaType: source.mediaType || null,
+                    width: Number(source.width) || null,
+                    height: Number(source.height) || null
                 } : null
             };
         });

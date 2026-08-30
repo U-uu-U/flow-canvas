@@ -5,14 +5,37 @@ const MAX_ZOOM_FACTOR_PER_FRAME = 1.2;
 export const MIN_VIEWPORT_SCALE = 0.1;
 export const MAX_VIEWPORT_SCALE = 32;
 export const ZOOM_SLIDER_STEPS = 1000;
-export const TEXT_CONTENT_MIN_SCALE = 0.6;
+export const TEXT_CONTENT_MIN_CHARACTERS = 10;
+export const TEXT_CONTENT_HORIZONTAL_PADDING = 10;
+export const TEXT_CONTENT_BASE_FONT_SIZE = 13;
+export const TEXT_CONTENT_MIN_FONT_SIZE = 11;
+export const TEXT_CONTENT_MAX_FONT_SIZE = 20;
 
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
 
-export function isCanvasTextContentVisible(scale, minScale = TEXT_CONTENT_MIN_SCALE) {
-    return (Number(scale) || 0) >= minScale;
+export function getCanvasTextFontSize(scale) {
+    return clamp(
+        TEXT_CONTENT_BASE_FONT_SIZE * (Number(scale) || 0),
+        TEXT_CONTENT_MIN_FONT_SIZE,
+        TEXT_CONTENT_MAX_FONT_SIZE
+    );
+}
+
+export function isCanvasTextContentVisible(
+    scale,
+    contentWorldWidth = 278,
+    minCharacters = TEXT_CONTENT_MIN_CHARACTERS
+) {
+    const normalizedScale = Math.max(0, Number(scale) || 0);
+    const contentScreenWidth = Math.max(
+        0,
+        (Number(contentWorldWidth) || 0) * normalizedScale - TEXT_CONTENT_HORIZONTAL_PADDING
+    );
+    const requiredWidth = getCanvasTextFontSize(normalizedScale)
+        * Math.max(1, Number(minCharacters) || TEXT_CONTENT_MIN_CHARACTERS);
+    return contentScreenWidth >= requiredWidth;
 }
 
 export function normalizeWheelDelta(event, viewportHeight = 800) {

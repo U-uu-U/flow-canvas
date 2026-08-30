@@ -20,6 +20,21 @@ function normalizePosition(value, count) {
     return ((position % count) + count) % count;
 }
 
+export function resolveGeneratorResultMediaType(output = {}, filePath = '') {
+    const explicitType = String(
+        output?._resultMediaType
+        || output?._resultItem?.mediaType
+        || ''
+    ).trim().toLowerCase();
+    if (explicitType === 'image' || explicitType === 'video') return explicitType;
+
+    const extension = String(filePath || '').split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase() || '';
+    if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv', 'mpeg', 'mpg'].includes(extension)) {
+        return 'video';
+    }
+    return 'image';
+}
+
 export function getGeneratorResultLayout(data = {}) {
     return data.resultLayoutMode === 'branched' ? 'branched' : 'collapsed';
 }

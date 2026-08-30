@@ -224,6 +224,25 @@ test('config 缺省值由节点类型的 default 补齐', async () => {
     assert.equal(runner.getResult('m').text, 'x\ny');
 });
 
+test('runFrom: 单次配置覆盖不会改写节点持久化配置', async () => {
+    NT.__test_config_override = {
+        type: '__test_config_override', title: '配置覆盖', icon: 'settings', color: '#00f', width: 100,
+        inputs: [], outputs: [{ name: 'out', dataType: 'string' }], config: [],
+        async execute(_inputs, config) { return { out: config.prompt }; }
+    };
+    const item = op('target', '__test_config_override', { prompt: '原提示词' });
+    const runner = new R.GraphRunner(makeCtx([item]));
+
+    const result = await runner.runFrom('target', {
+        configOverrides: { target: { prompt: '本次 Agent 提示词' } }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(runner.getResult('target').out, '本次 Agent 提示词');
+    assert.equal(item.config.prompt, '原提示词');
+    delete NT.__test_config_override;
+});
+
 test('resetAll: 把非 idle 状态清回 idle 并清空缓存', async () => {
     const items = [op('t1', 'text', { text: 'x' })];
     const ctx = makeCtx(items);

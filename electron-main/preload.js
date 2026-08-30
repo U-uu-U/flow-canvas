@@ -14,6 +14,11 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         saveSync: (data) => ipcRenderer.sendSync('store:saveSync', data),
     },
 
+    apiConfig: {
+        load: () => ipcRenderer.invoke('api-config:load'),
+        save: (config) => ipcRenderer.invoke('api-config:save', config),
+    },
+
     // 文件夹管理
     folder: {
         select: () => ipcRenderer.invoke('folder:select'),
@@ -104,6 +109,9 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         getEvents: () => ipcRenderer.invoke('browser-sync:get-events'),
         onTaskSubmitted: (callback) => {
             ipcRenderer.on('generation:task-submitted', (_, payload) => callback(payload));
+        },
+        onTaskCompleted: (callback) => {
+            ipcRenderer.on('generation:task-completed', (_, payload) => callback(payload));
         }
     },
 

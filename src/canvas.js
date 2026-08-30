@@ -4,12 +4,14 @@
 
 import Konva from 'konva';
 import { GraphView, viewportFixedScale } from './graph-view.js';
+import { collectUpstreamMediaAttachments, collectUpstreamPromptContext } from './agent-attachments.js';
 import { NODE_TYPES } from './node-types.js';
 import { nodeIconSvg } from './node-icons.js';
 import { GraphRunner, STATUS } from './graph-runner.js';
 import {
     MAX_VIEWPORT_SCALE,
     MIN_VIEWPORT_SCALE,
+    getCanvasTextFontSize,
     isCanvasTextContentVisible,
     normalizeWheelDelta,
     wheelZoomFactor,
@@ -17,8 +19,10 @@ import {
 } from './viewport-zoom.js';
 import { getSelectionToolbarPosition } from './selection-toolbar-layout.js';
 import {
+    fitCropRectToAspect,
     moveCropRect,
     normalizeCropRect,
+    parseCropAspectRatio,
     resizeCropRect
 } from './image-crop-layout.js';
 import {
@@ -36,6 +40,7 @@ import {
     promoteGeneratorResult,
     removeGeneratorResultByFilePath,
     replaceGeneratorResultFilePath,
+    resolveGeneratorResultMediaType,
     rotateGeneratorResults,
     setGeneratorResultLayout
 } from './generator-result-stack.js';
@@ -47,7 +52,7 @@ import {
     resolveGenerationDisplaySize,
     resolveImageDimensions
 } from './image-node-settings.js';
-import { isMidjourneyImageModel } from './provider-capabilities.js';
+import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
     composePromptFromTemplate,
@@ -875,7 +880,6 @@ export class CanvasManager {
         const addButton = document.getElementById('canvasToolAdd');
         const searchButton = document.getElementById('canvasToolSearch');
         const planButton = document.getElementById('canvasToolPlan');
-        const tasksButton = document.getElementById('canvasToolTasks');
         this.canvasNodeSearch = document.getElementById('canvasNodeSearch');
         this.canvasNodeSearchInput = document.getElementById('canvasNodeSearchInput');
         this.canvasNodeSearchResults = document.getElementById('canvasNodeSearchResults');
@@ -884,7 +888,6 @@ export class CanvasManager {
             document.dispatchEvent(new CustomEvent('open-folder-groups'));
         });
         planButton?.addEventListener('click', () => document.getElementById('newPlanBtn')?.click());
-        tasksButton?.addEventListener('click', () => document.getElementById('agentTaskHistoryBtn')?.click());
 
         addButton?.addEventListener('click', event => {
             event.preventDefault();
@@ -1493,13 +1496,38 @@ export class CanvasManager {
             </div>
             <div class="image-crop-actions">
                 <span class="image-crop-size" aria-live="polite"></span>
+                <button type="button" class="image-crop-ratio-trigger" title="设置裁切画幅比" aria-haspopup="dialog" aria-expanded="false">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-fit"></use></svg>
+                    <span data-crop-ratio-label>自由</span>
+                </button>
+                <div class="image-crop-ratio-popover" role="dialog" aria-label="设置裁切画幅比" hidden>
+                    <strong>画幅比</strong>
+                    <div class="image-crop-ratio-presets" role="group" aria-label="常用画幅比">
+                        <button type="button" class="selected" data-crop-ratio="">自由</button>
+                        <button type="button" data-crop-ratio="1:1">1:1</button>
+                        <button type="button" data-crop-ratio="4:3">4:3</button>
+                        <button type="button" data-crop-ratio="3:4">3:4</button>
+                        <button type="button" data-crop-ratio="16:9">16:9</button>
+                        <button type="button" data-crop-ratio="9:16">9:16</button>
+                        <button type="button" data-crop-ratio="3:2">3:2</button>
+                        <button type="button" data-crop-ratio="2:3">2:3</button>
+                    </div>
+                    <div class="image-crop-ratio-custom">
+                        <input type="text" inputmode="decimal" autocomplete="off" aria-label="自定义画幅比" placeholder="例如 2.39:1">
+                        <button type="button" data-crop-ratio-apply title="应用自定义画幅比" aria-label="应用自定义画幅比">
+                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>
+                        </button>
+                    </div>
+                    <small class="image-crop-ratio-message" aria-live="polite"></small>
+                </div>
                 <button type="button" class="image-crop-cancel" title="取消裁切">取消</button>
                 <button type="button" class="image-crop-confirm">完成裁切</button>
             </div>
         `;
         root.addEventListener('pointerdown', event => {
-            event.preventDefault();
             event.stopPropagation();
+            if (event.target.closest?.('button, input')) return;
+            event.preventDefault();
             this._beginImageCropPointer(event);
         });
         root.addEventListener('contextmenu', event => event.preventDefault());
@@ -1514,6 +1542,9 @@ export class CanvasManager {
         });
 
         this.container.appendChild(root);
+        const imageSource = displayNode.image?.();
+        const sourceWidth = Math.max(1, Number(imageSource?.naturalWidth || imageSource?.width || displayNode.width()) || 1);
+        const sourceHeight = Math.max(1, Number(imageSource?.naturalHeight || imageSource?.height || displayNode.height()) || 1);
         this._activeImageCrop = {
             itemId: item.data.id,
             sourcePath: item.data.filePath,
@@ -1523,11 +1554,86 @@ export class CanvasManager {
             selection: root.querySelector('.image-crop-selection'),
             actions: root.querySelector('.image-crop-actions'),
             sizeLabel: root.querySelector('.image-crop-size'),
+            ratioTrigger: root.querySelector('.image-crop-ratio-trigger'),
+            ratioLabel: root.querySelector('[data-crop-ratio-label]'),
+            ratioPopover: root.querySelector('.image-crop-ratio-popover'),
+            ratioInput: root.querySelector('.image-crop-ratio-custom input'),
+            ratioMessage: root.querySelector('.image-crop-ratio-message'),
+            aspectRatio: null,
+            aspectRatioLabel: '自由',
+            sourceWidth,
+            sourceHeight,
+            sourceAspect: sourceWidth / sourceHeight,
             wasStageDraggable: this.stage.draggable(),
             wasItemDraggable: item.group.draggable(),
             gifDisplay: item.gifDomElement?.style?.display || '',
             busy: false
         };
+        const activeCrop = this._activeImageCrop;
+        const closeRatioPopover = () => {
+            activeCrop.ratioPopover.hidden = true;
+            activeCrop.ratioTrigger.setAttribute('aria-expanded', 'false');
+        };
+        const applyRatio = (value, label = '') => {
+            const ratio = value === '' ? null : parseCropAspectRatio(value);
+            if (value !== '' && !ratio) {
+                activeCrop.ratioMessage.textContent = '请输入 16:9、3/2 或 1.78';
+                activeCrop.ratioInput.setAttribute('aria-invalid', 'true');
+                return false;
+            }
+            activeCrop.aspectRatio = ratio;
+            activeCrop.aspectRatioLabel = ratio ? (label || String(value).trim()) : '自由';
+            if (ratio) {
+                activeCrop.crop = fitCropRectToAspect(activeCrop.crop, ratio, activeCrop.sourceAspect);
+            }
+            activeCrop.ratioLabel.textContent = activeCrop.aspectRatioLabel;
+            activeCrop.ratioMessage.textContent = '';
+            activeCrop.ratioInput.removeAttribute('aria-invalid');
+            activeCrop.root.classList.toggle('is-ratio-locked', Boolean(ratio));
+            activeCrop.ratioPopover.querySelectorAll('[data-crop-ratio]').forEach(button => {
+                button.classList.toggle('selected', button.dataset.cropRatio === (ratio ? activeCrop.aspectRatioLabel : ''));
+            });
+            this._renderImageCropOverlay();
+            closeRatioPopover();
+            return true;
+        };
+        activeCrop.ratioTrigger.addEventListener('click', event => {
+            event.stopPropagation();
+            const opening = activeCrop.ratioPopover.hidden;
+            activeCrop.ratioPopover.hidden = !opening;
+            activeCrop.ratioTrigger.setAttribute('aria-expanded', String(opening));
+            if (opening) {
+                activeCrop.ratioMessage.textContent = '';
+                activeCrop.ratioInput.removeAttribute('aria-invalid');
+                requestAnimationFrame(() => activeCrop.ratioInput.focus({ preventScroll: true }));
+            }
+        });
+        activeCrop.ratioPopover.querySelectorAll('[data-crop-ratio]').forEach(button => {
+            button.addEventListener('click', event => {
+                event.stopPropagation();
+                applyRatio(button.dataset.cropRatio, button.dataset.cropRatio);
+            });
+        });
+        const applyCustomRatio = () => applyRatio(activeCrop.ratioInput.value, activeCrop.ratioInput.value.trim());
+        activeCrop.ratioPopover.querySelector('[data-crop-ratio-apply]')?.addEventListener('click', event => {
+            event.stopPropagation();
+            applyCustomRatio();
+        });
+        activeCrop.ratioInput.addEventListener('input', () => {
+            activeCrop.ratioMessage.textContent = '';
+            activeCrop.ratioInput.removeAttribute('aria-invalid');
+        });
+        activeCrop.ratioInput.addEventListener('keydown', event => {
+            event.stopPropagation();
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                applyCustomRatio();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeRatioPopover();
+                activeCrop.ratioTrigger.focus({ preventScroll: true });
+            }
+        });
         this.stage.draggable(false);
         item.group.draggable(false);
         if (item.gifDomElement) item.gifDomElement.style.display = 'none';
@@ -1543,6 +1649,10 @@ export class CanvasManager {
     _beginImageCropPointer(event) {
         const active = this._activeImageCrop;
         if (!active || active.busy || event.button !== 0) return;
+        if (active.ratioPopover && !active.ratioPopover.hidden) {
+            active.ratioPopover.hidden = true;
+            active.ratioTrigger?.setAttribute('aria-expanded', 'false');
+        }
         const handle = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle || '';
         const isMove = Boolean(event.target.closest?.('[data-crop-drag]')) && !handle;
         if (!handle && !isMove) return;
@@ -1561,7 +1671,12 @@ export class CanvasManager {
             const dx = (moveEvent.clientX - startX) / frameRect.width;
             const dy = (moveEvent.clientY - startY) / frameRect.height;
             active.crop = handle
-                ? resizeCropRect(startCrop, handle, dx, dy, { minWidth, minHeight })
+                ? resizeCropRect(startCrop, handle, dx, dy, {
+                    minWidth,
+                    minHeight,
+                    aspectRatio: active.aspectRatio,
+                    sourceAspect: active.sourceAspect
+                })
                 : moveCropRect(startCrop, dx, dy);
             this._renderImageCropOverlay();
         };
@@ -1633,7 +1748,9 @@ export class CanvasManager {
         });
 
         if (active.sizeLabel) {
-            active.sizeLabel.textContent = `保留 ${Math.round(crop.width * 100)}% × ${Math.round(crop.height * 100)}%`;
+            const pixelWidth = Math.max(1, Math.round(active.sourceWidth * crop.width));
+            const pixelHeight = Math.max(1, Math.round(active.sourceHeight * crop.height));
+            active.sizeLabel.textContent = `${pixelWidth} × ${pixelHeight}`;
         }
         const actionsRect = active.actions.getBoundingClientRect();
         const cropRight = active.screenRect.left + (crop.x + crop.width) * active.screenRect.width;
@@ -1794,6 +1911,26 @@ export class CanvasManager {
         requestAnimationFrame(() => menu.querySelector('button')?.focus({ preventScroll: true }));
     }
 
+    _getMediaGenerationReferenceConnections(itemId) {
+        const target = this.items.get(itemId)?.data;
+        if (!target) return [];
+        const seen = new Set([itemId]);
+        return (this.graphView?.connections || [])
+            .filter(connection => connection?.to?.nodeId === itemId
+                && connection.to.port === 'source')
+            .filter(connection => {
+                const sourceId = connection.from?.nodeId;
+                if (!sourceId || seen.has(sourceId)) return false;
+                if (this._connectionOutputDataType(connection) !== 'image') return false;
+                seen.add(sourceId);
+                return true;
+            })
+            .map(connection => ({
+                nodeId: connection.from.nodeId,
+                port: connection.from.port || 'out'
+            }));
+    }
+
     _closeGenerationTypeMenu() {
         const active = this._generationTypeMenu;
         if (!active) return;
@@ -1841,6 +1978,7 @@ export class CanvasManager {
         }
 
         const config = this._createDefaultOpConfig('image');
+        const referenceConnections = this._getMediaGenerationReferenceConnections(itemId);
         const size = getGeneratorPlaceholderSize('image', config, source);
         const draftId = `media-composer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const draft = {
@@ -1863,7 +2001,9 @@ export class CanvasManager {
             resultItems: [],
             resultStackPosition: 0,
             composerDraft: true,
-            composerSourceItemId: itemId
+            composerSourceItemId: itemId,
+            composerReferenceConnections: referenceConnections,
+            composerReferenceItemIds: referenceConnections.map(connection => connection.nodeId)
         };
         const draftGroup = new Konva.Group({
             x: draft.x,
@@ -1886,6 +2026,18 @@ export class CanvasManager {
         const data = entry?.data;
         if (!entry || !data?.composerDraft) return data || null;
         const sourceId = data.composerSourceItemId;
+        const referenceConnections = Array.isArray(data.composerReferenceConnections)
+            ? data.composerReferenceConnections
+                .filter(connection => connection?.nodeId && connection.nodeId !== sourceId)
+                .map(connection => ({
+                    nodeId: connection.nodeId,
+                    port: connection.port || 'out'
+                }))
+            : (Array.isArray(data.composerReferenceItemIds)
+                ? data.composerReferenceItemIds
+                    .filter(id => id && id !== sourceId)
+                    .map(nodeId => ({ nodeId, port: 'out' }))
+                : []);
         const sourceEntry = this.items.get(sourceId);
         const source = sourceEntry?.data;
         if (!sourceEntry || !source) return null;
@@ -1899,16 +2051,25 @@ export class CanvasManager {
         data.height = size.height;
         delete data.composerDraft;
         delete data.composerSourceItemId;
+        delete data.composerReferenceConnections;
+        delete data.composerReferenceItemIds;
 
         entry.group.destroy();
         this.items.delete(nodeId);
         this.storeData.items.push(data);
         this._createOpNode(data);
+        const connections = [];
         const connection = this.graphView?.connect(
             { nodeId: sourceId, port: 'out' },
             { nodeId, port: 'source' }
         );
-        if (!connection) {
+        if (connection) connections.push(connection);
+        const materializedReferenceConnections = referenceConnections.map(reference => this.graphView?.connect(
+            { nodeId: reference.nodeId, port: reference.port },
+            { nodeId, port: 'source' }
+        ));
+        if (!connection || materializedReferenceConnections.some(referenceConnection => !referenceConnection)) {
+            connections.concat(materializedReferenceConnections.filter(Boolean)).forEach(next => this.graphView?.disconnect(next.id));
             const materializedEntry = this.items.get(nodeId);
             this.graphView?.clearPorts(nodeId);
             materializedEntry?.group?.destroy();
@@ -1924,6 +2085,8 @@ export class CanvasManager {
                 listening: false
             });
             this.items.set(nodeId, { group: draftGroup, data, loaded: true, loading: false });
+            data.composerReferenceConnections = referenceConnections;
+            data.composerReferenceItemIds = referenceConnections.map(reference => reference.nodeId);
             this._showCanvasStatus('参考图连接失败，请重新选择图片', 3200);
             return null;
         }
@@ -2035,6 +2198,11 @@ export class CanvasManager {
         const target = this.items.get(nodeId)?.data;
         if (!target || target.kind !== 'op' || !['image', 'video'].includes(target.nodeType)) return false;
 
+        const profile = target.nodeType === 'video'
+            ? this._normalizeVideoConfigForProfile(target.config || {})
+            : null;
+        if (target.nodeType === 'video') this._enforceVideoReferenceLimits(target, profile);
+
         const selections = { image: [], video: [], audio: [] };
         (this.graphView?.connections || []).forEach(connection => {
             if (!this._isGeneratorInputConnection(target, connection)) return;
@@ -2043,9 +2211,10 @@ export class CanvasManager {
             if (entry && selections[entry.mediaType]) selections[entry.mediaType].push(entry);
         });
 
-        this.beginMediaReferencePick('mixed', [], target.nodeType === 'image'
+        const limits = target.nodeType === 'image'
             ? { image: 9, video: 0, audio: 0 }
-            : { image: 9, video: 3, audio: 3 }, selections);
+            : this._getVideoReferenceLimitsForConfig(target.config || {}, profile);
+        this.beginMediaReferencePick('mixed', [], limits, selections);
         this._activeNodeReferenceTargetId = nodeId;
         this._showCanvasStatus('点击画布素材连接到当前节点；再次点击可断开，Esc 完成', 4600);
         return true;
@@ -2123,7 +2292,9 @@ export class CanvasManager {
             id,
             itemId: id,
             filePath,
-            mediaType: this._getFileType(filePath)
+            mediaType: this._getFileType(filePath),
+            width: Number(item.data.width) || null,
+            height: Number(item.data.height) || null
         };
     }
 
@@ -3951,6 +4122,8 @@ export class CanvasManager {
                 mediaType: entry.data.mediaType || (entry.data.filePath ? this._getFileType(entry.data.filePath) : null),
                 x: entry.group.x(),
                 y: entry.group.y(),
+                width: Number(entry.data.width) || null,
+                height: Number(entry.data.height) || null,
                 model: entry.data.model || null,
                 status: entry.data.status || null
             });
@@ -4734,16 +4907,51 @@ export class CanvasManager {
                 config.sourceProviderId = provider.sourceProviderId || provider.id || null;
                 config.model = provider.model || '';
             }
+            if (nodeType === 'image') {
+                const preferences = this.options.getImageGenerationPreferences?.(config);
+                if (preferences && typeof preferences === 'object') {
+                    Object.assign(config, preferences);
+                }
+            }
             if (nodeType === 'video') {
                 const profile = this.options.getVideoModelProfile?.(config);
                 if (profile) {
                     config.ratio = profile.defaultRatio || config.ratio;
+                    config.ratioMode = profile.resolveAdaptiveRatio === true && config.ratio === 'adaptive'
+                        ? 'auto'
+                        : 'manual';
                     config.resolution = profile.defaultResolution || config.resolution;
                     config.duration = profile.defaultDuration ?? config.duration;
                 }
             }
         }
         return config;
+    }
+
+    _rememberImageGenerationPreferences(data) {
+        if (data?.nodeType !== 'image' || !data.config) return;
+        this.options.saveImageGenerationPreferences?.(data.config);
+    }
+
+    _applyImageGenerationProviderSelection(data, provider) {
+        if (!data?.config || !provider) return;
+        data.config.providerId = provider.id;
+        data.config.sourceProviderId = provider.sourceProviderId || provider.id;
+        data.config.model = provider.model || '';
+        data.model = data.config.model;
+        if (data.nodeType === 'image') {
+            this.options.setImageProvider?.(provider.id);
+            const preferences = this.options.getImageGenerationPreferences?.(data.config);
+            if (preferences && typeof preferences === 'object') {
+                Object.assign(data.config, preferences);
+            }
+            this._normalizeMidjourneyImageConfig(data);
+            this._rememberImageGenerationPreferences(data);
+        }
+        if (data.nodeType === 'video') {
+            const profile = this._normalizeVideoConfigForProfile(data.config);
+            this._enforceVideoReferenceLimits(data, profile);
+        }
     }
 
     addOpNode(nodeType, pos = null) {
@@ -4977,17 +5185,31 @@ export class CanvasManager {
     _opReferenceEntries(data) {
         if (!data?.id || !['image', 'video'].includes(data.nodeType)) return [];
         if (data.composerDraft && data.composerSourceItemId) {
-            const source = this.items.get(data.composerSourceItemId)?.data;
-            return source ? [{
-                connection: {
-                    id: `composer-reference-${data.id}`,
-                    kind: 'transient',
-                    transient: true,
-                    from: { nodeId: source.id, port: 'out' },
-                    to: { nodeId: data.id, port: 'source' }
-                },
-                source
-            }] : [];
+            const sourceIds = [
+                data.composerSourceItemId,
+                ...(Array.isArray(data.composerReferenceItemIds) ? data.composerReferenceItemIds : [])
+            ];
+            const sourcePorts = new Map(
+                (Array.isArray(data.composerReferenceConnections) ? data.composerReferenceConnections : [])
+                    .map(connection => [connection.nodeId, connection.port || 'out'])
+            );
+            const seen = new Set();
+            return sourceIds.map((sourceId, index) => {
+                if (!sourceId || seen.has(sourceId)) return null;
+                const source = this.items.get(sourceId)?.data;
+                if (!source) return null;
+                seen.add(sourceId);
+                return {
+                    connection: {
+                        id: `composer-reference-${data.id}-${index}`,
+                        kind: 'transient',
+                        transient: true,
+                        from: { nodeId: source.id, port: sourcePorts.get(source.id) || 'out' },
+                        to: { nodeId: data.id, port: 'source' }
+                    },
+                    source
+                };
+            }).filter(Boolean);
         }
         const acceptedTypes = data.nodeType === 'image'
             ? new Set(['image'])
@@ -5000,6 +5222,54 @@ export class CanvasManager {
                 return source ? { connection, source } : null;
             })
             .filter(Boolean);
+    }
+
+    _getUpstreamAgentAttachments(nodeId) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data) return [];
+        const itemData = new Map(
+            [...this.items].map(([id, entry]) => [id, entry?.data]).filter(([, item]) => item)
+        );
+        const transientSourceIds = this._opReferenceEntries(data)
+            .map(({ source }) => source?.id)
+            .filter(Boolean);
+        return collectUpstreamMediaAttachments({
+            targetNodeId: nodeId,
+            items: itemData,
+            connections: this.graphView?.connections || [],
+            transientSourceIds
+        });
+    }
+
+    getAgentGenerationContext(nodeId) {
+        const data = this.items.get(nodeId)?.data;
+        if (!data || !['image', 'video'].includes(data.nodeType)) return null;
+        const itemData = new Map(
+            [...this.items].map(([id, entry]) => [id, entry?.data]).filter(([, item]) => item)
+        );
+        const promptContext = collectUpstreamPromptContext({
+            targetNodeId: nodeId,
+            items: itemData,
+            connections: this.graphView?.connections || []
+        });
+        const resolvedConfig = { ...(data.config || {}) };
+        (NODE_TYPES[data.nodeType]?.config || []).forEach(field => {
+            if ((resolvedConfig[field.key] === undefined || resolvedConfig[field.key] === '')
+                && field.default !== undefined) {
+                resolvedConfig[field.key] = field.default;
+            }
+        });
+        const parameters = JSON.parse(JSON.stringify(resolvedConfig));
+        delete parameters.prompt;
+        return {
+            nodeId,
+            nodeType: data.nodeType,
+            title: data.title || NODE_TYPES[data.nodeType]?.title || '生成节点',
+            ...promptContext,
+            model: data.config?.model || data.model || '',
+            parameters,
+            attachments: this._getUpstreamAgentAttachments(nodeId)
+        };
     }
 
     _drawOpReferenceStrip(group, data, width) {
@@ -5461,6 +5731,9 @@ export class CanvasManager {
             this._showCanvasStatus('没有可拆开的本地图片结果', 2800);
             return [];
         }
+        const retainedResult = results[0];
+        const branchResults = results.slice(1);
+        const stackPosition = Number(source.resultStackPosition) || 0;
 
         this._splittingGeneratorResultIds ||= new Set();
         if (this._splittingGeneratorResultIds.has(nodeId)) return [];
@@ -5471,7 +5744,7 @@ export class CanvasManager {
             y: entry.group.y(),
             width: source.width,
             height: source.height
-        }, results.length);
+        }, branchResults.length);
         const referenceEntries = this._opReferenceEntries(source).map(({ source: reference }) => ({
             itemId: reference.id,
             filePath: reference.filePath || ''
@@ -5488,12 +5761,18 @@ export class CanvasManager {
             batchSize: results.length
         };
         const created = [];
+        const candidateIndexAt = (result, offset) => {
+            const fallback = ((stackPosition + offset) % results.length) + 1;
+            const candidateIndex = Number(result?.item?.candidateIndex);
+            return Number.isFinite(candidateIndex) && candidateIndex > 0 ? candidateIndex : fallback;
+        };
 
         try {
-            for (let index = 0; index < results.length; index += 1) {
-                const result = results[index];
+            for (let index = 0; index < branchResults.length; index += 1) {
+                const result = branchResults[index];
                 const position = positions[index];
                 const resultItem = result.item && typeof result.item === 'object' ? result.item : {};
+                const candidateIndex = candidateIndexAt(result, index + 1);
                 const child = {
                     ...resultItem,
                     id: `split-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
@@ -5508,8 +5787,8 @@ export class CanvasManager {
                     fromNodeId: source.id,
                     generation: {
                         ...generationBase,
-                        batchIndex: index,
-                        candidateIndex: resultItem.candidateIndex || index + 1
+                        batchIndex: Math.max(0, Number(candidateIndex) - 1),
+                        candidateIndex
                     }
                 };
                 await this._createCard(child);
@@ -5520,15 +5799,33 @@ export class CanvasManager {
             created.forEach(child => {
                 this._connectResultHistory(source, { image: child.filePath }, child.id);
             });
-            clearGeneratorResults(source);
-            source.preserveGeneratorStack = false;
-            setGeneratorResultLayout(source, 'collapsed');
-            this.refreshOpNode(source.id);
-            this.selectItems(created.map(child => child.id));
+
+            const retainedItem = retainedResult.item && typeof retainedResult.item === 'object'
+                ? retainedResult.item
+                : {};
+            const retainedCandidateIndex = candidateIndexAt(retainedResult, 0);
+            const retained = await this._convertImageGeneratorToMedia(source, {
+                image: retainedResult.filePath,
+                _resultFilePath: retainedResult.filePath,
+                _resultMediaType: 'image',
+                _candidateIndex: retainedCandidateIndex,
+                _resultItem: {
+                    ...retainedItem,
+                    candidateIndex: retainedCandidateIndex
+                },
+                _generation: {
+                    ...generationBase,
+                    batchIndex: retainedCandidateIndex - 1,
+                    candidateIndex: retainedCandidateIndex
+                }
+            }, retainedResult.filePath);
+            if (!retained) throw new Error('当前首图无法替换图片生成节点');
+
+            this.selectItems([retained.id, ...created.map(child => child.id)]);
             this.graphView?.sync();
             this._scheduleCullCheck();
             this.emit('change');
-            this._showCanvasStatus(`已拆开为 ${created.length} 张图片并连接来源`, 3200);
+            this._showCanvasStatus(`当前首图已替换生成节点，并拆出 ${created.length} 张预选分支`, 3200);
             return created;
         } catch (error) {
             const createdIds = new Set(created.map(child => child.id));
@@ -6340,6 +6637,13 @@ export class CanvasManager {
     _normalizeVideoConfigForProfile(config) {
         const profile = this.options.getVideoModelProfile?.(config);
         if (!profile) return null;
+        const hasRatioMode = config.ratioMode === 'auto' || config.ratioMode === 'manual';
+        if (profile.resolveAdaptiveRatio === true && !hasRatioMode) {
+            // Older H3 nodes stored the former 16:9 default without recording
+            // whether it was chosen manually. Migrate those nodes to adaptive.
+            config.ratio = 'adaptive';
+            config.ratioMode = 'auto';
+        }
         const syncChoice = (key, values, fallback) => {
             const options = (values || []).map(String);
             if (!options.length) {
@@ -6350,6 +6654,11 @@ export class CanvasManager {
             config[key] = options.includes(current) ? config[key] : (fallback ?? values[0]);
         };
         syncChoice('ratio', profile.ratios, profile.defaultRatio);
+        if (profile.resolveAdaptiveRatio !== true) {
+            config.ratioMode = 'manual';
+        } else if (config.ratio === 'adaptive') {
+            config.ratioMode = 'auto';
+        }
         syncChoice('resolution', profile.resolutions, profile.defaultResolution);
         syncChoice('duration', profile.durations, profile.defaultDuration);
         if (profile.supportsCameraFixed === false) config.cameraFixed = false;
@@ -6357,6 +6666,35 @@ export class CanvasManager {
         if (profile.supportsWebSearch !== true) config.webSearch = false;
         if (profile.supportsWatermark === false) config.watermark = false;
         return profile;
+    }
+
+    _getVideoReferenceLimitsForConfig(config, profile = null) {
+        return {
+            image: 9,
+            video: 3,
+            audio: 3,
+            ...(profile?.referenceLimits || this.options.getVideoModelProfile?.(config)?.referenceLimits || {})
+        };
+    }
+
+    _enforceVideoReferenceLimits(data, profile = null) {
+        if (data?.nodeType !== 'video') return 0;
+        const limits = this._getVideoReferenceLimitsForConfig(data.config || {}, profile);
+        const counts = { image: 0, video: 0, audio: 0 };
+        const overflow = [];
+        this._opReferenceEntries(data).forEach(({ connection, source }) => {
+            const mediaType = this._getItemMediaType(source);
+            if (!(mediaType in counts)) return;
+            counts[mediaType] += 1;
+            if (counts[mediaType] > Math.max(0, Number(limits[mediaType]) || 0)) {
+                overflow.push(connection.id);
+            }
+        });
+        overflow.forEach(connectionId => this.graphView?.disconnect(connectionId));
+        if (overflow.length) {
+            this._showCanvasStatus(`已按当前视频模型限制移除 ${overflow.length} 个超额参考素材`, 3200);
+        }
+        return overflow.length;
     }
 
     _showOpModelMenu(nodeId, event = null) {
@@ -6409,12 +6747,7 @@ export class CanvasManager {
                 button.append(model, source, marker);
                 button.addEventListener('click', () => {
                     data.config = data.config || {};
-                    data.config.providerId = provider.id;
-                    data.config.sourceProviderId = provider.sourceProviderId || provider.id;
-                    data.config.model = provider.model || '';
-                    data.model = data.config.model;
-                    if (data.nodeType === 'image') this._normalizeMidjourneyImageConfig(data);
-                    if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
+                    this._applyImageGenerationProviderSelection(data, provider);
                     this.refreshOpNode(nodeId);
                     this.emit('change');
                     this._closeOpQuickMenu();
@@ -6447,6 +6780,7 @@ export class CanvasManager {
         const sections = menu.querySelector('.op-parameter-sections');
         const commit = () => {
             this.refreshOpNode(nodeId);
+            if (data.nodeType === 'image') this._rememberImageGenerationPreferences(data);
             this.emit('change');
         };
         const addChoices = (label, key, values, formatter = value => String(value)) => {
@@ -6465,6 +6799,9 @@ export class CanvasManager {
                 button.classList.toggle('selected', String(data.config[key] ?? '') === String(value));
                 button.addEventListener('click', () => {
                     data.config[key] = key === 'duration' ? Number(value) : value;
+                    if (data.nodeType === 'video' && key === 'ratio') {
+                        data.config.ratioMode = value === 'adaptive' ? 'auto' : 'manual';
+                    }
                     options.querySelectorAll('button').forEach(candidate => candidate.classList.toggle('selected', candidate === button));
                     commit();
                 });
@@ -6738,6 +7075,7 @@ export class CanvasManager {
             data.config.count = Math.max(1, Math.min(20, Number(count) || 1));
             render();
             this.refreshOpNode(nodeId);
+            if (data.nodeType === 'image') this._rememberImageGenerationPreferences(data);
             this.emit('change');
         };
         [1, 2, 4, 8].forEach(value => {
@@ -6754,6 +7092,7 @@ export class CanvasManager {
         concurrency.addEventListener('change', () => {
             data.config.concurrency = Number(concurrency.value) || 1;
             this.refreshOpNode(nodeId);
+            if (data.nodeType === 'image') this._rememberImageGenerationPreferences(data);
             this.emit('change');
         });
         menu.querySelector('[data-close]')?.addEventListener('click', () => this._closeOpQuickMenu());
@@ -6932,6 +7271,7 @@ export class CanvasManager {
             data.config.prompt = preset.prompt;
             nameInput.value = preset.name;
             this.refreshOpNode(nodeId);
+            if (data.nodeType === 'image') this._rememberImageGenerationPreferences(data);
             this.emit('change');
             status.textContent = `已写入“${preset.name}”`;
             status.dataset.state = 'success';
@@ -7086,15 +7426,15 @@ export class CanvasManager {
         const entry = this.items.get(nodeId);
         if (!editor?.element?.isConnected || !entry?.group || entry.data?.nodeType !== 'text') return;
         const scale = this.stage.scaleX();
-        const visible = isCanvasTextContentVisible(scale);
+        const data = entry.data;
+        const width = Number(data.width) || OP_NODE_WIDTH;
+        const visible = isCanvasTextContentVisible(scale, width - 22);
         editor.element.hidden = !visible;
         if (editor.resizeHandle) editor.resizeHandle.hidden = !visible;
         editor.element.setAttribute('aria-hidden', visible ? 'false' : 'true');
         editor.element.tabIndex = visible ? 0 : -1;
         if (editor.resizeHandle) editor.resizeHandle.tabIndex = visible ? 0 : -1;
         if (!visible) return;
-        const data = entry.data;
-        const width = Number(data.width) || OP_NODE_WIDTH;
         const height = Number(data.height) || OP_NODE_HEIGHT;
         const footerY = height;
         const left = this.stage.x() + (entry.group.x() + 11) * scale;
@@ -7106,7 +7446,7 @@ export class CanvasManager {
             top: `${top}px`,
             width: `${editorWidth}px`,
             height: `${editorHeight}px`,
-            fontSize: `${Math.max(11, Math.min(20, 13 * scale))}px`
+            fontSize: `${getCanvasTextFontSize(scale)}px`
         });
         if (editor.resizeHandle) {
             const nodeRight = this.stage.x() + (entry.group.x() + width) * scale;
@@ -7441,8 +7781,14 @@ export class CanvasManager {
         const profile = data.nodeType === 'video'
             ? this.options.getVideoModelProfile?.(config)
             : null;
+        const imageProvider = data.nodeType === 'image'
+            ? this.options.getImageProvider?.(config)
+            : null;
+        const gptImage2 = data.nodeType === 'image'
+            && isGptImage2Model(config.model || imageProvider?.model);
         return (def.config || [])
             .filter(field => {
+                if (field.gptImage2Only) return gptImage2;
                 if (!profile) return true;
                 if (field.key === 'ratio') return (profile.ratios || []).length > 0;
                 if (field.key === 'resolution') return (profile.resolutions || []).length > 0;
@@ -7505,15 +7851,11 @@ export class CanvasManager {
                     <span class="generation-composer-trigger-arrow" aria-hidden="true">⌄</span>
                 </button>
                 <div class="generation-composer-parameters" data-parameters></div>
-                ${data.nodeType === 'image' ? `
-                    <button class="generation-composer-agent-toggle" type="button" data-agent-mode role="switch"
-                        title="Agent 规划模式" aria-label="Agent 规划模式">
-                        <span>Agent 模式</span><i aria-hidden="true"></i>
-                    </button>
-                ` : ''}
-                <label class="generation-composer-count" title="生成数量">
-                    <select data-count aria-label="生成数量"></select>
-                </label>
+                <button class="generation-composer-agent-toggle" type="button" data-agent-mode role="switch"
+                    title="Agent 规划模式" aria-label="Agent 规划模式">
+                    <span>Agent 模式</span><i aria-hidden="true"></i>
+                </button>
+                <label class="generation-composer-count generation-composer-select" data-count-host title="生成数量"></label>
                 <button class="generation-composer-submit" type="button" data-submit title="开始生成" aria-label="开始生成">
                     <svg viewBox="8 8 16 16" aria-hidden="true" focusable="false">
                         <path d="M10 17L16 11L22 17M16 11V22"></path>
@@ -7596,7 +7938,10 @@ export class CanvasManager {
             agentToggle.disabled = true;
             agentToggle.classList.add('pending');
             try {
-                await this.options.setImageIntentPipelineEnabled?.(enable);
+                const enabled = await this.options.setImageIntentPipelineEnabled?.(enable);
+                if (enable && enabled) {
+                    await this.options.prepareAgentFromNode?.(this.getAgentGenerationContext(nodeId));
+                }
             } finally {
                 agentToggle.disabled = false;
                 agentToggle.classList.remove('pending');
@@ -7718,6 +8063,12 @@ export class CanvasManager {
         host.replaceChildren();
 
         const references = this._opReferenceEntries(data);
+        const profile = data.nodeType === 'video'
+            ? this._normalizeVideoConfigForProfile(data.config || {})
+            : null;
+        const referenceLimits = data.nodeType === 'video'
+            ? this._getVideoReferenceLimitsForConfig(data.config || {}, profile)
+            : null;
         const citationState = this._generationComposerCitationState(data, references);
         let imageIndex = 0;
         references.forEach(({ connection, source }, index) => {
@@ -7775,10 +8126,21 @@ export class CanvasManager {
         const add = document.createElement('button');
         add.type = 'button';
         add.className = 'generation-composer-reference-add';
-        add.title = '从画布选择参考素材';
-        add.setAttribute('aria-label', '添加参考素材');
+        const referenceLimitText = referenceLimits
+            ? Object.entries(referenceLimits)
+                .filter(([, limit]) => Number(limit) > 0)
+                .map(([type, limit]) => `${{ image: '图片', video: '视频', audio: '音频' }[type]}最多${limit}`)
+                .join('、')
+            : '';
+        add.title = referenceLimitText
+            ? `从画布选择参考素材（${referenceLimitText}）`
+            : '从画布选择参考素材';
+        add.setAttribute('aria-label', referenceLimitText ? `添加参考素材，${referenceLimitText}` : '添加参考素材');
         add.innerHTML = '<svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>';
         add.classList.toggle('active', this._activeNodeReferenceTargetId === nodeId);
+        if (referenceLimits && !Object.values(referenceLimits).some(limit => Number(limit) > 0)) {
+            add.disabled = true;
+        }
         add.addEventListener('click', () => {
             if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
             if (this._activeNodeReferenceTargetId === nodeId) this.endMediaReferencePick();
@@ -8037,38 +8399,36 @@ export class CanvasManager {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
         if (active?.nodeId !== nodeId || !data) return;
-        const select = active.element.querySelector('[data-count]');
-        const label = select?.closest('.generation-composer-count');
-        if (!select || !label) return;
+        const label = active.element.querySelector('[data-count-host]');
+        if (!label) return;
         const midjourney = this._normalizeMidjourneyImageConfig(data);
-        select.replaceChildren();
+        label.replaceChildren();
         label.classList.toggle('is-midjourney', midjourney);
         label.title = midjourney ? '一次请求返回 4 张候选' : '生成数量';
-        select.setAttribute('aria-label', label.title);
         if (midjourney) {
-            const option = document.createElement('option');
-            option.value = '1';
-            option.textContent = '4候选';
-            select.appendChild(option);
-            select.value = '1';
-            select.disabled = true;
-            select.onchange = null;
+            const dropdown = this._createGenerationComposerDropdown(label, {
+                values: [1],
+                value: 1,
+                formatter: () => '4候选',
+                title: label.title
+            });
+            label.classList.add('is-disabled');
+            if (dropdown?.trigger) dropdown.trigger.disabled = true;
             return;
         }
-        select.disabled = false;
-        for (let value = 1; value <= 8; value += 1) {
-            const option = document.createElement('option');
-            option.value = String(value);
-            option.textContent = `${value}×`;
-            select.appendChild(option);
-        }
-        select.value = String(Math.max(1, Math.min(8, Number(data.config.count) || 1)));
-        select.onchange = () => {
-            data.config.count = Number(select.value) || 1;
-            data.config.concurrency = Math.max(1, Math.min(data.config.count, data.nodeType === 'video' ? 2 : 3));
-            active.changed = true;
-            this.emit('change');
-        };
+        label.classList.remove('is-disabled');
+        this._createGenerationComposerDropdown(label, {
+            values: Array.from({ length: 8 }, (_, index) => index + 1),
+            value: Math.max(1, Math.min(8, Number(data.config.count) || 1)),
+            formatter: value => `${value}×`,
+            title: label.title,
+            onChange: value => {
+                data.config.count = Number(value) || 1;
+                data.config.concurrency = Math.max(1, Math.min(data.config.count, data.nodeType === 'video' ? 2 : 3));
+                active.changed = true;
+                this.emit('change');
+            }
+        });
     }
 
     _showGenerationComposerModelMenu(nodeId, anchor) {
@@ -8103,7 +8463,9 @@ export class CanvasManager {
             if (!matches.length) {
                 const empty = document.createElement('div');
                 empty.className = 'generation-composer-popover-empty';
-                empty.textContent = providers.length ? '没有匹配的模型' : '请先在设置中添加图片 API';
+                empty.textContent = providers.length
+                    ? '没有匹配的模型'
+                    : `请先在设置中添加${data.nodeType === 'video' ? '视频' : '图片'} API`;
                 list.appendChild(empty);
                 return;
             }
@@ -8126,12 +8488,7 @@ export class CanvasManager {
                 marker.textContent = selected ? '当前' : '›';
                 button.append(copy, marker);
                 button.addEventListener('click', () => {
-                    data.config.providerId = provider.id;
-                    data.config.sourceProviderId = provider.sourceProviderId || provider.id;
-                    data.config.model = provider.model || '';
-                    data.model = data.config.model;
-                    if (data.nodeType === 'image') this._normalizeMidjourneyImageConfig(data);
-                    if (data.nodeType === 'video') this._normalizeVideoConfigForProfile(data.config);
+                    this._applyImageGenerationProviderSelection(data, provider);
                     active.changed = true;
                     this._closeGenerationComposerPopover(active);
                     this._syncGenerationComposerModelButton(nodeId);
@@ -8147,6 +8504,108 @@ export class CanvasManager {
         render();
         this._mountGenerationComposerPopover(active, popover, anchor);
         search.focus({ preventScroll: true });
+    }
+
+    _showGenerationComposerPromptPresets(nodeId, anchor) {
+        const active = this._generationComposer;
+        const data = this.items.get(nodeId)?.data;
+        if (active?.nodeId !== nodeId || data?.nodeType !== 'video') return;
+        if (active.popover?.anchor === anchor) {
+            this._closeGenerationComposerPopover(active);
+            return;
+        }
+
+        const popover = document.createElement('section');
+        popover.className = 'generation-composer-popover generation-composer-video-preset-popover';
+        popover.setAttribute('role', 'dialog');
+        popover.setAttribute('aria-label', '视频提示词预设');
+        popover.innerHTML = `
+            <div class="generation-composer-popover-title">视频提示词预设</div>
+            <select class="op-prompt-preset-select" aria-label="选择视频提示词预设"></select>
+            <div class="op-prompt-preset-save-row">
+                <input type="text" maxlength="60" placeholder="预设名称" aria-label="视频提示词预设名称">
+                <button type="button" data-save-preset>保存</button>
+                <button class="generation-composer-preset-delete" type="button" data-delete-preset title="删除当前预设" aria-label="删除当前预设" disabled>×</button>
+            </div>
+            <div class="op-prompt-preset-status" aria-live="polite"></div>
+        `;
+        const select = popover.querySelector('select');
+        const nameInput = popover.querySelector('input');
+        const saveButton = popover.querySelector('[data-save-preset]');
+        const deleteButton = popover.querySelector('[data-delete-preset]');
+        const status = popover.querySelector('.op-prompt-preset-status');
+        let selectedId = '';
+        const readPresets = () => this.options.getPromptPresets?.('video') || [];
+        const render = (preferredId = selectedId) => {
+            const presets = readPresets();
+            select.replaceChildren();
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = presets.length ? '选择预设…' : '暂无视频预设';
+            select.appendChild(placeholder);
+            presets.forEach(preset => {
+                const option = document.createElement('option');
+                option.value = preset.id;
+                option.textContent = preset.name;
+                select.appendChild(option);
+            });
+            selectedId = presets.some(preset => preset.id === preferredId) ? preferredId : '';
+            select.value = selectedId;
+            deleteButton.disabled = !selectedId;
+        };
+        const setStatus = (message = '', state = '') => {
+            status.textContent = message;
+            status.dataset.state = state;
+        };
+
+        select.addEventListener('change', () => {
+            selectedId = select.value;
+            const preset = readPresets().find(candidate => candidate.id === selectedId);
+            deleteButton.disabled = !preset;
+            if (!preset) return;
+            nameInput.value = preset.name;
+            data.config.prompt = preset.prompt;
+            this._setGenerationComposerPromptValue(active.element.querySelector('[data-prompt]'), preset.prompt);
+            active.changed = true;
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            setStatus(`已写入“${preset.name}”`, 'success');
+        });
+        saveButton.addEventListener('click', () => {
+            try {
+                const saved = this.options.savePromptPreset?.('video', {
+                    id: selectedId || null,
+                    name: nameInput.value,
+                    prompt: data.config?.prompt || ''
+                });
+                if (!saved) throw new Error('预设存储不可用');
+                selectedId = saved.id;
+                render(saved.id);
+                nameInput.value = saved.name;
+                setStatus(`已保存“${saved.name}”`, 'success');
+            } catch (error) {
+                setStatus(error?.message || '预设保存失败', 'error');
+            }
+        });
+        deleteButton.addEventListener('click', () => {
+            if (!selectedId) return;
+            const preset = readPresets().find(candidate => candidate.id === selectedId);
+            if (!this.options.deletePromptPreset?.('video', selectedId)) {
+                setStatus('预设删除失败', 'error');
+                return;
+            }
+            selectedId = '';
+            nameInput.value = '';
+            render();
+            setStatus(preset ? `已删除“${preset.name}”` : '预设已删除', 'success');
+        });
+        nameInput.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.isComposing) return;
+            event.preventDefault();
+            saveButton.click();
+        });
+        render();
+        this._mountGenerationComposerPopover(active, popover, anchor);
     }
 
     _showGenerationComposerPromptLibrary(nodeId, anchor) {
@@ -8559,6 +9018,103 @@ export class CanvasManager {
         popover.element?.remove();
     }
 
+    _createGenerationComposerDropdown(host, { values = [], value = '', formatter = null, title = '', onChange = null } = {}) {
+        if (!host || !values.length) return null;
+        const optionValues = values.map(option => String(option));
+        let selectedValue = optionValues.includes(String(value)) ? String(value) : optionValues[0];
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'generation-composer-select-trigger';
+        trigger.setAttribute('aria-haspopup', 'listbox');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.setAttribute('aria-label', title);
+        const valueElement = document.createElement('span');
+        valueElement.className = 'generation-composer-select-value';
+        const arrow = document.createElement('span');
+        arrow.className = 'generation-composer-select-arrow';
+        arrow.setAttribute('aria-hidden', 'true');
+        trigger.append(valueElement, arrow);
+        host.appendChild(trigger);
+
+        const formatValue = option => formatter ? formatter(option) : String(option);
+        const syncTrigger = nextValue => {
+            selectedValue = String(nextValue);
+            const originalValue = values.find(option => String(option) === selectedValue);
+            valueElement.textContent = formatValue(originalValue ?? selectedValue);
+            trigger.dataset.value = selectedValue;
+            trigger.title = `${title}: ${valueElement.textContent}`;
+        };
+        syncTrigger(selectedValue);
+
+        const openMenu = (focusOffset = 0) => {
+            const active = this._generationComposer;
+            if (!active || !host.isConnected) return;
+            if (active.popover?.anchor === trigger) {
+                this._closeGenerationComposerPopover(active);
+                return;
+            }
+            const popover = document.createElement('section');
+            popover.className = 'generation-composer-popover generation-composer-select-popover';
+            popover.setAttribute('role', 'listbox');
+            popover.setAttribute('aria-label', title);
+            const optionsHost = document.createElement('div');
+            optionsHost.className = 'generation-composer-select-options';
+            const optionButtons = [];
+            optionValues.forEach((optionValue, index) => {
+                const option = document.createElement('button');
+                option.type = 'button';
+                option.className = 'generation-composer-select-option';
+                option.setAttribute('role', 'option');
+                option.setAttribute('aria-selected', String(optionValue === selectedValue));
+                option.tabIndex = -1;
+                option.textContent = formatValue(values[index]);
+                option.addEventListener('click', () => {
+                    syncTrigger(optionValue);
+                    onChange?.(values[index]);
+                    this._closeGenerationComposerPopover(active);
+                    trigger.focus({ preventScroll: true });
+                });
+                option.addEventListener('keydown', event => {
+                    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        const delta = event.key === 'ArrowDown' ? 1 : -1;
+                        const nextIndex = Math.max(0, Math.min(optionButtons.length - 1, index + delta));
+                        optionButtons[nextIndex]?.focus({ preventScroll: true });
+                        return;
+                    }
+                    if (event.key === 'Home' || event.key === 'End') {
+                        event.preventDefault();
+                        optionButtons[event.key === 'Home' ? 0 : optionButtons.length - 1]?.focus({ preventScroll: true });
+                        return;
+                    }
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        option.click();
+                    }
+                });
+                optionButtons.push(option);
+                optionsHost.appendChild(option);
+            });
+            popover.appendChild(optionsHost);
+            ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'].forEach(type => {
+                popover.addEventListener(type, event => event.stopPropagation());
+            });
+            this._mountGenerationComposerPopover(active, popover, trigger);
+            const selectedIndex = Math.max(0, optionValues.indexOf(selectedValue));
+            const focusIndex = Math.max(0, Math.min(optionButtons.length - 1, selectedIndex + focusOffset));
+            requestAnimationFrame(() => optionButtons[focusIndex]?.focus({ preventScroll: true }));
+        };
+
+        trigger.addEventListener('click', () => openMenu());
+        trigger.addEventListener('keydown', event => {
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openMenu(event.key === 'ArrowUp' ? -1 : 0);
+            }
+        });
+        return { trigger, sync: syncTrigger };
+    }
+
     _renderGenerationComposerParameters(nodeId) {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
@@ -8574,33 +9130,75 @@ export class CanvasManager {
             const label = document.createElement('label');
             label.className = 'generation-composer-select';
             label.title = title;
-            const select = document.createElement('select');
-            select.setAttribute('aria-label', title);
-            values.forEach(value => {
-                const option = document.createElement('option');
-                option.value = String(value);
-                option.textContent = formatter ? formatter(value) : String(value);
-                select.appendChild(option);
-            });
-            select.value = String(data.config[key] ?? values[0]);
-            if (!select.value && values.length) select.value = String(values[0]);
-            select.addEventListener('change', () => {
-                data.config[key] = key === 'duration' ? Number(select.value) : select.value;
-                if (data.nodeType === 'image' && (key === 'ratio' || key === 'resolutionTier')) {
-                    const reference = this._opReferenceEntries(data)[0]?.source;
-                    Object.assign(data.config, resolveImageDimensions(
-                        data.config.resolutionTier || '1K',
-                        data.config.ratio || 'adaptive',
-                        { width: reference?.width || data.config.width, height: reference?.height || data.config.height }
-                    ));
+            parent.appendChild(label);
+            const dropdown = this._createGenerationComposerDropdown(label, {
+                values,
+                value: data.config[key] ?? values[0],
+                formatter,
+                title,
+                onChange: value => {
+                    data.config[key] = key === 'duration' ? Number(value) : value;
+                    if (data.nodeType === 'video' && key === 'ratio') {
+                        data.config.ratioMode = value === 'adaptive' ? 'auto' : 'manual';
+                    }
+                    if (data.nodeType === 'image' && (key === 'ratio' || key === 'resolutionTier')) {
+                        const reference = this._opReferenceEntries(data)[0]?.source;
+                        Object.assign(data.config, resolveImageDimensions(
+                            data.config.resolutionTier || '1K',
+                            data.config.ratio || 'adaptive',
+                            { width: reference?.width || data.config.width, height: reference?.height || data.config.height }
+                        ));
+                    }
+                    active.changed = true;
+                    this.refreshOpNode(nodeId);
+                    this.emit('change');
                 }
+            });
+            return dropdown?.trigger || null;
+        };
+
+        const addDurationSlider = (parent, values) => {
+            if (!values?.length) return null;
+            const label = document.createElement('label');
+            label.className = 'generation-composer-duration';
+            label.title = '视频时长';
+            label.setAttribute('aria-label', '视频时长');
+            const range = document.createElement('input');
+            range.type = 'range';
+            range.min = '0';
+            range.max = String(Math.max(0, values.length - 1));
+            range.step = '1';
+            range.setAttribute('aria-label', '视频时长');
+            const output = document.createElement('output');
+            output.className = 'generation-composer-duration-output';
+            const formatDuration = value => Number(value) === -1 ? '智能' : `${value}s`;
+            const selectedValue = String(data.config.duration ?? values[0]);
+            const selectedIndex = Math.max(0, values.findIndex(value => String(value) === selectedValue));
+            range.value = String(selectedIndex);
+            const syncDuration = index => {
+                const value = values[Math.max(0, Math.min(values.length - 1, Number(index) || 0))];
+                const currentIndex = values.indexOf(value);
+                output.textContent = formatDuration(value);
+                output.title = `视频时长：${formatDuration(value)}`;
+                range.style.setProperty('--range-progress', `${values.length > 1 ? currentIndex / (values.length - 1) * 100 : 100}%`);
+                range.setAttribute('aria-valuetext', formatDuration(value));
+            };
+            range.addEventListener('input', () => {
+                const value = values[Number(range.value)] ?? values[0];
+                data.config.duration = Number(value);
                 active.changed = true;
+                syncDuration(range.value);
                 this.refreshOpNode(nodeId);
                 this.emit('change');
             });
-            label.appendChild(select);
+            label.append(range, output);
             parent.appendChild(label);
-            return select;
+            syncDuration(range.value);
+            if (values.length === 1) {
+                range.disabled = true;
+                label.classList.add('is-disabled');
+            }
+            return range;
         };
 
         if (data.nodeType === 'image') {
@@ -8673,10 +9271,28 @@ export class CanvasManager {
             this._syncGenerationComposerImageButtons(nodeId);
         } else {
             const profile = this._normalizeVideoConfigForProfile(data.config);
+            const promptPreset = document.createElement('button');
+            promptPreset.type = 'button';
+            promptPreset.className = 'generation-composer-trigger generation-composer-prompt-preset';
+            promptPreset.title = '视频提示词预设';
+            promptPreset.setAttribute('aria-label', '视频提示词预设');
+            promptPreset.setAttribute('aria-haspopup', 'dialog');
+            promptPreset.innerHTML = `
+                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                <span>预设</span>
+            `;
+            promptPreset.addEventListener('click', () => this._showGenerationComposerPromptPresets(nodeId, promptPreset));
+            host.appendChild(promptPreset);
             if (profile) {
-                addSelect(host, 'ratio', profile.ratios || [], null, '画面比例');
+                addSelect(
+                    host,
+                    'ratio',
+                    profile.ratios || [],
+                    value => value === 'adaptive' ? '自适应' : value,
+                    '画面比例'
+                );
                 addSelect(host, 'resolution', profile.resolutions || [], null, '输出分辨率');
-                addSelect(host, 'duration', profile.durations || [], value => Number(value) === -1 ? '智能时长' : `${value}s`, '视频时长');
+                addDurationSlider(host, profile.durations || []);
             }
             const toggles = [
                 ['cameraFixed', '固定镜头', Boolean(profile) && profile.supportsCameraFixed !== false],
@@ -8726,8 +9342,26 @@ export class CanvasManager {
         }
         if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
 
+        if (data.nodeType === 'image'
+            && this.options.getImageIntentPipelineMode?.() !== 'off'
+            && typeof this.options.generateImageThroughAgent === 'function') {
+            active.changed = false;
+            this._rememberImageGenerationPreferences(data);
+            this.emit('change');
+            this._syncGenerationComposerStatus(nodeId, 'Agent 正在整理提示词和素材…');
+            const result = await this.options.generateImageThroughAgent(this.getAgentGenerationContext(nodeId));
+            if (result?.ok === false) {
+                message.textContent = result.reason || 'Agent 生图失败';
+                message.dataset.state = 'error';
+            } else {
+                this._syncGenerationComposerStatus(nodeId);
+            }
+            return;
+        }
+
         data.runError = '';
         clearGeneratorResults(data);
+        this._rememberImageGenerationPreferences(data);
         active.changed = false;
         this.emit('change');
         this._syncGenerationComposerStatus(nodeId, '正在提交生成任务…');
@@ -8802,6 +9436,10 @@ export class CanvasManager {
     _closeGenerationComposer({ commit = true, keepReferencePick = false } = {}) {
         const active = this._generationComposer;
         if (!active) return;
+        const activeData = this.items.get(active.nodeId)?.data;
+        if (commit && active.changed && activeData?.nodeType === 'image') {
+            this._rememberImageGenerationPreferences(activeData);
+        }
         this._closeGenerationComposerPopover(active);
         this._generationComposer = null;
         clearTimeout(active.closeOutsideTimer);
@@ -9055,9 +9693,11 @@ export class CanvasManager {
             model: sourceItem.model || sourceItem.config?.model || '',
             references: sourceReferences,
             generatedAt: Date.now(),
+            ...(output?._generation && typeof output._generation === 'object' ? output._generation : {}),
             replacedGenerator: true
         };
         const resultItem = output?._resultItem || {};
+        const mediaType = resolveGeneratorResultMediaType(output, filePath);
         const x = entry.group.x();
         const y = entry.group.y();
         const width = Math.max(1, Number(sourceItem.width) || Number(resultItem.width) || IMAGE_DEFAULT_WIDTH);
@@ -9066,7 +9706,7 @@ export class CanvasManager {
             ...resultItem,
             id: sourceId,
             kind: 'media',
-            mediaType: 'image',
+            mediaType,
             filePath,
             x,
             y,
@@ -9112,10 +9752,14 @@ export class CanvasManager {
         }
         if (sourceItem?.kind === 'op' && ['image', 'video'].includes(sourceItem.nodeType)) {
             if (!filePath && !resultUrl) return null;
+            const resultItem = output?._resultItem || null;
+            const candidateIndex = output?._candidateIndex ?? resultItem?.candidateIndex ?? null;
             const results = appendGeneratorResult(sourceItem, {
                 filePath,
                 url: resultUrl,
-                item: output?._resultItem || null
+                item: candidateIndex == null
+                    ? resultItem
+                    : { ...(resultItem || {}), candidateIndex }
             });
 
             if (results.length === 1) {
@@ -9124,9 +9768,8 @@ export class CanvasManager {
                     sourceItem.width = size.width;
                     sourceItem.height = size.height;
                 } else {
-                    const resultItem = output?._resultItem || {};
-                    const mediaWidth = Number(resultItem.naturalWidth || resultItem.pixelWidth || resultItem.width);
-                    const mediaHeight = Number(resultItem.naturalHeight || resultItem.pixelHeight || resultItem.height);
+                    const mediaWidth = Number(resultItem?.naturalWidth || resultItem?.pixelWidth || resultItem?.width);
+                    const mediaHeight = Number(resultItem?.naturalHeight || resultItem?.pixelHeight || resultItem?.height);
                     if (mediaWidth > 0 && mediaHeight > 0) {
                         const size = getGeneratorPlaceholderSize(sourceItem.nodeType, { ratio: 'adaptive' }, {
                             width: mediaWidth,
@@ -9184,6 +9827,7 @@ export class CanvasManager {
             y: at.y,
             width: displaySize.width,
             height: displaySize.height,
+            mediaType: resolveGeneratorResultMediaType(output, filePath),
             addedAt: Date.now(),
             fromNodeId: sourceItem.id
         };
@@ -9261,16 +9905,49 @@ export class CanvasManager {
             getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
             getVideoProvider: (binding) => this.options.getVideoProvider?.(binding) || null,
             getImageIntentPipelineMode: () => this.options.getImageIntentPipelineMode?.() || 'compiled',
-            prepareImageReferences: (refs) => this.options.prepareImageReferences?.(refs) || []
+            prepareImageReferences: (refs) => this.options.prepareImageReferences?.(refs) || [],
+            createGenerationTask: (details) => this.options.createGenerationTask?.(details) || null,
+            updateGenerationTask: (taskId, patch) => this.options.updateGenerationTask?.(taskId, patch) || null,
+            recordGenerationError: (taskId, error) => this.options.recordGenerationError?.(taskId, error) || null
         });
         return this.graphRunner;
     }
 
     /** 执行 nodeId 及其全部上游依赖 */
-    async runFromNode(nodeId) {
+    async runImageNodeWithAgentPlan({ nodeId, prompt } = {}) {
+        const data = this.items.get(nodeId)?.data;
+        const compiledPrompt = String(prompt || '').trim();
+        if (!data || data.nodeType !== 'image') return { ok: false, reason: '图片生成节点不存在' };
+        if (!compiledPrompt) return { ok: false, reason: 'Agent 没有返回可执行的生图提示词' };
+        if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) {
+            return { ok: false, reason: '图片生成节点创建失败' };
+        }
+
+        data.runError = '';
+        clearGeneratorResults(data);
+        this._rememberImageGenerationPreferences(data);
+        if (this._generationComposer?.nodeId === nodeId) this._generationComposer.changed = false;
+        this.emit('change');
+        this._syncGenerationComposerStatus(nodeId, 'Agent 已整理，正在提交生成任务…');
+        const currentContext = this.getAgentGenerationContext(nodeId);
+        const configOverrides = Object.fromEntries(
+            (currentContext?.upstreamTextNodeIds || []).map(textNodeId => [textNodeId, { useAi: false }])
+        );
+        configOverrides[nodeId] = {
+            agentCompiledPrompt: compiledPrompt,
+            skipImageIntentPipeline: true
+        };
+        const result = await this.runFromNode(nodeId, {
+            configOverrides
+        });
+        this._syncGenerationComposerStatus(nodeId);
+        return result;
+    }
+
+    async runFromNode(nodeId, options = {}) {
         const runner = this._ensureRunner();
         this._showCanvasStatus('开始执行…');
-        const result = await runner.runFrom(nodeId);
+        const result = await runner.runFrom(nodeId, options);
         if (!result.ok) {
             this._showCanvasStatus(result.reason || '执行失败', 3200);
         } else {

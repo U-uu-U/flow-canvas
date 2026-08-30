@@ -49,21 +49,35 @@ async function bootstrap() {
         canvasManager = initRequiredModule('canvas', () => new CanvasManager('canvasContainer', storeData, contextMenu, planService, {
             getTextProvider: (binding) => agentSidebar?.getTextProviderConfig?.(binding) || null,
             getImageProvider: (binding) => agentSidebar?.getImageProviderConfig?.(binding) || null,
+            setImageProvider: (id) => agentSidebar?.setImageProvider?.(id) || false,
+            getImageGenerationPreferences: (binding) =>
+                agentSidebar?.getImageGenerationPreferences?.(binding) || null,
+            saveImageGenerationPreferences: (config, binding) =>
+                agentSidebar?.saveImageGenerationPreferences?.(config, binding) || false,
             getVideoProvider: (binding) => agentSidebar?.getVideoProviderConfig?.(binding) || null,
             getGenerationProviders: (kind) => agentSidebar?.getGenerationProviderOptions?.(kind) || [],
             getImageModelProfile: (binding) => agentSidebar?.getImageModelProfile?.(binding) || null,
             getVideoModelProfile: (binding) => agentSidebar?.getVideoModelProfile?.(binding) || null,
             getPromptPresets: (kind) => agentSidebar?.getPromptPresets?.(kind) || [],
             savePromptPreset: (kind, value) => agentSidebar?.savePromptPreset?.(kind, value) || null,
+            deletePromptPreset: (kind, presetId) => agentSidebar?.deletePromptPreset?.(kind, presetId) || false,
             getImageIntentPipelineMode: () => agentSidebar?.getImageIntentPipelineMode?.() || 'compiled',
             setImageIntentPipelineEnabled: (enabled) =>
                 agentSidebar?.setImageIntentPipelineEnabled?.(enabled) ?? Promise.resolve(false),
+            prepareAgentFromNode: (details) =>
+                agentSidebar?.prepareAgentFromNode?.(details) || null,
+            generateImageThroughAgent: (details) =>
+                agentSidebar?.generateImageFromNode?.(details) || null,
             prepareImageReferences: (refs) =>
-                agentSidebar?._prepareImageReferencesForGeneration?.(refs) || []
+                agentSidebar?._prepareImageReferencesForGeneration?.(refs) || [],
+            createGenerationTask: (details) => agentSidebar?.createGenerationTask?.(details) || null,
+            updateGenerationTask: (taskId, patch) => agentSidebar?.updateGenerationTask?.(taskId, patch) || null,
+            recordGenerationError: (taskId, error) => agentSidebar?.recordGenerationError?.(taskId, error) || null
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
             getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
             getSelectedCanvasEntries: () => canvasManager?.getSelectedCanvasEntries?.() || [],
+            getPlanningContext: () => planService?.getAgentContext?.(canvasManager?.getSelectedFilePaths?.() || []) || null,
             subscribeCanvasSelection: (handler) => canvasManager?.on?.('selectionChanged', handler),
             subscribeInitialRenderComplete: (handler) => canvasManager?.on?.('initialRenderComplete', handler),
             subscribeMediaReferenceSelection: (handler) => canvasManager?.on?.('mediaReferenceSelectionChanged', handler),
@@ -83,6 +97,8 @@ async function bootstrap() {
             endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
             beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,
             endVideoGeneration: (placeholderId, itemId) => canvasManager?.removeVideoGenerationPlaceholder?.(placeholderId, itemId),
+            getAgentNodeContext: (nodeId) => canvasManager?.getAgentGenerationContext?.(nodeId) || null,
+            executeImageNodeFromAgent: (details) => canvasManager?.runImageNodeWithAgentPlan?.(details) || null,
             applyPlanSuggestion: (rows) => applyAgentPlanRows(rows)
         }));
 

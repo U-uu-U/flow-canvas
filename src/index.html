@@ -11,10 +11,7 @@
 <body>
     <!-- 标题栏（可拖拽区域） -->
     <div class="titlebar" id="titlebar">
-        <div class="titlebar-drag">
-            <span class="titlebar-logo" aria-hidden="true"></span>
-            <span class="titlebar-title">Flow Canvas</span>
-        </div>
+        <div class="titlebar-drag" aria-hidden="true"></div>
         <div class="titlebar-status" id="titlebarStatus"></div>
     </div>
 
@@ -165,9 +162,6 @@
                 <button class="canvas-tool-btn" id="canvasToolPlan" type="button" title="新建规划表" aria-label="新建规划表">
                     <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
                 </button>
-                <button class="canvas-tool-btn" id="canvasToolTasks" type="button" title="任务记录" aria-label="任务记录">
-                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
-                </button>
             </div>
             <!-- 素材库独立于文件夹组，只从左侧浮动工具栏打开。 -->
             <section class="canvas-asset-library asset-library-panel" id="canvasAssetLibrary" aria-label="素材库" hidden>
@@ -313,41 +307,24 @@
         <!-- 右侧 Agent 边栏 -->
         <div class="agent-sidebar-wrapper" id="agentSidebarWrapper">
             <aside class="agent-sidebar" id="agentSidebar">
-                <div class="agent-edge-controls" aria-label="模式控制">
-                    <button class="agent-edge-btn agent-collapse-btn" id="agentCollapseBtn" title="收起边栏"
-                        aria-label="收起边栏">
-                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
-                    </button>
-                    <button class="agent-edge-btn creation-mode-close-btn" id="creationModeCloseBtn"
-                        title="退出当前模式" aria-label="退出当前模式">
-                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
-                    </button>
-                </div>
                 <!-- 头部 -->
                 <div class="agent-header">
                     <div class="agent-header-left">
-                        <span class="creation-mode-title" id="creationModeTitle">设置模式</span>
-                        <button class="agent-task-history-btn" id="agentTaskHistoryBtn" type="button"
-                            title="打开任务记录" aria-label="打开任务记录" aria-expanded="false">
-                            <svg class="flow-icon agent-task-history-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
-                            <i class="agent-task-history-return-icon" aria-hidden="true"></i>
-                            <span class="agent-task-history-label">任务记录</span>
-                            <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
-                        </button>
+                        <span class="agent-header-mark" aria-hidden="true">
+                            <svg class="flow-icon flow-icon-sm"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                        </span>
+                        <span class="agent-header-copy">
+                            <span class="creation-mode-title" id="creationModeTitle">设置模式</span>
+                            <span class="agent-header-context">当前画板</span>
+                        </span>
                     </div>
                     <div class="agent-header-right">
+                        <span class="agent-header-status"><i aria-hidden="true"></i>就绪</span>
                         <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
                             <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
                         </button>
                     </div>
                 </div>
-
-                <section class="agent-task-history" id="agentTaskHistory" aria-label="任务记录" hidden>
-                    <div class="agent-task-history-toolbar">
-                        <p id="agentTaskHistorySummary">还没有生成任务</p>
-                    </div>
-                    <div class="agent-task-history-list" id="agentTaskHistoryList"></div>
-                </section>
 
                 <!-- 模型选择器（头部下方） -->
                 <div class="agent-model-bar">
@@ -370,6 +347,116 @@
                                 <option value="">-- 请先添加 API --</option>
                             </select>
                         </label>
+                    </div>
+                    <div class="agent-composer-controls" id="agentComposerControls">
+                        <div class="agent-composer-control-wrap">
+                            <button class="agent-composer-add-btn" id="agentAddMenuBtn" type="button"
+                                title="更多操作" aria-label="更多操作" aria-expanded="false"
+                                aria-controls="agentAddPopover">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-plus"></use></svg>
+                            </button>
+                            <div class="agent-composer-popover agent-add-popover" id="agentAddPopover" hidden>
+                                <button class="agent-composer-menu-item agent-plan-btn" id="agentPlanBtn" type="button">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                                    <span><strong>辅助规划</strong><small>结合当前画板建立或检查规划</small></span>
+                                </button>
+                                <button class="agent-composer-menu-item agent-clear-btn" id="agentClearBtn" type="button">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
+                                    <span><strong>清空对话</strong><small>仅清除当前项目的 Agent 记录</small></span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="agent-composer-control-wrap agent-model-control-wrap">
+                            <button class="agent-composer-tool-btn" id="agentModelMenuBtn" type="button"
+                                aria-expanded="false" aria-controls="agentModelPopover">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-cube"></use></svg>
+                                <span>模型</span>
+                            </button>
+                            <section class="agent-composer-popover agent-model-popover" id="agentModelPopover"
+                                aria-label="模型选择" hidden>
+                                <header class="agent-composer-popover-head">
+                                    <strong>模型</strong>
+                                    <span id="agentModelSummary">尚未配置</span>
+                                </header>
+                                <div class="agent-composer-tabs" id="agentModelTabs" role="tablist" aria-label="模型类型">
+                                    <button class="active" type="button" role="tab" data-agent-model-kind="text" aria-selected="true">文字</button>
+                                    <button type="button" role="tab" data-agent-model-kind="image" aria-selected="false">图片</button>
+                                    <button type="button" role="tab" data-agent-model-kind="video" aria-selected="false">视频</button>
+                                </div>
+                                <div class="agent-composer-list agent-model-list" id="agentComposerModelList"></div>
+                                <footer class="agent-composer-popover-footer single">
+                                    <button type="button" id="agentModelSettingsBtn">
+                                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
+                                        API 设置
+                                    </button>
+                                </footer>
+                            </section>
+                        </div>
+
+                        <span class="agent-composer-divider" aria-hidden="true"></span>
+
+                        <div class="agent-composer-control-wrap agent-skill-control-wrap">
+                            <button class="agent-composer-tool-btn" id="agentSkillMenuBtn" type="button"
+                                aria-expanded="false" aria-controls="agentSkillPopover">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-skill"></use></svg>
+                                <span>Skill</span>
+                                <span class="agent-composer-count" id="agentSkillCount" hidden>0</span>
+                            </button>
+                            <section class="agent-composer-popover agent-skill-popover" id="agentSkillPopover"
+                                aria-label="Skill 选择" hidden>
+                                <header class="agent-composer-popover-head skill-head">
+                                    <strong>Skill</strong>
+                                    <label class="agent-skill-search">
+                                        <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
+                                        <input id="agentSkillSearchInput" type="search" placeholder="搜索 Skill" autocomplete="off">
+                                    </label>
+                                </header>
+                                <div class="agent-skill-tabs" id="agentSkillTabs" role="tablist" aria-label="Skill 分类">
+                                    <button class="active" type="button" role="tab" data-agent-skill-category="all" aria-selected="true">全部</button>
+                                    <button type="button" role="tab" data-agent-skill-category="planning" aria-selected="false">规划</button>
+                                    <button type="button" role="tab" data-agent-skill-category="creative" aria-selected="false">创作</button>
+                                    <button type="button" role="tab" data-agent-skill-category="review" aria-selected="false">检查</button>
+                                </div>
+                                <div class="agent-composer-list agent-skill-list" id="agentSkillList"></div>
+                                <footer class="agent-composer-popover-footer">
+                                    <button type="button" id="agentSkillClearBtn">清除选择</button>
+                                    <button class="primary" type="button" id="agentSkillDoneBtn">完成</button>
+                                </footer>
+                            </section>
+                        </div>
+
+                        <span class="agent-composer-spacer"></span>
+
+                        <div class="agent-composer-control-wrap agent-execution-control-wrap">
+                            <button class="agent-composer-mode-btn" id="agentExecutionMenuBtn" type="button"
+                                aria-expanded="false" aria-controls="agentExecutionPopover">
+                                <span id="agentExecutionModeLabel">自动</span>
+                                <i aria-hidden="true"></i>
+                            </button>
+                            <section class="agent-composer-popover agent-execution-popover" id="agentExecutionPopover"
+                                aria-label="Agent 模式" hidden>
+                                <span class="agent-execution-title">AGENT 模式</span>
+                                <button class="agent-execution-option" type="button" data-agent-execution-mode="auto">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
+                                    <span><strong>自动</strong><small>直接执行分析并返回可应用结果</small></span>
+                                    <svg class="flow-icon flow-icon-sm check" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>
+                                </button>
+                                <button class="agent-execution-option" type="button" data-agent-execution-mode="ask">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-help"></use></svg>
+                                    <span><strong>询问</strong><small>应用关键规划前先向你确认</small></span>
+                                    <svg class="flow-icon flow-icon-sm check" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>
+                                </button>
+                            </section>
+                        </div>
+
+                        <button class="agent-send-btn" id="agentSendBtn" type="button" title="发送"
+                            aria-label="发送消息">
+                            <svg class="agent-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                        </button>
                     </div>
                 </div>
 
@@ -554,6 +641,23 @@
                             <option value="high" selected>高</option>
                         </select>
                     </label>
+                    <div class="creation-image-api-options" id="imageApiOptions" hidden>
+                        <label class="creation-image-api-option">
+                            <span>返回格式</span>
+                            <select id="imageResponseFormatSelect">
+                                <option value="url" selected>URL（自动保存到本地）</option>
+                                <option value="b64_json">Base64</option>
+                            </select>
+                        </label>
+                        <label class="creation-image-api-option creation-image-api-checkbox">
+                            <span>关闭历史记录</span>
+                            <input type="checkbox" id="imageHistoryDisabled" checked>
+                        </label>
+                        <label class="creation-image-api-option creation-image-api-checkbox">
+                            <span>流式返回</span>
+                            <input type="checkbox" id="imageStream">
+                        </label>
+                    </div>
                     <button class="creation-generate-btn image-generate-btn" id="imageGenerateBtn" type="button">
                         <svg class="flow-icon creation-generate-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-generate"></use></svg>
                         生成图片
@@ -747,11 +851,11 @@
                             <label class="agent-setting-label">模型</label>
                             <div class="agent-model-field">
                                 <input type="text" class="agent-setting-input" id="agentFormModel" placeholder="gpt-4o">
+                                <select class="agent-setting-input agent-fetched-model-select" id="agentFetchedModelSelect" hidden>
+                                    <option value="">选择拉取到的模型</option>
+                                </select>
                                 <button type="button" class="agent-fetch-models-btn" id="agentFetchModelsBtn">拉取模型</button>
                             </div>
-                            <select class="agent-setting-input agent-fetched-model-select" id="agentFetchedModelSelect" hidden>
-                                <option value="">选择拉取到的模型</option>
-                            </select>
                             <datalist id="agentFetchedModelOptions"></datalist>
                             <div class="agent-additional-models" id="agentAdditionalModels"></div>
                             <button type="button" class="agent-add-model-slot" id="agentAddModelSlotBtn">
@@ -768,14 +872,55 @@
                         </div>
                     </section>
                 </div>
+
+                <div class="agent-messages" id="agentMessages" aria-live="polite"></div>
+
+                <div class="agent-input-area">
+                    <div class="agent-input-wrapper">
+                        <section class="agent-attachment-tray" id="agentAttachmentTray" aria-label="待发送的节点上下文" hidden>
+                            <header class="agent-attachment-head">
+                                <span id="agentContextSummary">节点上下文</span>
+                                <button type="button" id="agentAttachmentClear" title="移除节点上下文" aria-label="移除节点上下文">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
+                                </button>
+                            </header>
+                            <div class="agent-attachment-list" id="agentAttachmentList"></div>
+                        </section>
+                        <textarea class="agent-input" id="agentInput" rows="1"
+                            placeholder="向 Agent 分配任务..."></textarea>
+                    </div>
+                </div>
             </aside>
         </div>
 
-        <!-- 视频 / 设置 / 阅览模式切换；图片创作已迁移到画布节点。 -->
+        <div class="task-history-dock" id="taskHistoryDock">
+            <section class="agent-task-history" id="agentTaskHistory" aria-label="图片和视频任务记录" hidden>
+                <header class="agent-task-history-head">
+                    <div>
+                        <strong>任务记录</strong>
+                        <p id="agentTaskHistorySummary">还没有生成任务</p>
+                    </div>
+                    <button class="agent-task-history-close" id="agentTaskHistoryClose" type="button"
+                        title="关闭任务记录" aria-label="关闭任务记录">
+                        <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>
+                    </button>
+                </header>
+                <div class="agent-task-history-filters" id="agentTaskHistoryFilters" role="tablist" aria-label="任务类型">
+                    <button class="active" type="button" role="tab" data-task-kind="all" aria-selected="true">全部</button>
+                    <button type="button" role="tab" data-task-kind="image" aria-selected="false">图片</button>
+                    <button type="button" role="tab" data-task-kind="video" aria-selected="false">视频</button>
+                </div>
+                <div class="agent-task-history-list" id="agentTaskHistoryList"></div>
+            </section>
+        </div>
+
+        <!-- 图片和视频创作都在画布节点中完成；这里只保留全局工具。 -->
         <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
-            <button class="creation-mode-option video" id="creationModeVideoBtn" type="button">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>
-                视频模式
+            <button class="creation-mode-option task-history" id="agentTaskHistoryBtn" type="button"
+                title="打开任务记录" aria-label="打开任务记录" aria-controls="agentTaskHistory" aria-expanded="false">
+                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
+                <span>任务记录</span>
+                <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
             </button>
             <button class="creation-mode-option settings" id="creationModeSettingsBtn" type="button">
                 <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
@@ -786,11 +931,13 @@
                 阅览模式
             </button>
         </div>
-        <button class="agent-toggle-btn" id="agentToggleBtn" title="点击收起窗口，悬停切换模式" aria-label="收起为置顶浮动按钮">
+        <button class="agent-toggle-btn" id="agentToggleBtn" title="左键打开 AI Agent，右键收起画布"
+            aria-label="左键打开 AI Agent，右键收起画布" aria-controls="agentSidebar" aria-expanded="false">
             <div class="toggle-btn-glow"></div>
             <svg class="toggle-btn-icon" viewBox="0 0 24 24" width="12" height="18" fill="currentColor">
                 <rect x="6" y="3" width="12" height="18" rx="6" />
             </svg>
+            <span class="toggle-btn-collapse-icon" aria-hidden="true"></span>
         </button>
     </div>
 

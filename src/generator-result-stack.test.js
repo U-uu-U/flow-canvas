@@ -4,14 +4,22 @@ import {
     appendGeneratorResult,
     clearGeneratorResults,
     ensureGeneratorResultEntries,
+    getGeneratorResultEntries,
     getGeneratorResultLayout,
     keepFirstGeneratorResult,
     promoteGeneratorResult,
     removeGeneratorResultByFilePath,
     replaceGeneratorResultFilePath,
+    resolveGeneratorResultMediaType,
     rotateGeneratorResults,
     setGeneratorResultLayout
 } from './generator-result-stack.js';
+
+test('resolves generated videos before replacing the generator node', () => {
+    assert.equal(resolveGeneratorResultMediaType({ _resultMediaType: 'video' }, 'C:/output/result.png'), 'video');
+    assert.equal(resolveGeneratorResultMediaType({}, 'C:/output/result.mp4'), 'video');
+    assert.equal(resolveGeneratorResultMediaType({}, 'C:/output/result.png'), 'image');
+});
 
 test('migrates legacy result arrays into aligned entries', () => {
     const data = {
@@ -79,6 +87,25 @@ test('branch layout persists and any candidate can become the first result', () 
     promoteGeneratorResult(data, 2);
     assert.deepEqual(data.resultFilePaths, ['C.png', 'D.png', 'A.png', 'B.png']);
     assert.equal(data.resultStackPosition, 2);
+});
+
+test('splitting keeps the promoted candidate and leaves the other candidates for branches', () => {
+    const data = {
+        resultEntries: [
+            { filePath: 'A.png', item: { candidateIndex: 1 } },
+            { filePath: 'B.png', item: { candidateIndex: 2 } },
+            { filePath: 'C.png', item: { candidateIndex: 3 } },
+            { filePath: 'D.png', item: { candidateIndex: 4 } }
+        ]
+    };
+
+    promoteGeneratorResult(data, 2);
+    const branchCandidates = getGeneratorResultEntries(data).slice(1);
+    keepFirstGeneratorResult(data);
+
+    assert.deepEqual(data.resultFilePaths, ['C.png']);
+    assert.deepEqual(branchCandidates.map(candidate => candidate.filePath), ['D.png', 'A.png', 'B.png']);
+    assert.deepEqual(branchCandidates.map(candidate => candidate.item.candidateIndex), [4, 1, 2]);
 });
 
 test('removing a file updates the canonical queue and legacy count fields', () => {
