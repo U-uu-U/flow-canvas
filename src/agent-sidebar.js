@@ -33,6 +33,14 @@ import {
     parseAgentImageCompilationResponse
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
+import { createBoardToolRegistry } from './board-tool-registry.js';
+import {
+    AGENT_SKILL_CATEGORY_IDS,
+    CUSTOM_AGENT_SKILL_LIMIT,
+    createCustomAgentSkill,
+    normalizeCustomAgentSkills,
+    removeCustomAgentSkill
+} from './agent-skills.js';
 
 const DEFAULT_TEMPLATES = {
     'ravenhash-text': { name: 'RavenHash Text', capability: 'text', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: '' },
@@ -49,6 +57,24 @@ function normalizeRavenHashEndpoint(endpoint) {
 }
 
 const VIDEO_MODEL_PROFILES = [
+    {
+        match: /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i,
+        label: 'Seedance 2.5',
+        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
+        resolutions: ['720p'],
+        durations: [30],
+        durationControl: 'slider',
+        supportsWebSearch: false,
+        supportsCameraFixed: false,
+        supportsGeneratedAudio: false,
+        supportsWatermark: false,
+        referenceLimits: { image: 10, video: 0, audio: 0 },
+        defaultRatio: 'adaptive',
+        resolveAdaptiveRatio: true,
+        adaptiveFallbackRatio: '16:9',
+        defaultResolution: '720p',
+        defaultDuration: 30
+    },
     {
         match: /seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i,
         label: 'Seedance 2.0',
@@ -209,7 +235,8 @@ const AGENT_SKILLS = Object.freeze([
         instruction: '排查节点问题时按输入、连线、模型配置、请求参数、任务状态和输出落地的顺序定位原因。'
     }
 ]);
-const AGENT_SKILL_IDS = new Set(AGENT_SKILLS.map(skill => skill.id));
+const AGENT_BUILTIN_SKILL_IDS = new Set(AGENT_SKILLS.map(skill => skill.id));
+const AGENT_CUSTOM_SKILLS_STORAGE_KEY = 'flow-canvas-agent-custom-skills-v1';
 const PROMPT_PRESETS_STORAGE_KEY = 'flow-canvas-prompt-presets-v1';
 const PROMPT_PRESET_LIMIT = 100;
 const GENERATION_TASKS_STORAGE_KEY = 'flow-canvas-generation-tasks';
@@ -230,6 +257,12 @@ const RESERVED_SHORTCUTS = Object.freeze([
 export class AgentSidebar {
     constructor(options = {}) {
         this.options = options;
+        this.boardToolRegistry = createBoardToolRegistry({
+            getSnapshot: options.getBoardSnapshot,
+            previewTransaction: options.previewBoardTransaction,
+            applyTransaction: options.applyBoardTransaction,
+            undoTransaction: options.undoBoardTransaction
+        });
         // 全局配置：文字、图片和视频 provider 选择
         this.globalConfig = {
             textProviderId: null,
@@ -267,6 +300,7 @@ export class AgentSidebar {
         this.isAgentSending = false;
         this.agentModelKind = 'text';
         this.agentSkillCategory = 'all';
+        this.customAgentSkills = this._loadCustomAgentSkills();
 
         // DOM 引用
         this.settingsPanel = document.getElementById('agentSettings');
@@ -317,11 +351,19 @@ export class AgentSidebar {
         this.agentSkillMenuBtn = document.getElementById('agentSkillMenuBtn');
         this.agentSkillPopover = document.getElementById('agentSkillPopover');
         this.agentSkillSearchInput = document.getElementById('agentSkillSearchInput');
+        this.agentSkillAddBtn = document.getElementById('agentSkillAddBtn');
         this.agentSkillTabs = document.getElementById('agentSkillTabs');
         this.agentSkillList = document.getElementById('agentSkillList');
         this.agentSkillCount = document.getElementById('agentSkillCount');
         this.agentSkillClearBtn = document.getElementById('agentSkillClearBtn');
         this.agentSkillDoneBtn = document.getElementById('agentSkillDoneBtn');
+        this.agentSkillForm = document.getElementById('agentSkillForm');
+        this.agentSkillFormName = document.getElementById('agentSkillFormName');
+        this.agentSkillFormCategory = document.getElementById('agentSkillFormCategory');
+        this.agentSkillFormDescription = document.getElementById('agentSkillFormDescription');
+        this.agentSkillFormInstruction = document.getElementById('agentSkillFormInstruction');
+        this.agentSkillFormStatus = document.getElementById('agentSkillFormStatus');
+        this.agentSkillFormCancel = document.getElementById('agentSkillFormCancel');
         this.agentExecutionMenuBtn = document.getElementById('agentExecutionMenuBtn');
         this.agentExecutionPopover = document.getElementById('agentExecutionPopover');
         this.agentExecutionModeLabel = document.getElementById('agentExecutionModeLabel');
@@ -487,6 +529,26 @@ export class AgentSidebar {
             this._renderImageReferences();
         });
         this.options.subscribeAssetLibrarySettings?.(() => this._renderAssetLibrarySettings());
+    }
+
+    getBoardSnapshot(options = {}) {
+        return this.boardToolRegistry.execute('flow_canvas.board.get_snapshot', options);
+    }
+
+    previewBoardTransaction(transaction) {
+        return this.boardToolRegistry.execute('flow_canvas.board.transaction.preview', transaction);
+    }
+
+    applyBoardTransaction(transaction) {
+        return this.boardToolRegistry.execute('flow_canvas.board.transaction.apply', transaction);
+    }
+
+    undoBoardTransaction(undoToken) {
+        return this.boardToolRegistry.execute('flow_canvas.board.transaction.undo', { undoToken });
+    }
+
+    getBoardToolDefinitions() {
+        return this.boardToolRegistry.definitions();
     }
 
     _projectCacheKey(projectId) {
@@ -831,6 +893,7 @@ export class AgentSidebar {
             if (!entry.popover || entry.name === except) return;
             entry.popover.hidden = true;
             entry.button?.setAttribute('aria-expanded', 'false');
+            if (entry.name === 'skill') this._setAgentSkillFormOpen(false);
         });
     }
 
@@ -929,13 +992,91 @@ export class AgentSidebar {
     }
 
     _selectedAgentSkillIds() {
+        const availableIds = new Set(this._agentSkills().map(skill => skill.id));
         return (Array.isArray(this.globalConfig.agentSkillIds) ? this.globalConfig.agentSkillIds : [])
-            .filter(id => AGENT_SKILL_IDS.has(id));
+            .filter(id => availableIds.has(id));
     }
 
     _activeAgentSkills() {
         const selectedIds = new Set(this._selectedAgentSkillIds());
-        return AGENT_SKILLS.filter(skill => selectedIds.has(skill.id));
+        return this._agentSkills().filter(skill => selectedIds.has(skill.id));
+    }
+
+    _agentSkills() {
+        return [...AGENT_SKILLS, ...this.customAgentSkills];
+    }
+
+    _loadCustomAgentSkills() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(AGENT_CUSTOM_SKILLS_STORAGE_KEY) || '[]');
+            return normalizeCustomAgentSkills(saved, { reservedIds: AGENT_BUILTIN_SKILL_IDS });
+        } catch (error) {
+            console.warn('[AgentSidebar] Failed to load custom Skills:', error);
+            return [];
+        }
+    }
+
+    _saveCustomAgentSkills() {
+        localStorage.setItem(
+            AGENT_CUSTOM_SKILLS_STORAGE_KEY,
+            JSON.stringify(this.customAgentSkills.slice(0, CUSTOM_AGENT_SKILL_LIMIT))
+        );
+    }
+
+    _setAgentSkillFormStatus(message = '', state = '') {
+        if (!this.agentSkillFormStatus) return;
+        this.agentSkillFormStatus.textContent = message;
+        this.agentSkillFormStatus.dataset.state = state;
+    }
+
+    _setAgentSkillFormOpen(open) {
+        if (!this.agentSkillForm || !this.agentSkillPopover) return;
+        this.agentSkillForm.hidden = !open;
+        this.agentSkillPopover.classList.toggle('is-creating', open);
+        this.agentSkillAddBtn?.setAttribute('aria-expanded', String(open));
+        if (!open) return;
+        this.agentSkillForm.reset();
+        if (this.agentSkillFormCategory) this.agentSkillFormCategory.value = 'creative';
+        this._setAgentSkillFormStatus();
+        requestAnimationFrame(() => this.agentSkillFormName?.focus());
+    }
+
+    _createCustomAgentSkillFromForm() {
+        try {
+            if (this.customAgentSkills.length >= CUSTOM_AGENT_SKILL_LIMIT) {
+                throw new Error(`最多可新增 ${CUSTOM_AGENT_SKILL_LIMIT} 个自定义 Skill`);
+            }
+            const skill = createCustomAgentSkill({
+                name: this.agentSkillFormName?.value,
+                category: this.agentSkillFormCategory?.value,
+                description: this.agentSkillFormDescription?.value,
+                instruction: this.agentSkillFormInstruction?.value
+            }, { existingSkills: this._agentSkills() });
+            this.customAgentSkills.push(skill);
+            this._saveCustomAgentSkills();
+            this.globalConfig.agentSkillIds = [...new Set([...this._selectedAgentSkillIds(), skill.id])];
+            this._saveConfig();
+            this.agentSkillCategory = 'all';
+            if (this.agentSkillSearchInput) this.agentSkillSearchInput.value = '';
+            this._setAgentSkillFormOpen(false);
+            this._renderAgentSkillList();
+            return true;
+        } catch (error) {
+            this._setAgentSkillFormStatus(error?.message || String(error), 'error');
+            return false;
+        }
+    }
+
+    _deleteCustomAgentSkill(skillId) {
+        const skill = this.customAgentSkills.find(entry => entry.id === skillId);
+        if (!skill) return false;
+        if (!window.confirm(`删除自定义 Skill“${skill.name}”？`)) return false;
+        this.customAgentSkills = removeCustomAgentSkill(this.customAgentSkills, skillId);
+        this._saveCustomAgentSkills();
+        this.globalConfig.agentSkillIds = this._selectedAgentSkillIds().filter(id => id !== skillId);
+        this._saveConfig();
+        this._renderAgentSkillList();
+        return true;
     }
 
     _renderAgentSkillList() {
@@ -943,7 +1084,7 @@ export class AgentSidebar {
         const selectedIds = new Set(this._selectedAgentSkillIds());
         const keyword = String(this.agentSkillSearchInput?.value || '').trim().toLowerCase();
         const category = this.agentSkillCategory;
-        const skills = AGENT_SKILLS.filter(skill => {
+        const skills = this._agentSkills().filter(skill => {
             const matchesCategory = category === 'all' || skill.category === category;
             const searchable = `${skill.name} ${skill.description}`.toLowerCase();
             return matchesCategory && (!keyword || searchable.includes(keyword));
@@ -975,6 +1116,9 @@ export class AgentSidebar {
 
         skills.forEach(skill => {
             const selected = selectedIds.has(skill.id);
+            const row = document.createElement('div');
+            row.className = 'agent-skill-list-row';
+            row.classList.toggle('is-custom', skill.custom === true);
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'agent-composer-list-item agent-skill-list-item';
@@ -995,12 +1139,23 @@ export class AgentSidebar {
             check.className = 'agent-composer-list-check';
             check.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-check"></use></svg>';
             button.append(icon, copy, check);
-            this.agentSkillList.appendChild(button);
+            row.appendChild(button);
+            if (skill.custom) {
+                const deleteButton = document.createElement('button');
+                deleteButton.type = 'button';
+                deleteButton.className = 'agent-skill-delete-btn';
+                deleteButton.dataset.deleteAgentSkill = skill.id;
+                deleteButton.title = `删除 ${skill.name}`;
+                deleteButton.setAttribute('aria-label', `删除自定义 Skill ${skill.name}`);
+                deleteButton.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>';
+                row.appendChild(deleteButton);
+            }
+            this.agentSkillList.appendChild(row);
         });
     }
 
     _toggleAgentSkill(skillId) {
-        if (!AGENT_SKILL_IDS.has(skillId)) return;
+        if (!this._agentSkills().some(skill => skill.id === skillId)) return;
         const selectedIds = new Set(this._selectedAgentSkillIds());
         if (selectedIds.has(skillId)) selectedIds.delete(skillId);
         else selectedIds.add(skillId);
@@ -1990,6 +2145,12 @@ export class AgentSidebar {
             this.setMode('settings', 'api');
         });
         this.agentSkillSearchInput?.addEventListener('input', () => this._renderAgentSkillList());
+        this.agentSkillAddBtn?.addEventListener('click', () => this._setAgentSkillFormOpen(true));
+        this.agentSkillForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            this._createCustomAgentSkillFromForm();
+        });
+        this.agentSkillFormCancel?.addEventListener('click', () => this._setAgentSkillFormOpen(false));
         this.agentSkillTabs?.addEventListener('click', event => {
             const button = event.target.closest('[data-agent-skill-category]');
             if (!button) return;
@@ -1999,6 +2160,12 @@ export class AgentSidebar {
             this._renderAgentSkillList();
         });
         this.agentSkillList?.addEventListener('click', event => {
+            const deleteButton = event.target.closest('[data-delete-agent-skill]');
+            if (deleteButton) {
+                event.stopPropagation();
+                this._deleteCustomAgentSkill(deleteButton.dataset.deleteAgentSkill);
+                return;
+            }
             const button = event.target.closest('[data-agent-skill-id]');
             if (button) this._toggleAgentSkill(button.dataset.agentSkillId);
         });
@@ -3300,12 +3467,29 @@ export class AgentSidebar {
         return this._updateGenerationTask(id, patch);
     }
 
+    getGenerationRecoveryTaskForNode(nodeId) {
+        const normalizedNodeId = String(nodeId || '').trim();
+        if (!normalizedNodeId) return null;
+        return this.generationTasks.find(task =>
+            task?.status === 'disconnected'
+            && task?.kind === 'video'
+            && Boolean(task?.taskId)
+            && String(task?.params?.nodeId || '') === normalizedNodeId
+        ) || null;
+    }
+
+    retryGenerationTask(taskId, options = {}) {
+        return this._retryGenerationTask(taskId, options);
+    }
+
     _isGenerationDisconnect(error) {
         const marker = `${error?.name || ''} ${error?.code || ''} ${error?.message || error || ''}`;
         return /network|fetch failed|failed to fetch|econn|etimedout|socket|connection|timeout|timed out|aborterror|断开|断连|连接失败|网络|超时/i.test(marker);
     }
 
     _recordGenerationError(taskId, error) {
+        const current = this.generationTasks.find(task => task.id === taskId);
+        if (current?.status === 'canceled') return current;
         const message = error?.message || String(error || '请求失败');
         return this._updateGenerationTask(taskId, {
             status: this._isGenerationDisconnect(error) ? 'disconnected' : 'failed',
@@ -3315,6 +3499,46 @@ export class AgentSidebar {
 
     recordGenerationError(taskId, error) {
         return this._recordGenerationError(taskId, error);
+    }
+
+    _isGenerationTaskCanceled(taskId) {
+        return this.generationTasks.find(task => task.id === taskId)?.status === 'canceled';
+    }
+
+    _generationCancellationError() {
+        const error = new Error('生成任务已中断');
+        error.name = 'AbortError';
+        error.code = 'GENERATION_CANCELED';
+        return error;
+    }
+
+    async _cancelGenerationTask(taskId) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (!task || task.status !== 'running') return false;
+        this._updateGenerationTask(taskId, {
+            status: 'canceled',
+            error: null,
+            params: { syncStage: 'canceled', progress: null }
+        });
+        if (this.activeVideoWorkspaceTaskId === taskId) this.activeVideoWorkspaceTaskId = null;
+        try {
+            await window.flowCanvas?.mcp?.cancelGeneration?.(taskId);
+        } catch (error) {
+            console.warn('[Agent] 中断生成请求失败', error);
+        }
+        return true;
+    }
+
+    cancelGenerationTask(taskId) {
+        return this._cancelGenerationTask(taskId);
+    }
+
+    async cancelGenerationTasksForNode(nodeId) {
+        const taskIds = this.generationTasks
+            .filter(task => task.status === 'running' && task.params?.nodeId === nodeId)
+            .map(task => task.id);
+        await Promise.all(taskIds.map(taskId => this._cancelGenerationTask(taskId)));
+        return taskIds.length > 0;
     }
 
     _setTaskHistoryOpen(open) {
@@ -3407,7 +3631,8 @@ export class AgentSidebar {
             running: '生成中',
             success: '已完成',
             failed: '失败',
-            disconnected: '待重传'
+            disconnected: '待重传',
+            canceled: '已中断'
         };
         this.taskHistoryList.innerHTML = visibleTasks.map(task => {
             const status = statusLabels[task.status] ? task.status : 'failed';
@@ -3500,12 +3725,16 @@ export class AgentSidebar {
         }, 1400);
     }
 
-    async _retryGenerationTask(taskId) {
+    async _retryGenerationTask(taskId, options = {}) {
         const task = this.generationTasks.find(item => item.id === taskId);
         if (!task || !['failed', 'disconnected'].includes(task.status)) return;
+        const originalNodeId = String(task.params?.nodeId || '').trim();
+        const restoreOnOriginalNode = options.restoreOnOriginalNode === true
+            && Boolean(originalNodeId)
+            && typeof this.options.completeGenerationTaskOnNode === 'function';
         const shouldResumeVideo = task.kind === 'video'
-            && task.status === 'disconnected'
             && Boolean(task.taskId)
+            && (task.status === 'disconnected' || task.params?.syncStage === 'download')
             && Boolean(window.flowCanvas?.mcp?.resumeVideo);
         const sourceProviderId = String(task.providerId || '').split('::model:')[0];
         const currentProvider = this.providers.find(item => item.id === sourceProviderId);
@@ -3542,6 +3771,9 @@ export class AgentSidebar {
             status: 'running',
             error: null,
             attempts: (task.attempts || 1) + 1,
+            params: {
+                syncStage: shouldResumeVideo ? 'recovering' : 'submit'
+            },
             ...(task.kind === 'image' ? {
                 sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
             } : {})
@@ -3550,9 +3782,10 @@ export class AgentSidebar {
         let result = null;
         try {
             if (task.kind === 'image') {
-                placeholder = this.options.beginImageGeneration?.({
+                placeholder = restoreOnOriginalNode ? null : this.options.beginImageGeneration?.({
                     size: task.params?.size,
-                    sourceReferences: retryImageReferences
+                    sourceReferences: retryImageReferences,
+                    onCancel: () => this._cancelGenerationTask(task.id)
                 }) || null;
                 if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
                 result = await window.flowCanvas.mcp.generateImage({
@@ -3570,13 +3803,14 @@ export class AgentSidebar {
                     y: placeholder?.y,
                     canvasWidth: placeholder?.width,
                     canvasHeight: placeholder?.height,
-                    addToCanvas: true
+                    addToCanvas: !restoreOnOriginalNode
                 });
             } else {
                 if (!window.flowCanvas?.mcp?.generateVideo && !shouldResumeVideo) throw new Error('本地视频接口不可用');
-                placeholder = this.options.beginVideoGeneration?.({
+                placeholder = restoreOnOriginalNode ? null : this.options.beginVideoGeneration?.({
                     ratio: task.params?.ratio || '16:9',
-                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath }))
+                    sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
+                    onCancel: () => this._cancelGenerationTask(task.id)
                 }) || null;
                 result = shouldResumeVideo
                     ? await window.flowCanvas.mcp.resumeVideo({
@@ -3589,7 +3823,7 @@ export class AgentSidebar {
                         y: placeholder?.y,
                         canvasWidth: placeholder?.width,
                         canvasHeight: placeholder?.height,
-                        addToCanvas: true
+                        addToCanvas: !restoreOnOriginalNode
                     })
                     : await window.flowCanvas.mcp.generateVideo({
                     provider: 'openai-video',
@@ -3611,10 +3845,22 @@ export class AgentSidebar {
                     y: placeholder?.y,
                     canvasWidth: placeholder?.width,
                     canvasHeight: placeholder?.height,
-                    addToCanvas: true
+                    addToCanvas: !restoreOnOriginalNode
                 });
             }
+            if (this._isGenerationTaskCanceled(task.id) || result?.canceled) {
+                throw this._generationCancellationError();
+            }
             if (result?.success === false) throw new Error(result.error || '生成请求失败');
+            if (restoreOnOriginalNode) {
+                const restored = await this.options.completeGenerationTaskOnNode({
+                    nodeId: originalNodeId,
+                    kind: task.kind,
+                    taskId: task.id,
+                    result
+                });
+                if (!restored) throw new Error('原生成节点已不存在，无法恢复到原位置');
+            }
             this._updateGenerationTask(task.id, {
                 status: 'success',
                 error: null,
@@ -3845,7 +4091,8 @@ export class AgentSidebar {
         this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
         const placeholder = this.options.beginVideoGeneration?.({
             ratio,
-            sourceReferences: imageReferences
+            sourceReferences: imageReferences,
+            onCancel: () => this._cancelGenerationTask(generationTask.id)
         }) || null;
         let result = null;
 
@@ -3872,6 +4119,9 @@ export class AgentSidebar {
                 canvasHeight: placeholder?.height,
                 addToCanvas: true
             });
+            if (this._isGenerationTaskCanceled(generationTask.id) || result?.canceled) {
+                throw this._generationCancellationError();
+            }
             if (result?.success === false) throw new Error(result.error || '\u89c6\u9891\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
             this._updateGenerationTask(generationTask.id, {
                 status: 'success',
@@ -3887,8 +4137,13 @@ export class AgentSidebar {
             );
         } catch (error) {
             this._recordGenerationError(generationTask.id, error);
-            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u5931\u8d25';
-            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
+            const canceled = this._isGenerationTaskCanceled(generationTask.id);
+            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = canceled ? '已中断' : '\u5931\u8d25';
+            this._setWorkspaceMessage(
+                this.videoGenerateMessage,
+                canceled ? '' : 'error',
+                canceled ? '生成任务已中断' : (error?.message || String(error))
+            );
         } finally {
             if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
         }
@@ -4125,7 +4380,8 @@ export class AgentSidebar {
         this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
         const placeholder = this.options.beginImageGeneration?.({
             size,
-            sourceReferences
+            sourceReferences,
+            onCancel: () => this._cancelGenerationTask(generationTask.id)
         }) || null;
         let result = null;
 
@@ -4147,6 +4403,9 @@ export class AgentSidebar {
                 canvasHeight: placeholder?.height,
                 addToCanvas: true
             });
+            if (this._isGenerationTaskCanceled(generationTask.id) || result?.canceled) {
+                throw this._generationCancellationError();
+            }
             if (result?.success === false) throw new Error(result.error || '\u56fe\u7247\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
             this._updateGenerationTask(generationTask.id, {
                 status: 'success',
@@ -4165,8 +4424,13 @@ export class AgentSidebar {
             );
         } catch (error) {
             this._recordGenerationError(generationTask.id, error);
-            this._setImageWorkspaceStatus('failed', '\u5931\u8d25');
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
+            const canceled = this._isGenerationTaskCanceled(generationTask.id);
+            this._setImageWorkspaceStatus(canceled ? 'idle' : 'failed', canceled ? '已中断' : '\u5931\u8d25');
+            this._setWorkspaceMessage(
+                this.imageGenerateMessage,
+                canceled ? '' : 'error',
+                canceled ? '生成任务已中断' : (error?.message || String(error))
+            );
         } finally {
             if (placeholder?.id) this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
         }
@@ -4236,9 +4500,10 @@ export class AgentSidebar {
         Object.assign(this.globalConfig, source);
         this.globalConfig.textProviderId ||= source.chatProviderId || null;
         this.globalConfig.agentExecutionMode = source.agentExecutionMode === 'ask' ? 'ask' : 'auto';
+        const availableIds = new Set(this._agentSkills().map(skill => skill.id));
         this.globalConfig.agentSkillIds = (Array.isArray(source.agentSkillIds)
             ? source.agentSkillIds
-            : []).filter(id => AGENT_SKILL_IDS.has(id));
+            : []).filter(id => availableIds.has(id));
         this.globalConfig.imageGenerationPreferences = normalizeImageGenerationPreferences(
             source.imageGenerationPreferences
         );

@@ -155,6 +155,9 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
         assert.equal(calls[0].size, '1536x1024');
         assert.equal(calls[0].addToCanvas, false);
         assert.equal(output._resultFilePath, 'C:/output/result.png');
+        assert.equal(output._generation.prompt, '测试图片\n\n上游场景描述');
+        assert.equal(output._generation.model, 'gpt-image-2');
+        assert.equal(output._generation.config.prompt, calls[0].prompt);
     } finally {
         global.window = previousWindow;
     }
@@ -720,6 +723,7 @@ test('video execute: 使用节点绑定模型并透传完整参数与参考素�
             watermark: true,
             compressReferenceImages: false,
             nodeId: 'video-node-1',
+            syncStage: 'prepare',
             videoSourcePaths: ['C:/refs/motion.mp4'],
             audioSourcePaths: ['C:/refs/music.wav']
         });
@@ -728,6 +732,59 @@ test('video execute: 使用节点绑定模型并透传完整参数与参考素�
         assert.equal(taskUpdates.at(-1).patch.params.generateAudio, true);
         assert.equal(taskUpdates.at(-1).patch.params.webSearch, true);
         assert.equal(output._resultItem.id, 'video-item');
+        assert.equal(output._generation.prompt, '测试提示词');
+        assert.equal(output._generation.model, 'seedance-2.0');
+        assert.equal(output._generation.config.duration, 8);
+        assert.equal(output._generation.config.ratio, '9:16');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('video execute: 参考图预处理失败时仍立即创建并标记任务记录', async () => {
+    const createdTasks = [];
+    const errors = [];
+    const previousWindow = global.window;
+    global.window = { flowCanvas: { mcp: { generateVideo: async () => ({}) } } };
+
+    try {
+        await assert.rejects(
+            helpers.NODE_TYPES.video.execute({
+                source: [
+                    '测试提示词',
+                    'local-res://' + encodeURIComponent('C:/refs/broken.png')
+                ]
+            }, {
+                model: 'seedance_v2.5',
+                ratio: '16:9',
+                resolution: '720p',
+                duration: 30,
+                count: 1,
+                concurrency: 1
+            }, {
+                item: { id: 'seedance-video-node' },
+                getVideoProvider: () => ({
+                    id: 'video-provider',
+                    apiKey: 'test-key',
+                    endpoint: 'https://example.test/v1',
+                    model: 'seedance_v2.5'
+                }),
+                prepareImageReferences: async () => {
+                    throw new Error('参考图读取失败');
+                },
+                createGenerationTask: details => {
+                    createdTasks.push(details);
+                    return { id: 'seedance-client-task' };
+                },
+                recordGenerationError: (id, error) => errors.push({ id, error: error.message })
+            }),
+            /参考图读取失败/
+        );
+
+        assert.equal(createdTasks.length, 1);
+        assert.equal(createdTasks[0].params.syncStage, 'prepare');
+        assert.deepEqual(createdTasks[0].sourcePaths, ['C:/refs/broken.png']);
+        assert.deepEqual(errors, [{ id: 'seedance-client-task', error: '参考图读取失败' }]);
     } finally {
         global.window = previousWindow;
     }
@@ -840,6 +897,67 @@ test('video execute: MiniMax H3 尊重明确选择的固定比例', async () => 
         });
 
         assert.equal(calls[0].ratio, '16:9');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
+test('video execute: Seedance 2.5 自适应比例会按第一张参考图映射为受支持比例', async () => {
+    const calls = [];
+    const createdTasks = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateVideo: async options => {
+                    calls.push(options);
+                    return { filePath: 'C:/output/seedance-result.mp4' };
+                }
+            }
+        }
+    };
+
+    try {
+        await helpers.NODE_TYPES.video.execute({
+            source: [
+                '测试提示词',
+                'local-res://' + encodeURIComponent('C:/refs/portrait.jpg')
+            ]
+        }, {
+            model: 'seedance_v2.5',
+            ratio: 'adaptive',
+            ratioMode: 'auto',
+            resolution: '720p',
+            duration: 30,
+            count: 1,
+            concurrency: 1
+        }, {
+            item: { id: 'seedance-video-node' },
+            inputContext: [{
+                source: {
+                    filePath: 'C:/refs/portrait.jpg',
+                    mediaType: 'image',
+                    width: 1280,
+                    height: 1920
+                }
+            }],
+            getVideoProvider: () => ({
+                id: 'seedance-provider',
+                apiKey: 'test-key',
+                endpoint: 'https://art.ravenhash.org/v1',
+                model: 'seedance_v2.5'
+            }),
+            prepareImageReferences: refs => refs,
+            createGenerationTask: details => {
+                createdTasks.push(details);
+                return { id: 'seedance-client-task' };
+            },
+            updateGenerationTask: () => {}
+        });
+
+        assert.equal(calls[0].ratio, '3:4');
+        assert.equal(calls[0].duration, 30);
+        assert.equal(createdTasks[0].params.ratio, '3:4');
     } finally {
         global.window = previousWindow;
     }

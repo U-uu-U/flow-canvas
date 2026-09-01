@@ -5,9 +5,15 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
+import { BOARD_TOOL_DEFINITIONS } from '../shared/board-tool-registry.mjs';
 
 const DEFAULT_BASE_URL = `http://127.0.0.1:${process.env.FLOW_CANVAS_MCP_PORT || '18765'}`;
 const BASE_URL = (process.env.FLOW_CANVAS_BRIDGE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+const boardTools = BOARD_TOOL_DEFINITIONS.map(({ name, description, inputSchema }) => ({
+    name,
+    description,
+    inputSchema
+}));
 
 const tools = [
     {
@@ -312,7 +318,8 @@ const tools = [
             },
             required: ['itemId']
         }
-    }
+    },
+    ...boardTools
 ];
 
 const toolHandlers = {
@@ -340,7 +347,11 @@ const toolHandlers = {
     'flow_canvas.item.get': ({ itemId }) => api('GET', `/items/${encodeURIComponent(required(itemId, 'itemId'))}`),
     'flow_canvas.item.add': (body = {}) => api('POST', '/items/add', body),
     'flow_canvas.item.update': ({ itemId, ...patch }) => api('PATCH', `/items/${encodeURIComponent(required(itemId, 'itemId'))}`, patch),
-    'flow_canvas.item.delete': ({ itemId }) => api('DELETE', `/items/${encodeURIComponent(required(itemId, 'itemId'))}`)
+    'flow_canvas.item.delete': ({ itemId }) => api('DELETE', `/items/${encodeURIComponent(required(itemId, 'itemId'))}`),
+    'flow_canvas.board.get_snapshot': (body = {}) => api('POST', '/board/snapshot', body),
+    'flow_canvas.board.transaction.preview': (body = {}) => api('POST', '/board/transactions/preview', body),
+    'flow_canvas.board.transaction.apply': (body = {}) => api('POST', '/board/transactions/apply', body),
+    'flow_canvas.board.transaction.undo': (body = {}) => api('POST', '/board/transactions/undo', body)
 };
 
 let inputBuffer = Buffer.alloc(0);
@@ -356,8 +367,9 @@ process.stdin.on('data', chunk => {
                     jsonrpc: '2.0',
                     id: message.id,
                     error: {
-                        code: -32603,
-                        message: error.message
+                        code: error.code || -32603,
+                        message: error.message,
+                        ...(error.data === undefined ? {} : { data: error.data })
                     }
                 });
             }
@@ -460,7 +472,8 @@ async function handleMessage(message) {
             id,
             error: {
                 code: error.code || -32603,
-                message: error.message
+                message: error.message,
+                ...(error.data === undefined ? {} : { data: error.data })
             }
         });
     }
@@ -480,7 +493,11 @@ async function api(method, pathname, body) {
         data = { raw: text };
     }
     if (!res.ok || data?.success === false) {
-        throw new Error(data?.error || `Flow Canvas API failed: ${res.status}`);
+        throw new McpError(-32000, data?.error || `Flow Canvas API failed: ${res.status}`, {
+            status: res.status,
+            code: data?.code || 'FLOW_CANVAS_API_ERROR',
+            details: data?.details || null
+        });
     }
     return data;
 }
@@ -794,8 +811,9 @@ function maybeExitAfterStdinEnd() {
 }
 
 class McpError extends Error {
-    constructor(code, message) {
+    constructor(code, message, data = undefined) {
         super(message);
         this.code = code;
+        this.data = data;
     }
 }

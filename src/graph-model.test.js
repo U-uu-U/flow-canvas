@@ -271,6 +271,24 @@ test('collectInputs: 统一端口收集文本和多种素材并兼容旧端口�
     assert.deepStrictEqual(got.source, ['local-res://a.png', 'local-res://b.png', '一只猫']);
 });
 
+test('collectInputs: 历史父节点只保留链路，不会成为新生成任务的引用', () => {
+    const target = op('next-video', 'video');
+    const originalReference = conn('original-image', 'out', 'next-video', 'source');
+    const historyParent = {
+        ...conn('previous-video', 'video', 'next-video', 'source'),
+        kind: 'history'
+    };
+    const cache = new Map([
+        ['original-image', { out: 'local-res://original.png' }],
+        ['previous-video', { video: 'local-res://previous.mp4' }]
+    ]);
+
+    assert.deepStrictEqual(
+        G.collectInputs(target, [historyParent, originalReference], cache),
+        { source: ['local-res://original.png'] }
+    );
+});
+
 test('collectInputContext: 保留连接 ID、来源节点、素材尺寸和原始值', () => {
     const source = {
         ...media('image-a', 'C:/refs/a.png'),

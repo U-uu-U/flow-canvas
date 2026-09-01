@@ -52,6 +52,15 @@ import {
     resolveGenerationDisplaySize,
     resolveImageDimensions
 } from './image-node-settings.js';
+import {
+    createImageNodePromptDraft,
+    mergeImageNodePromptConfig
+} from './image-generation-preferences.js';
+import {
+    getGenerationRecord,
+    getGenerationReuseConfig,
+    hasGenerationRecord
+} from './generation-record.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
@@ -207,7 +216,8 @@ const OP_STATUS_LABELS = {
     queued: '排队中',
     running: '生成中',
     done: '已完成',
-    error: '生成失败'
+    error: '生成失败',
+    canceled: '已中断'
 };
 const NODE_GLYPH_PATHS = {
     image: 'M3 4H17V16H3Z M5 13L8 10L10.5 12.5L13 9.5L17 14 M6.5 7.5H6.6',
@@ -459,6 +469,7 @@ export class CanvasManager {
         this.graphView = new GraphView(this, Konva);
         this.generationPlaceholders = new Map();
         this.pendingGenerationPlacements = new Map();
+        this.generationTaskStates = new Map();
 
         this.selectionRect = new Konva.Rect({
             fill: 'rgba(255, 255, 255, 0.1)',
@@ -1289,7 +1300,7 @@ export class CanvasManager {
             <button type="button" data-action="reference" class="canvas-selection-generate has-menu" title="使用当前素材生成" aria-label="使用当前素材生成" aria-haspopup="menu"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg><span>生成</span></button>
             <button type="button" data-action="more" title="更多操作" aria-label="更多操作"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-more"></use></svg></button>
             <span class="canvas-selection-toolbar-divider" aria-hidden="true"></span>
-            <button type="button" data-action="tag" title="分类与收藏" aria-label="分类与收藏"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-tag"></use></svg></button>
+            <button type="button" data-action="library" class="canvas-selection-library" title="归档到默认素材库" aria-label="归档到默认素材库"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg><span>入库</span></button>
             <span class="canvas-selection-toolbar-divider" aria-hidden="true"></span>
             <button type="button" data-action="folder" title="复制到文件夹" aria-label="复制到文件夹"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder-add"></use></svg></button>
             <button type="button" data-action="export" title="另存为" aria-label="另存为"><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-download"></use></svg></button>
@@ -1315,7 +1326,7 @@ export class CanvasManager {
     _getSelectionToolbarItem() {
         if (this.selectedItems.size !== 1) return null;
         const item = this.items.get([...this.selectedItems][0]);
-        if (!item || item.data?.kind === 'op' || !item.group?.isVisible()) return null;
+        if (!item || !this._isInteractiveMediaProduct(item.data) || !item.group?.isVisible()) return null;
         return item;
     }
 
@@ -1371,10 +1382,11 @@ export class CanvasManager {
         toolbar.dataset.placement = position.placement;
 
         const mediaType = this._getItemMediaType(item.data);
+        const product = this._getMediaProduct(item.data);
         const cropButton = toolbar.querySelector('[data-action="crop"]');
         if (cropButton) {
             cropButton.disabled = mediaType !== 'image'
-                || !item.data.filePath
+                || !product?.filePath
                 || !item.group.findOne('.displayNode');
         }
         const referenceButton = toolbar.querySelector('[data-action="reference"]');
@@ -1385,6 +1397,19 @@ export class CanvasManager {
                 : '使用当前素材生成';
             referenceButton.setAttribute('aria-label', referenceButton.title);
         }
+        const libraryButton = toolbar.querySelector('[data-action="library"]');
+        if (libraryButton) {
+            const isArchived = libraryButton.dataset.archivedSourcePath === product?.filePath;
+            if (!libraryButton.classList.contains('is-busy')) {
+                libraryButton.classList.toggle('is-archived', isArchived);
+                libraryButton.querySelector('span').textContent = isArchived ? '已入库' : '入库';
+            }
+            libraryButton.disabled = !product?.filePath;
+            libraryButton.title = !product?.filePath
+                ? '当前素材没有可归档文件'
+                : (isArchived ? '素材已归档到默认素材库' : '归档到默认素材库');
+            libraryButton.setAttribute('aria-label', libraryButton.title);
+        }
     }
 
     _getSelectionActionPayload(primaryId = null) {
@@ -1393,11 +1418,21 @@ export class CanvasManager {
             .filter(Boolean)
             .sort((left, right) => (left.group.x() - right.group.x()) || (left.group.y() - right.group.y()));
         const primary = this.items.get(primaryId) || entries[0] || null;
+        const entryTargets = entries.map(entry => {
+            const filePath = this._copyableFilePath(entry.data);
+            return filePath ? {
+                itemId: entry.data.id,
+                filePath,
+                generatorResult: entry.data.kind === 'op'
+                    && ['image', 'video'].includes(entry.data.nodeType)
+            } : null;
+        }).filter(Boolean);
         return {
             itemId: primary?.data?.id || null,
             itemIds: entries.map(entry => entry.data.id),
-            filePath: primary?.data?.filePath || '',
-            filePaths: entries.map(entry => entry.data.filePath).filter(Boolean),
+            filePath: primary ? this._copyableFilePath(primary.data) : '',
+            filePaths: entryTargets.map(entry => entry.filePath),
+            fileTargets: entryTargets,
             loadError: Boolean(primary?.loadError),
             mediaType: primary ? this._getItemMediaType(primary.data) : null
         };
@@ -1431,19 +1466,12 @@ export class CanvasManager {
                         clientY: rect.bottom + 8
                     }
                 }, payload);
-            } else if (action === 'tag') {
-                const rect = button.getBoundingClientRect();
-                document.dispatchEvent(new CustomEvent('show-asset-classification-menu', {
-                    detail: {
-                        filePath: item.data.filePath,
-                        clientX: rect.left,
-                        clientY: rect.bottom + 8
-                    }
-                }));
+            } else if (action === 'library') {
+                await this._archiveSelectionToAssetLibrary(item, button);
             } else if (action === 'folder') {
                 document.dispatchEvent(new CustomEvent('context-copy-to-folder', { detail: payload }));
             } else if (action === 'export') {
-                const result = await window.flowCanvas?.file?.saveCopy?.(item.data.filePath);
+                const result = await window.flowCanvas?.file?.saveCopy?.(payload.filePath);
                 if (result?.success) this._showCanvasStatus('素材已另存为');
                 else if (!result?.canceled) this._showCanvasStatus(`另存失败：${result?.error || '未知错误'}`, 3200);
             } else if (action === 'preview') {
@@ -1455,8 +1483,65 @@ export class CanvasManager {
         }
     }
 
+    async _archiveSelectionToAssetLibrary(item, button) {
+        const filePath = this._copyableFilePath(item?.data);
+        if (!filePath) {
+            this._showCanvasStatus('当前素材没有可归档文件', 2800);
+            return false;
+        }
+        if (!window.flowCanvas?.asset?.archiveFile) {
+            this._showCanvasStatus('入库功能需要在 Flow Canvas 桌面版中使用', 3200);
+            return false;
+        }
+
+        button.disabled = true;
+        button.classList.add('is-busy');
+        button.setAttribute('aria-busy', 'true');
+        this._showCanvasStatus('正在归档到素材库...');
+        try {
+            const result = await window.flowCanvas.asset.archiveFile(filePath);
+            if (!result?.success || !result.filePath) {
+                throw new Error(result?.error || '素材库没有返回归档文件');
+            }
+
+            button.classList.remove('is-busy');
+            button.classList.add('is-archived');
+            button.dataset.archivedSourcePath = filePath;
+            button.querySelector('span').textContent = '已入库';
+            button.title = result.archived === false ? '素材已在默认素材库中' : '已归档到默认素材库';
+            button.setAttribute('aria-label', button.title);
+            this._showCanvasStatus(
+                result.archived === false
+                    ? `素材已在 ${result.targetName || '素材库'}`
+                    : `已入库 · ${result.targetName || '默认目录'}`,
+                3000
+            );
+            document.dispatchEvent(new CustomEvent('asset-library-archived', {
+                detail: {
+                    filePath: result.filePath,
+                    sourcePath: filePath,
+                    targetDir: result.targetDir,
+                    archived: result.archived !== false,
+                    metadata: result.metadata || null
+                }
+            }));
+            return true;
+        } catch (error) {
+            button.classList.remove('is-busy', 'is-archived');
+            delete button.dataset.archivedSourcePath;
+            button.querySelector('span').textContent = '入库';
+            this._showCanvasStatus(`入库失败：${error?.message || error}`, 3800);
+            console.error('[Canvas] asset library archive failed:', error);
+            return false;
+        } finally {
+            button.removeAttribute('aria-busy');
+            button.disabled = false;
+        }
+    }
+
     _startImageCrop(item) {
-        if (!item?.data?.filePath || this._getItemMediaType(item.data) !== 'image') return false;
+        const product = this._getMediaProduct(item?.data);
+        if (!product?.filePath || product.mediaType !== 'image') return false;
         if (!window.flowCanvas?.image?.crop) {
             this._showCanvasStatus('裁切功能需要在 Flow Canvas 桌面版中使用', 3200);
             return false;
@@ -1547,7 +1632,7 @@ export class CanvasManager {
         const sourceHeight = Math.max(1, Number(imageSource?.naturalHeight || imageSource?.height || displayNode.height()) || 1);
         this._activeImageCrop = {
             itemId: item.data.id,
-            sourcePath: item.data.filePath,
+            sourcePath: product.filePath,
             crop: { x: 0, y: 0, width: 1, height: 1 },
             root,
             frame: root.querySelector('.image-crop-frame'),
@@ -1847,7 +1932,7 @@ export class CanvasManager {
 
     _showGenerationTypeMenuForMedia(itemId, anchor) {
         const source = this.items.get(itemId)?.data;
-        if (!source?.filePath) return;
+        if (!this._isInteractiveMediaProduct(source)) return;
         const mediaType = this._getItemMediaType(source);
         const choices = mediaType === 'image'
             ? [
@@ -1931,6 +2016,44 @@ export class CanvasManager {
             }));
     }
 
+    _getHistoricalGenerationReferenceConnections(itemId, nodeType, record) {
+        const acceptedTypes = nodeType === 'image'
+            ? new Set(['image'])
+            : new Set(['image', 'video', 'file']);
+        const seen = new Set([itemId]);
+        const resolved = [];
+        const addItem = item => {
+            if (!item?.data?.id || seen.has(item.data.id)) return false;
+            const mediaType = this._getItemMediaType(item.data);
+            const dataType = mediaType === 'audio' ? 'file' : mediaType;
+            if (!acceptedTypes.has(dataType)) return false;
+            seen.add(item.data.id);
+            resolved.push({
+                nodeId: item.data.id,
+                port: this._mediaOutputPortName(item.data)
+            });
+            return true;
+        };
+
+        (Array.isArray(record?.references) ? record.references : []).forEach(reference => {
+            let item = reference?.itemId ? this.items.get(reference.itemId) : null;
+            if (!item && reference?.filePath) {
+                item = [...this.items.values()].find(candidate =>
+                    this._copyableFilePath(candidate?.data) === reference.filePath
+                );
+            }
+            addItem(item);
+        });
+        if (resolved.length) return resolved;
+
+        (this.graphView?.connections || [])
+            .filter(connection => connection?.to?.nodeId === itemId
+                && connection.to.port === 'source'
+                && acceptedTypes.has(this._connectionOutputDataType(connection)))
+            .forEach(connection => addItem(this.items.get(connection.from?.nodeId)));
+        return resolved;
+    }
+
     _closeGenerationTypeMenu() {
         const active = this._generationTypeMenu;
         if (!active) return;
@@ -1956,7 +2079,7 @@ export class CanvasManager {
         if (!created) return null;
 
         const connection = this.graphView?.connect(
-            { nodeId: itemId, port: 'out' },
+            { nodeId: itemId, port: this._mediaOutputPortName(source) },
             { nodeId: created.id, port: 'source' }
         );
         if (!connection) return created;
@@ -1971,21 +2094,31 @@ export class CanvasManager {
     openMediaGenerationComposer(itemId) {
         const sourceEntry = this.items.get(itemId);
         const source = sourceEntry?.data;
-        if (!sourceEntry || !source?.filePath || this._getItemMediaType(source) !== 'image') return null;
+        const product = this._getMediaProduct(source);
+        const record = getGenerationRecord(source);
+        const nodeType = record?.nodeType || (product?.mediaType === 'image' ? 'image' : null);
+        if (!sourceEntry || (!product?.filePath && !product?.url) || !['image', 'video'].includes(nodeType)) return null;
         if (this._generationComposer?.mediaSourceId === itemId) {
             this._positionGenerationComposer();
             return this._generationComposer.nodeId;
         }
 
-        const config = this._createDefaultOpConfig('image');
-        const referenceConnections = this._getMediaGenerationReferenceConnections(itemId);
-        const size = getGeneratorPlaceholderSize('image', config, source);
+        const defaults = this._createDefaultOpConfig(nodeType);
+        const historicalConfig = getGenerationReuseConfig(source, defaults);
+        const config = nodeType === 'image'
+            ? mergeImageNodePromptConfig(historicalConfig, source)
+            : historicalConfig;
+        const useSourceAsReference = !record;
+        const referenceConnections = record
+            ? this._getHistoricalGenerationReferenceConnections(itemId, nodeType, record)
+            : this._getMediaGenerationReferenceConnections(itemId);
+        const size = getGeneratorPlaceholderSize(nodeType, config, source);
         const draftId = `media-composer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const draft = {
             id: draftId,
             kind: 'op',
-            nodeType: 'image',
-            title: '图片生成',
+            nodeType,
+            title: nodeType === 'video' ? '视频生成' : '图片生成',
             config,
             model: config.model || '',
             x: sourceEntry.group.x(),
@@ -2002,6 +2135,7 @@ export class CanvasManager {
             resultStackPosition: 0,
             composerDraft: true,
             composerSourceItemId: itemId,
+            composerUseSourceAsReference: useSourceAsReference,
             composerReferenceConnections: referenceConnections,
             composerReferenceItemIds: referenceConnections.map(connection => connection.nodeId)
         };
@@ -2021,11 +2155,20 @@ export class CanvasManager {
         return draftId;
     }
 
+    _cacheMediaGenerationPromptDraft(data) {
+        if (!data?.composerDraft || !data.composerSourceItemId) return false;
+        const source = this.items.get(data.composerSourceItemId)?.data;
+        if (!source || source.kind === 'op') return false;
+        source.generationPromptDraft = createImageNodePromptDraft(data.config);
+        return true;
+    }
+
     _materializeMediaComposerDraft(nodeId) {
         const entry = this.items.get(nodeId);
         const data = entry?.data;
         if (!entry || !data?.composerDraft) return data || null;
         const sourceId = data.composerSourceItemId;
+        const useSourceAsReference = data.composerUseSourceAsReference !== false;
         const referenceConnections = Array.isArray(data.composerReferenceConnections)
             ? data.composerReferenceConnections
                 .filter(connection => connection?.nodeId && connection.nodeId !== sourceId)
@@ -2051,6 +2194,7 @@ export class CanvasManager {
         data.height = size.height;
         delete data.composerDraft;
         delete data.composerSourceItemId;
+        delete data.composerUseSourceAsReference;
         delete data.composerReferenceConnections;
         delete data.composerReferenceItemIds;
 
@@ -2060,8 +2204,9 @@ export class CanvasManager {
         this._createOpNode(data);
         const connections = [];
         const connection = this.graphView?.connect(
-            { nodeId: sourceId, port: 'out' },
-            { nodeId, port: 'source' }
+            { nodeId: sourceId, port: this._mediaOutputPortName(source) },
+            { nodeId, port: 'source' },
+            useSourceAsReference ? undefined : { kind: 'history', silent: true }
         );
         if (connection) connections.push(connection);
         const materializedReferenceConnections = referenceConnections.map(reference => this.graphView?.connect(
@@ -2078,6 +2223,7 @@ export class CanvasManager {
             if (storedIndex >= 0) this.storeData.items.splice(storedIndex, 1);
             data.composerDraft = true;
             data.composerSourceItemId = sourceId;
+            data.composerUseSourceAsReference = useSourceAsReference;
             const draftGroup = new Konva.Group({
                 x: sourceX,
                 y: sourceY,
@@ -2100,11 +2246,12 @@ export class CanvasManager {
     }
 
     _openMediaPreview(item) {
-        const filePath = resolveCanvasFilePath(item?.data?.filePath);
-        if (!filePath) return;
-        const mediaType = this._getItemMediaType(item.data);
+        const product = this._getMediaProduct(item?.data);
+        const filePath = product?.filePath;
+        if (!filePath && !product?.url) return;
+        const mediaType = product.mediaType;
         if (!['image', 'video', 'audio'].includes(mediaType)) {
-            void window.flowCanvas?.shell?.openFile?.(filePath);
+            if (filePath) void window.flowCanvas?.shell?.openFile?.(filePath);
             return;
         }
 
@@ -2114,7 +2261,9 @@ export class CanvasManager {
         preview.setAttribute('role', 'dialog');
         preview.setAttribute('aria-modal', 'true');
         preview.setAttribute('aria-label', '素材预览');
-        const source = `local-res://${encodeURIComponent(filePath)}`;
+        const source = filePath
+            ? `local-res://${encodeURIComponent(filePath)}`
+            : product.url;
         const media = mediaType === 'image'
             ? document.createElement('img')
             : mediaType === 'video'
@@ -2207,7 +2356,10 @@ export class CanvasManager {
         (this.graphView?.connections || []).forEach(connection => {
             if (!this._isGeneratorInputConnection(target, connection)) return;
             const source = this.items.get(connection.from.nodeId)?.data;
-            const entry = this._normalizeMediaReferenceEntry({ id: source?.id, filePath: source?.filePath });
+            const entry = this._normalizeMediaReferenceEntry({
+                id: source?.id,
+                filePath: this._copyableFilePath(source)
+            });
             if (entry && selections[entry.mediaType]) selections[entry.mediaType].push(entry);
         });
 
@@ -2267,7 +2419,7 @@ export class CanvasManager {
         const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : null;
         const byPath = new Map();
         this.items.forEach(item => {
-            const filePath = String(item?.data?.filePath || '').trim();
+            const filePath = String(this._copyableFilePath(item?.data) || '').trim();
             if (filePath) byPath.set(filePath.replaceAll('/', '\\').toLowerCase(), item);
         });
         return (Array.isArray(entries) ? entries : []).map(entry => {
@@ -2275,10 +2427,11 @@ export class CanvasManager {
             const requestedPath = String(entry?.filePath || '').trim();
             const item = (requestedId && this.items.get(requestedId))
                 || (requestedPath && byPath.get(requestedPath.replaceAll('/', '\\').toLowerCase()));
-            if (!item?.data?.id || !item.data.filePath) return null;
+            const filePath = this._copyableFilePath(item?.data);
+            if (!item?.data?.id || !filePath) return null;
             return this._normalizeMediaReferenceEntry({
                 id: item.data.id,
-                filePath: item.data.filePath
+                filePath
             });
         }).filter(entry => entry && (!normalizedType || entry.mediaType === normalizedType));
     }
@@ -2286,7 +2439,7 @@ export class CanvasManager {
     _normalizeMediaReferenceEntry(entry) {
         const id = String(entry?.id || entry?.itemId || '').trim();
         const item = id ? this.items.get(id) : null;
-        const filePath = String(entry?.filePath || item?.data?.filePath || '').trim();
+        const filePath = String(entry?.filePath || this._copyableFilePath(item?.data) || '').trim();
         if (!id || !item || !filePath) return null;
         return {
             id,
@@ -2323,7 +2476,10 @@ export class CanvasManager {
     _toggleMediaReferencePick(item) {
         const pick = this._activeMediaReferencePick;
         if (!pick || !item?.data) return;
-        const entry = this._normalizeMediaReferenceEntry({ id: item.data.id, filePath: item.data.filePath });
+        const entry = this._normalizeMediaReferenceEntry({
+            id: item.data.id,
+            filePath: this._copyableFilePath(item.data)
+        });
         const targetType = pick.type === 'mixed' ? entry?.mediaType : pick.type;
         const typeLabel = { image: '图片', video: '视频', audio: '音频' }[targetType] || '媒体';
         if (!entry || !['image', 'video', 'audio'].includes(targetType) || (pick.type !== 'mixed' && entry.mediaType !== pick.type)) {
@@ -2369,16 +2525,18 @@ export class CanvasManager {
         const target = this.items.get(nodeId)?.data;
         if (!target || !entry?.id) return;
         if (target.nodeType === 'image' && entry.mediaType !== 'image') return;
+        const source = this.items.get(entry.id)?.data;
+        const outputPort = this._mediaOutputPortName(source);
 
         const existing = (this.graphView?.connections || []).find(connection =>
             connection.from.nodeId === entry.id
-            && connection.from.port === 'out'
+            && connection.from.port === outputPort
             && connection.to.nodeId === nodeId
             && this._isGeneratorInputConnection(target, connection)
         );
         if (selected && !existing) {
             this.graphView?.connect(
-                { nodeId: entry.id, port: 'out' },
+                { nodeId: entry.id, port: outputPort },
                 { nodeId, port: 'source' }
             );
         } else if (!selected && existing) {
@@ -2428,6 +2586,68 @@ export class CanvasManager {
         const height = Number(item.data?.height) || Number(displayNode?.height?.()) || 0;
         if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
         return { width, height };
+    }
+
+    _addGenerationCancelControl(group, { x = 0, y = 0, onCancel } = {}) {
+        const control = new Konva.Group({
+            x,
+            y,
+            name: 'generationCancelControl',
+            listening: true
+        });
+        const background = new Konva.Rect({
+            width: 50,
+            height: 22,
+            fill: 'rgba(20, 21, 23, 0.82)',
+            stroke: 'rgba(255, 255, 255, 0.18)',
+            strokeWidth: 1,
+            cornerRadius: 5,
+            shadowColor: 'rgba(0, 0, 0, 0.36)',
+            shadowBlur: 8,
+            shadowOffsetY: 2,
+            shadowOpacity: 0.45
+        });
+        control.add(background, new Konva.Rect({
+            x: 8,
+            y: 8,
+            width: 6,
+            height: 6,
+            fill: '#d9a0a0',
+            cornerRadius: 1,
+            listening: false
+        }), new Konva.Text({
+            x: 19,
+            y: 5,
+            width: 25,
+            text: '中断',
+            fontSize: 10,
+            fontStyle: 'bold',
+            fill: '#d5d6d8',
+            listening: false
+        }));
+        control.on('mouseenter', () => {
+            background.fill('rgba(71, 33, 36, 0.94)');
+            background.stroke('rgba(226, 130, 136, 0.55)');
+            document.body.style.cursor = 'pointer';
+            group.getLayer()?.batchDraw();
+        });
+        control.on('mouseleave', () => {
+            background.fill('rgba(20, 21, 23, 0.82)');
+            background.stroke('rgba(255, 255, 255, 0.18)');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        control.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (!['click', 'tap'].includes(event.type) || control.getAttr('cancelRequested')) return;
+            control.setAttr('cancelRequested', true);
+            onCancel?.();
+        });
+        group.add(control);
+        control.moveToTop();
+        return control;
     }
 
     addGenerationPlaceholder(options = {}) {
@@ -2523,6 +2743,14 @@ export class CanvasManager {
         });
         sweepClip.add(sweep);
         group.add(sweepClip);
+        this._addGenerationCancelControl(group, {
+            x: Math.max(8, width - 58),
+            y: 8,
+            onCancel: () => {
+                this.removeGenerationPlaceholder(id);
+                options.onCancel?.(placement);
+            }
+        });
         this.transientLayer.add(group);
 
         const animation = new Konva.Animation((frame) => {
@@ -2973,7 +3201,7 @@ export class CanvasManager {
         this.stage.on('mousemove', (e) => {
             const hoveredItem = this._findMediaReferenceItemFromNode(e.target);
             this._setHoveredMediaItem(
-                hoveredItem?.data?.kind === 'op' ? null : hoveredItem?.data?.id || null
+                this._isInteractiveMediaProduct(hoveredItem?.data) ? hoveredItem.data.id : null
             );
             if (this.graphView?.pending) {
                 this.graphView._syncPending();
@@ -3185,6 +3413,10 @@ export class CanvasManager {
 
             const key = e.key.toLowerCase();
             const commandKey = e.ctrlKey || e.metaKey;
+            const textSelection = window.getSelection?.();
+            if (commandKey && key === 'c' && textSelection && !textSelection.isCollapsed && textSelection.toString()) {
+                return;
+            }
             const shortcuts = this.shortcutBindings;
             const usesDefaultShiftRedo = shortcuts.undo === DEFAULT_SHORTCUTS.undo
                 && commandKey && e.shiftKey && !e.altKey && key === 'z';
@@ -3840,15 +4072,16 @@ export class CanvasManager {
             const isSelected = this.selectedItems.has(item.data.id);
             const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
             if (node) {
+                const isMediaProduct = this._isInteractiveMediaProduct(item.data);
                 if (isSelected) {
                     node.stroke('#d5d7db');
-                    node.strokeWidth(item.data.kind === 'op' ? 2 : 2.5);
+                    node.strokeWidth(isMediaProduct ? 2.5 : 2);
                 } else {
                     const status = item.data.runStatus || 'idle';
-                    node.stroke(item.data.kind === 'op'
+                    node.stroke(item.data.kind === 'op' && !isMediaProduct
                         ? (status === 'error' ? OP_STATUS_COLORS.error : 'rgba(255,255,255,0.13)')
                         : 'rgba(255,255,255,0.14)');
-                    node.strokeWidth(item.data.kind === 'op' && status === 'error' ? 1.5 : 1);
+                    node.strokeWidth(item.data.kind === 'op' && !isMediaProduct && status === 'error' ? 1.5 : 1);
                 }
             }
         });
@@ -3874,7 +4107,8 @@ export class CanvasManager {
         const node = this.imageTransformer?.nodes?.()[0];
         const group = node?.getParent?.();
         const item = group ? this.items.get(group.id()) : null;
-        if (!node || !item || this._getFileType(item.data.filePath) !== 'image') return null;
+        const product = this._getMediaProduct(item?.data);
+        if (!node || !item || product?.mediaType !== 'image' || !product.filePath) return null;
         return { item, group, node };
     }
 
@@ -3886,7 +4120,8 @@ export class CanvasManager {
         }
         const selectedIds = Array.from(this.selectedItems);
         const item = selectedIds.length === 1 ? this.items.get(selectedIds[0]) : null;
-        const isImage = item && this._getFileType(item.data.filePath) === 'image';
+        const product = this._getMediaProduct(item?.data);
+        const isImage = product?.mediaType === 'image' && Boolean(product.filePath);
         const node = isImage ? item.group.findOne('.displayNode') : null;
         const currentNode = this.imageTransformer.nodes()[0];
 
@@ -3949,13 +4184,19 @@ export class CanvasManager {
             this.syncGifs();
         }
 
-        this.imageTransformer.forceUpdate();
+        const refreshedGeneratorProduct = item.data.kind === 'op' && this._isInteractiveMediaProduct(item.data);
+        if (refreshedGeneratorProduct) {
+            this.refreshOpNode(item.data.id);
+            this._syncImageTransformer();
+        } else {
+            this.imageTransformer.forceUpdate();
+        }
         this._scheduleSelectionToolbarSync();
         this._flushDragConnectionRefresh();
         this._refreshVisiblePlanConnections();
         this.layer.batchDraw();
         this.emit('change');
-        if (this.resourceSaverMode) this._scheduleResourceSaverPromote(item);
+        if (this.resourceSaverMode && item.data.kind !== 'op') this._scheduleResourceSaverPromote(item);
     }
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
@@ -4070,12 +4311,15 @@ export class CanvasManager {
             if (!results.length) continue;
 
             const original = JSON.parse(JSON.stringify(raw));
+            const recordedGeneration = getGenerationRecord(original);
             const generationBase = {
                 nodeType: 'image',
-                title: original.title || '图片生成',
-                config: original.config || {},
-                model: original.model || original.config?.model || '',
-                generatedAt: Number(original.addedAt) || Date.now(),
+                ...(recordedGeneration ? JSON.parse(JSON.stringify(recordedGeneration)) : {}),
+                title: recordedGeneration?.title || original.title || '图片生成',
+                prompt: recordedGeneration?.prompt || original.config?.prompt || '',
+                config: JSON.parse(JSON.stringify(recordedGeneration?.config || original.config || {})),
+                model: recordedGeneration?.model || original.model || original.config?.model || '',
+                generatedAt: Number(recordedGeneration?.generatedAt || original.addedAt) || Date.now(),
                 replacedGenerator: true,
                 batchSize: results.length
             };
@@ -4115,11 +4359,12 @@ export class CanvasManager {
         this.selectedItems.forEach(id => {
             const entry = this._getNodeEntry(id);
             if (!entry?.data || !entry.group?.isVisible()) return;
+            const product = this._getMediaProduct(entry.data);
             selected.push({
                 id,
                 kind: entry.kind || entry.data.kind || (entry.data.filePath ? 'asset' : 'node'),
-                filePath: entry.data.filePath || null,
-                mediaType: entry.data.mediaType || (entry.data.filePath ? this._getFileType(entry.data.filePath) : null),
+                filePath: product?.filePath || null,
+                mediaType: product?.mediaType || null,
                 x: entry.group.x(),
                 y: entry.group.y(),
                 width: Number(entry.data.width) || null,
@@ -4159,7 +4404,43 @@ export class CanvasManager {
         return 'other';
     }
 
+    _getMediaProduct(data = {}) {
+        if (data.kind === 'op' && ['image', 'video'].includes(data.nodeType)) {
+            const result = getGeneratorResultEntries(data)[0] || null;
+            if (!result) return null;
+            return {
+                mediaType: data.nodeType,
+                filePath: resolveCanvasFilePath(result.filePath || result.item?.filePath || ''),
+                url: String(result.url || result.item?.url || '').trim(),
+                generatorResult: true,
+                result
+            };
+        }
+        const filePath = resolveCanvasFilePath(data.filePath || '');
+        const explicitType = String(data.mediaType || '').toLowerCase();
+        const mediaType = ['image', 'video', 'audio', 'document', 'other'].includes(explicitType)
+            ? explicitType
+            : this._getFileType(filePath);
+        if (!filePath) return null;
+        return { mediaType, filePath, url: '', generatorResult: false, result: null };
+    }
+
+    _isInteractiveMediaProduct(data = {}) {
+        const product = this._getMediaProduct(data);
+        return Boolean(product
+            && ['image', 'video', 'audio'].includes(product.mediaType)
+            && (product.filePath || product.url));
+    }
+
+    _mediaOutputPortName(data = {}) {
+        if (data.kind !== 'op') return 'out';
+        return (NODE_TYPES[data.nodeType]?.outputs || [])[0]?.name || 'out';
+    }
+
     _getItemMediaType(data = {}) {
+        if (data.kind === 'op' && ['image', 'video'].includes(data.nodeType)) {
+            return data.nodeType;
+        }
         const explicitType = String(data.mediaType || '').toLowerCase();
         if (['image', 'video', 'audio', 'document', 'other'].includes(explicitType)) return explicitType;
         return this._getFileType(data.filePath);
@@ -4302,17 +4583,22 @@ export class CanvasManager {
 
     _styleMediaDisplayNode(item, node) {
         if (!item || !node) return;
+        this._styleMediaSurface(item.data, node);
+        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
+        this.graphView?.renderPorts(item.data.id);
+        this.graphView?.scheduleSync(item.data.id);
+    }
+
+    _styleMediaSurface(data, node) {
+        if (!data || !node) return;
         node.cornerRadius?.(8);
-        node.stroke(this.selectedItems.has(item.data.id) ? '#d5d7db' : 'rgba(255,255,255,0.14)');
-        node.strokeWidth(this.selectedItems.has(item.data.id) ? 2.5 : 1);
+        node.stroke(this.selectedItems.has(data.id) ? '#d5d7db' : 'rgba(255,255,255,0.14)');
+        node.strokeWidth(this.selectedItems.has(data.id) ? 2.5 : 1);
         node.shadowColor?.('rgba(0,0,0,0.32)');
         node.shadowBlur?.(10);
         node.shadowOffsetY?.(3);
         node.shadowOpacity?.(0.42);
         node.perfectDrawEnabled?.(false);
-        this._syncExternalNodeTitle(item.group, item.data, this._getItemMediaType(item.data));
-        this.graphView?.renderPorts(item.data.id);
-        this.graphView?.scheduleSync(item.data.id);
     }
 
     _createFallbackGroup(fileType, width = DOC_DEFAULT_SIZE, height = DOC_DEFAULT_SIZE, filePath = '') {
@@ -4445,8 +4731,15 @@ export class CanvasManager {
     }
 
     _requestMediaReplacement(data) {
+        const filePath = this._copyableFilePath(data);
+        const generatorResult = data?.kind === 'op' && ['image', 'video'].includes(data.nodeType);
         document.dispatchEvent(new CustomEvent('context-relink-material', {
-            detail: { itemId: data.id, itemIds: [data.id], filePath: data.filePath || '' }
+            detail: {
+                itemId: data.id,
+                itemIds: [data.id],
+                filePath,
+                fileTargets: filePath ? [{ itemId: data.id, filePath, generatorResult }] : []
+            }
         }));
     }
 
@@ -4468,10 +4761,10 @@ export class CanvasManager {
 
         if (!nextId) return;
         const next = this.items.get(nextId);
-        if (!next || next.data?.kind === 'op') return;
+        if (!next || !this._isInteractiveMediaProduct(next.data)) return;
         next.isHovered = true;
         this._setVideoControlsVisible(next, true);
-        this._scheduleResourceSaverPromote(next);
+        if (next.data?.kind !== 'op') this._scheduleResourceSaverPromote(next);
         this.graphView?.setNodeHovered(nextId, true);
         next.group.getLayer()?.batchDraw();
     }
@@ -4493,7 +4786,7 @@ export class CanvasManager {
         const target = this.stage.getIntersection(pointer);
         const hoveredItem = this._findMediaReferenceItemFromNode(target);
         this._setHoveredMediaItem(
-            hoveredItem?.data?.kind === 'op' ? null : hoveredItem?.data?.id || null
+            this._isInteractiveMediaProduct(hoveredItem?.data) ? hoveredItem.data.id : null
         );
     }
 
@@ -4712,7 +5005,11 @@ export class CanvasManager {
                 }
             } else {
                 this.selectItem(data.id, false);
-                if (fileType === 'image' && data.filePath) this.openMediaGenerationComposer(data.id);
+                const product = this._getMediaProduct(data);
+                if ((hasGenerationRecord(data) || fileType === 'image')
+                    && (product?.filePath || product?.url)) {
+                    this.openMediaGenerationComposer(data.id);
+                }
             }
         });
 
@@ -5082,21 +5379,35 @@ export class CanvasManager {
         });
         group.on('mouseenter', () => {
             document.body.style.cursor = 'pointer';
+            if (this._isInteractiveMediaProduct(data)) this._setHoveredMediaItem(data.id);
             this.graphView?.setNodeHovered(data.id, true);
         });
         group.on('mouseleave', () => {
             document.body.style.cursor = 'default';
+            if (this._hoveredMediaItemId === data.id) this._setHoveredMediaItem(null);
             this.graphView?.setNodeHovered(data.id, false);
         });
         group.on('click', (e) => {
             if (e.evt.button === 2) return;
             const additive = e.evt.ctrlKey || e.evt.metaKey || e.evt.shiftKey;
             this.selectItem(data.id, additive);
-            if (isGenerator && !additive) this.openGenerationComposer(data.id, { focusPrompt: false });
+            const hasProduct = this._isInteractiveMediaProduct(data);
+            if (isGenerator && !additive) {
+                if (hasProduct && hasGenerationRecord(data)) {
+                    this.openMediaGenerationComposer(data.id);
+                } else {
+                    this.openGenerationComposer(data.id, { focusPrompt: false });
+                }
+            }
         });
         group.on('dblclick', (e) => {
             e.cancelBubble = true;
             if (isGenerator) {
+                const filePath = this._copyableFilePath(data);
+                if (filePath) {
+                    void window.flowCanvas?.shell?.openFile?.(filePath);
+                    return;
+                }
                 this.openGenerationComposer(data.id);
                 return;
             }
@@ -5186,7 +5497,7 @@ export class CanvasManager {
         if (!data?.id || !['image', 'video'].includes(data.nodeType)) return [];
         if (data.composerDraft && data.composerSourceItemId) {
             const sourceIds = [
-                data.composerSourceItemId,
+                ...(data.composerUseSourceAsReference === false ? [] : [data.composerSourceItemId]),
                 ...(Array.isArray(data.composerReferenceItemIds) ? data.composerReferenceItemIds : [])
             ];
             const sourcePorts = new Map(
@@ -5305,7 +5616,8 @@ export class CanvasManager {
             tile.add(background);
 
             const mediaType = this._getItemMediaType(source);
-            if (mediaType === 'image' && source.filePath) {
+            const sourceFilePath = this._copyableFilePath(source);
+            if (mediaType === 'image' && sourceFilePath) {
                 const preview = new Konva.Image({
                     x: 2,
                     y: 2,
@@ -5328,7 +5640,7 @@ export class CanvasManager {
                     });
                     tile.getLayer()?.batchDraw();
                 };
-                image.src = 'local-res://' + encodeURIComponent(source.filePath);
+                image.src = 'local-res://' + encodeURIComponent(sourceFilePath);
             } else {
                 tile.add(new Konva.Path({
                     data: NODE_GLYPH_PATHS[mediaType] || NODE_GLYPH_PATHS.document,
@@ -5430,22 +5742,22 @@ export class CanvasManager {
     _drawGeneratorPlaceholder(group, data, width, height) {
         group.getAttr('generatorAnimation')?.stop?.();
         group.setAttr('generatorAnimation', null);
-        const previousVideos = group.getAttr('generatorPreviewVideos') || [];
-        previousVideos.forEach(video => {
-            video.pause?.();
-            video.removeAttribute?.('src');
-            video.load?.();
-        });
-        group.setAttr('generatorPreviewVideos', []);
+        this._disposeGeneratorPreviewMedia(group);
         group.off('.generatorStack');
         group.destroyChildren();
 
         const status = data.runStatus || 'idle';
+        const recoveryTask = this.generationTaskStates.get(data.id) || null;
+        const isRecoverable = ['disconnected', 'failed'].includes(recoveryTask?.status);
+        const isRecovering = recoveryTask?.status === 'running'
+            && recoveryTask?.params?.syncStage === 'recovering';
         const results = ensureGeneratorResultEntries(data);
         const resultCount = results.length;
-        const isBusy = status === STATUS.QUEUED || status === STATUS.RUNNING;
-        const stroke = status === STATUS.ERROR
-            ? OP_STATUS_COLORS.error
+        const isBusy = status === STATUS.QUEUED || status === STATUS.RUNNING || isRecovering;
+        const stroke = isRecoverable
+            ? 'rgba(221, 166, 90, 0.72)'
+            : status === STATUS.ERROR && !isRecovering
+                ? OP_STATUS_COLORS.error
             : 'rgba(255, 255, 255, 0.24)';
         const isBranched = data.nodeType === 'image'
             && resultCount > 1
@@ -5533,17 +5845,17 @@ export class CanvasManager {
         }
 
         const background = new Konva.Rect({
-            name: 'displayNode',
+            name: results[0] ? 'generatorResultBackground' : 'displayNode',
             width,
             height,
             fill: '#202123',
             stroke,
-            strokeWidth: status === STATUS.ERROR ? 1.5 : 1,
+            strokeWidth: status === STATUS.ERROR && !isRecovering ? 1.5 : 1,
             cornerRadius: 8,
             shadowColor: 'rgba(0, 0, 0, 0.36)',
             shadowBlur: 14,
             shadowOffsetY: 5,
-            shadowOpacity: 0.5
+            shadowOpacity: results[0] ? 0 : 0.5
         });
         group.add(background);
 
@@ -5595,9 +5907,16 @@ export class CanvasManager {
             }, this.layer);
             group.setAttr('generatorAnimation', animation);
             animation.start();
+            this._addGenerationCancelControl(group, {
+                x: Math.max(8, width - 58),
+                y: 8,
+                onCancel: () => isRecovering
+                    ? this.options.cancelGenerationTask?.(recoveryTask.id)
+                    : this._cancelRunningGenerator(data.id)
+            });
         }
 
-        if (status === STATUS.ERROR && data.runError) {
+        if (status === STATUS.ERROR && !isRecovering && data.runError) {
             group.add(new Konva.Rect({
                 x: 8,
                 y: height - 44,
@@ -5621,6 +5940,10 @@ export class CanvasManager {
             }));
         }
 
+        if (isRecoverable) {
+            this._addGenerationRecoveryControl(group, data, recoveryTask, width, height);
+        }
+
         if (resultCount > 1) {
             if (data.nodeType === 'image') this._addGeneratorResultLayoutToggle(group, data, width);
             group.add(new Konva.Text({
@@ -5639,6 +5962,156 @@ export class CanvasManager {
         }
 
         this._syncExternalNodeTitle(group, data, data.nodeType);
+    }
+
+    _addGenerationRecoveryControl(group, data, task, width, height) {
+        const controlWidth = Math.min(132, Math.max(108, width - 32));
+        const controlHeight = 40;
+        const control = new Konva.Group({
+            x: (width - controlWidth) / 2,
+            y: Math.max(14, (height - controlHeight) / 2),
+            name: 'generationRecoveryControl',
+            listening: true
+        });
+        const background = new Konva.Rect({
+            width: controlWidth,
+            height: controlHeight,
+            fill: 'rgba(39, 40, 43, 0.96)',
+            stroke: 'rgba(221, 166, 90, 0.62)',
+            strokeWidth: 1,
+            cornerRadius: 6,
+            shadowColor: 'rgba(0, 0, 0, 0.42)',
+            shadowBlur: 12,
+            shadowOffsetY: 3,
+            shadowOpacity: 0.6
+        });
+        const icon = new Konva.Path({
+            x: 12,
+            y: 10,
+            data: 'M16.5 6.5V11H12 M7.1 7.2A6 6 0 1 1 6.2 15',
+            stroke: '#d8ad72',
+            strokeWidth: 1.8,
+            lineCap: 'round',
+            lineJoin: 'round',
+            listening: false
+        });
+        const isDownloadRecovery = task?.status === 'failed'
+            && task?.params?.syncStage === 'download'
+            && Boolean(task?.taskId);
+        const isRetry = task?.status === 'failed' && !isDownloadRecovery;
+        const label = new Konva.Text({
+            x: 38,
+            y: 8,
+            width: controlWidth - 46,
+            text: isDownloadRecovery ? '继续下载' : (isRetry ? '重新生成' : '重新连接'),
+            fontSize: 12,
+            fontStyle: 'bold',
+            fill: '#e5e5e7',
+            listening: false
+        });
+        const hint = new Konva.Text({
+            x: 38,
+            y: 24,
+            width: controlWidth - 46,
+            text: isDownloadRecovery ? '恢复到原节点' : (isRetry ? '使用原参数' : '继续原任务'),
+            fontSize: 8,
+            fill: '#999ca2',
+            listening: false
+        });
+        control.add(background, icon, label, hint);
+        control.on('mouseenter', () => {
+            background.fill('rgba(63, 52, 39, 0.98)');
+            background.stroke('rgba(231, 182, 113, 0.9)');
+            document.body.style.cursor = 'pointer';
+            this._showCanvasStatus(isDownloadRecovery
+                ? '继续下载已完成的视频，不会重复提交'
+                : (isRetry
+                    ? '使用原参数重新提交，并恢复到当前节点'
+                    : '从服务器继续原任务，不会重复提交'));
+            group.getLayer()?.batchDraw();
+        });
+        control.on('mouseleave', () => {
+            background.fill('rgba(39, 40, 43, 0.96)');
+            background.stroke('rgba(221, 166, 90, 0.62)');
+            document.body.style.cursor = 'default';
+            group.getLayer()?.batchDraw();
+        });
+        control.on('mousedown touchstart click tap', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            event.cancelBubble = true;
+            event.evt?.preventDefault?.();
+            if (!['click', 'tap'].includes(event.type) || control.getAttr('recoveryRequested')) return;
+            control.setAttr('recoveryRequested', true);
+            void this._retryDisconnectedGeneration(data.id, task.id);
+        });
+        group.add(control);
+        control.moveToTop();
+    }
+
+    setGenerationTaskStates(tasks = []) {
+        const previousNodeIds = new Set(this.generationTaskStates.keys());
+        const next = new Map();
+        const resolvedNodeIds = new Set();
+        (Array.isArray(tasks) ? tasks : []).forEach(task => {
+            const nodeId = String(task?.params?.nodeId || '').trim();
+            if (!nodeId || resolvedNodeIds.has(nodeId)) return;
+            resolvedNodeIds.add(nodeId);
+            const canResume = task?.kind === 'video' && Boolean(task?.taskId);
+            const relevant = task?.status === 'failed'
+                || (canResume && (
+                    task?.status === 'disconnected'
+                    || (task?.status === 'running' && task?.params?.syncStage === 'recovering')
+                ));
+            if (!relevant) return;
+            next.set(nodeId, task);
+        });
+        this.generationTaskStates = next;
+        new Set([...previousNodeIds, ...next.keys()]).forEach(nodeId => {
+            const data = this.items.get(nodeId)?.data;
+            if (data?.kind === 'op' && ['image', 'video'].includes(data.nodeType)) {
+                this.refreshOpNode(nodeId);
+            }
+        });
+    }
+
+    async _retryDisconnectedGeneration(nodeId, taskId) {
+        if (!this.items.has(nodeId) || !taskId) return false;
+        try {
+            await this.options.retryGenerationTask?.(taskId, { restoreOnOriginalNode: true });
+            return true;
+        } catch (error) {
+            this._showCanvasStatus(`重新连接失败：${error?.message || String(error)}`, 3600);
+            this.refreshOpNode(nodeId);
+            return false;
+        }
+    }
+
+    async completeGenerationTaskOnNode({ nodeId, kind, result } = {}) {
+        const entry = this.items.get(nodeId);
+        if (!entry?.data || entry.data.kind !== 'op' || entry.data.nodeType !== kind) return false;
+        const filePaths = (Array.isArray(result?.filePaths) && result.filePaths.length
+            ? result.filePaths
+            : [result?.filePath || result?.item?.filePath]).filter(Boolean);
+        if (filePaths.length === 0) return false;
+
+        for (const [index, filePath] of filePaths.entries()) {
+            await this._landResult(entry.data, {
+                [kind]: 'local-res://' + encodeURIComponent(filePath),
+                _resultFilePath: filePath,
+                _resultItem: result?.images?.[index] || result?.item || null,
+                _resultUrl: kind === 'video' ? result?.video?.url || result?.url || null : null
+            });
+        }
+        entry.data.runStatus = STATUS.DONE;
+        entry.data.runError = '';
+        this.refreshOpNode(nodeId);
+        this.emit('change');
+        const persisted = await this.options.persistCompletedGenerationNode?.(entry.data);
+        if (persisted === false) {
+            throw new Error('生成结果已下载，但无法保存到原生成节点');
+        }
+        this._showCanvasStatus('已重新连接并恢复到原节点', 2600);
+        return true;
     }
 
     _addGeneratorResultLayoutToggle(group, data, width) {
@@ -5749,13 +6222,18 @@ export class CanvasManager {
             itemId: reference.id,
             filePath: reference.filePath || ''
         }));
+        const recordedGeneration = getGenerationRecord(source);
         const generationBase = {
             nodeType: 'image',
-            title: source.title || '图片生成',
-            config: JSON.parse(JSON.stringify(source.config || {})),
-            model: source.model || source.config?.model || '',
-            references: referenceEntries,
-            generatedAt: Date.now(),
+            ...(recordedGeneration ? JSON.parse(JSON.stringify(recordedGeneration)) : {}),
+            title: recordedGeneration?.title || source.title || '图片生成',
+            prompt: recordedGeneration?.prompt || source.config?.prompt || '',
+            config: JSON.parse(JSON.stringify(recordedGeneration?.config || source.config || {})),
+            model: recordedGeneration?.model || source.model || source.config?.model || '',
+            references: recordedGeneration?.references?.length
+                ? JSON.parse(JSON.stringify(recordedGeneration.references))
+                : referenceEntries,
+            generatedAt: Number(recordedGeneration?.generatedAt) || Date.now(),
             splitFromStack: true,
             sourceNodeId: source.id,
             batchSize: results.length
@@ -5857,22 +6335,30 @@ export class CanvasManager {
             : result?.url || '';
         if (!source) return null;
 
+        const isPrimary = parent === ownerGroup && name === 'generatorResultPreview';
         const preview = new Konva.Image({
-            name,
+            name: isPrimary ? `${name} displayNode` : name,
             width,
             height,
             cornerRadius: 8,
-            listening: false
+            listening: isPrimary
         });
+        if (isPrimary) this._styleMediaSurface(data, preview);
         parent.add(preview);
 
         if (data.nodeType === 'video') {
             const video = document.createElement('video');
-            video.preload = 'metadata';
-            video.muted = true;
+            video.preload = isPrimary ? 'auto' : 'metadata';
+            video.muted = isPrimary
+                ? ownerGroup.getAttr('generatorVideoMuted') !== false
+                : true;
+            video.loop = isPrimary;
             video.playsInline = true;
+            video.style.display = 'none';
+            if (isPrimary) document.body.appendChild(video);
             const drawFrame = () => {
                 if (!ownerGroup.getLayer()) return;
+                if (isPrimary && this._syncGeneratorProductAspect(ownerGroup, data, video.videoWidth, video.videoHeight)) return;
                 preview.image(video);
                 this._coverGeneratorPreview(preview, video.videoWidth, video.videoHeight, width, height);
                 ownerGroup.getLayer()?.batchDraw();
@@ -5889,10 +6375,17 @@ export class CanvasManager {
             const videos = ownerGroup.getAttr('generatorPreviewVideos') || [];
             videos.push(video);
             ownerGroup.setAttr('generatorPreviewVideos', videos);
+            if (isPrimary) this._addGeneratorVideoControls(ownerGroup, data, preview, video, width, height);
         } else {
             const image = new window.Image();
             image.onload = () => {
                 if (!ownerGroup.getLayer()) return;
+                if (isPrimary && this._syncGeneratorProductAspect(
+                    ownerGroup,
+                    data,
+                    image.naturalWidth || image.width,
+                    image.naturalHeight || image.height
+                )) return;
                 preview.image(image);
                 this._coverGeneratorPreview(preview, image.naturalWidth || image.width, image.naturalHeight || image.height, width, height);
                 ownerGroup.getLayer()?.batchDraw();
@@ -5900,6 +6393,188 @@ export class CanvasManager {
             image.src = source;
         }
         return preview;
+    }
+
+    _syncGeneratorProductAspect(group, data, mediaWidth, mediaHeight) {
+        const sourceWidth = Number(mediaWidth) || 0;
+        const sourceHeight = Number(mediaHeight) || 0;
+        const displayWidth = Number(data?.width) || 0;
+        if (!group?.getLayer() || sourceWidth <= 0 || sourceHeight <= 0 || displayWidth <= 0) return false;
+        const targetHeight = Math.max(48, displayWidth * sourceHeight / sourceWidth);
+        if (Math.abs(targetHeight - Number(data.height || 0)) < 0.75) return false;
+        data.height = targetHeight;
+        requestAnimationFrame(() => {
+            const entry = this.items.get(data.id);
+            if (!entry || entry.group !== group || !this._isInteractiveMediaProduct(data)) return;
+            this.refreshOpNode(data.id);
+            this.graphView?.scheduleSync(data.id);
+            this._syncImageTransformer();
+            this._scheduleSelectionToolbarSync();
+            this.emit('change');
+        });
+        return true;
+    }
+
+    _disposeGeneratorPreviewMedia(group) {
+        if (!group) return;
+        group.getAttr('generatorVideoAnimation')?.stop?.();
+        group.setAttr('generatorVideoAnimation', null);
+        const videos = group.getAttr('generatorPreviewVideos') || [];
+        videos.forEach(video => this._disposeVideoElement(video));
+        group.setAttr('generatorPreviewVideos', []);
+    }
+
+    _addGeneratorVideoControls(group, data, preview, video, width, height) {
+        const controls = new Konva.Group({
+            name: 'videoControls generatorVideoControls',
+            x: 0,
+            y: height - VIDEO_CONTROL_HEIGHT,
+            opacity: 1,
+            listening: true
+        });
+        const controlBackground = new Konva.Rect({
+            name: 'videoControlBg',
+            width,
+            height: VIDEO_CONTROL_HEIGHT,
+            fill: 'rgba(0,0,0,0.52)',
+            visible: false
+        });
+        const playPauseIcon = this._createVideoPlayPauseGlyph(false);
+        const volumeIcon = this._createVideoVolumeGlyph(video.muted);
+        volumeIcon.x(VIDEO_CONTROL_BUTTON_WIDTH * 1.5);
+        const playPauseHotspot = new Konva.Rect({
+            name: 'videoControlHotspot videoPlayPauseHotspot',
+            width: VIDEO_CONTROL_BUTTON_WIDTH,
+            height: VIDEO_CONTROL_HEIGHT,
+            fill: 'transparent'
+        });
+        const volumeHotspot = new Konva.Rect({
+            name: 'videoControlHotspot videoVolumeHotspot',
+            x: VIDEO_CONTROL_BUTTON_WIDTH,
+            width: VIDEO_CONTROL_BUTTON_WIDTH,
+            height: VIDEO_CONTROL_HEIGHT,
+            fill: 'transparent'
+        });
+        const progressBackground = new Konva.Rect({
+            name: 'videoProgressBg',
+            x: VIDEO_CONTROL_PROGRESS_X,
+            y: 12,
+            width: Math.max(0, width - VIDEO_CONTROL_PROGRESS_X - VIDEO_CONTROL_PROGRESS_RIGHT_PADDING),
+            height: 4,
+            fill: '#555',
+            cornerRadius: 2,
+            visible: false
+        });
+        const progressForeground = new Konva.Rect({
+            name: 'videoProgressFg',
+            x: VIDEO_CONTROL_PROGRESS_X,
+            y: 12,
+            width: 0,
+            height: 4,
+            fill: '#b9bcc2',
+            cornerRadius: 2,
+            visible: false
+        });
+        const progressHotspot = new Konva.Rect({
+            name: 'videoProgressHotspot',
+            x: VIDEO_CONTROL_PROGRESS_X,
+            width: Math.max(0, width - VIDEO_CONTROL_PROGRESS_X - VIDEO_CONTROL_PROGRESS_RIGHT_PADDING),
+            height: VIDEO_CONTROL_HEIGHT,
+            fill: 'transparent',
+            visible: false
+        });
+        controls.add(
+            controlBackground,
+            progressBackground,
+            progressForeground,
+            playPauseIcon,
+            volumeIcon,
+            playPauseHotspot,
+            volumeHotspot,
+            progressHotspot
+        );
+        group.add(controls);
+        this._layoutVideoControlGroup(controls, width, height);
+
+        const revealTimeline = () => {
+            controlBackground.visible(true);
+            progressBackground.visible(true);
+            progressForeground.visible(true);
+            progressHotspot.visible(true);
+        };
+        const animation = new Konva.Animation(() => {
+            if (!video.paused && Number.isFinite(video.duration) && video.duration > 0) {
+                progressForeground.width((video.currentTime / video.duration) * progressBackground.width());
+            }
+        }, group.getLayer() || this.layer);
+        group.setAttr('generatorVideoAnimation', animation);
+
+        const play = () => {
+            revealTimeline();
+            return video.play().then(() => {
+                animation.start();
+                this._setVideoPlayPauseGlyph(playPauseIcon, true);
+                group.getLayer()?.batchDraw();
+            }).catch(error => {
+                console.warn('[Canvas] 生成视频播放失败:', error);
+            });
+        };
+        const stopControlEvent = event => {
+            event.cancelBubble = true;
+            event.evt?.stopPropagation?.();
+        };
+        const currentItem = () => this.items.get(data.id) || { group, data };
+        playPauseHotspot.on('mousedown touchstart', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            if (this._pickMediaReferenceFromControl(currentItem(), event)) return;
+            stopControlEvent(event);
+            if (video.paused) {
+                void play();
+            } else {
+                video.pause();
+                animation.stop();
+                this._setVideoPlayPauseGlyph(playPauseIcon, false);
+                group.getLayer()?.batchDraw();
+            }
+        });
+        playPauseHotspot.on('click tap', stopControlEvent);
+        volumeHotspot.on('mousedown touchstart', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            if (this._pickMediaReferenceFromControl(currentItem(), event)) return;
+            stopControlEvent(event);
+            video.muted = !video.muted;
+            group.setAttr('generatorVideoMuted', video.muted);
+            this._setVideoVolumeGlyph(volumeIcon, video.muted);
+            group.getLayer()?.batchDraw();
+        });
+        volumeHotspot.on('click tap', stopControlEvent);
+        progressHotspot.on('mousedown touchstart', event => {
+            if (event.evt?.button != null && event.evt.button !== 0) return;
+            if (this._pickMediaReferenceFromControl(currentItem(), event)) return;
+            stopControlEvent(event);
+            if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+            const pointerX = group.getRelativePointerPosition()?.x;
+            if (!Number.isFinite(pointerX)) return;
+            const percent = Math.max(0, Math.min(
+                1,
+                (pointerX - progressHotspot.x()) / Math.max(1, progressHotspot.width())
+            ));
+            video.currentTime = video.duration * percent;
+            progressForeground.width(percent * progressBackground.width());
+            group.getLayer()?.batchDraw();
+        });
+        progressHotspot.on('click tap', stopControlEvent);
+        video.addEventListener('pause', () => {
+            animation.stop();
+            this._setVideoPlayPauseGlyph(playPauseIcon, false);
+            group.getLayer()?.batchDraw();
+        });
+        video.addEventListener('timeupdate', () => {
+            if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+            progressForeground.width((video.currentTime / video.duration) * progressBackground.width());
+            if (preview.image() !== video) preview.image(video);
+            group.getLayer()?.batchDraw();
+        });
     }
 
     _coverGeneratorPreview(preview, mediaWidth, mediaHeight, boxWidth, boxHeight) {
@@ -7902,6 +8577,8 @@ export class CanvasManager {
             if (previousCitationIds !== citationState.orderedIds.join('\u0000')) {
                 this._renderGenerationComposerReferences(nodeId);
             }
+            this._cacheMediaGenerationPromptDraft(data);
+            this.emit('change');
         });
         prompt.addEventListener('keydown', event => {
             if (event.key !== 'Enter' || event.ctrlKey || event.metaKey || event.isComposing) return;
@@ -8676,6 +9353,7 @@ export class CanvasManager {
             this._setGenerationComposerPromptValue(promptElement, nextPrompt);
             this._syncGenerationComposerCitationsFromPrompt(data, promptElement);
             active.changed = true;
+            this._cacheMediaGenerationPromptDraft(data);
             anchor.title = `当前模板：${template.name}`;
             anchor.classList.add('has-template');
             this._closeGenerationComposerPopover(active);
@@ -9384,6 +10062,9 @@ export class CanvasManager {
         } else if (data.runStatus === STATUS.ERROR) {
             message.textContent = data.runError || '生成失败';
             message.dataset.state = 'error';
+        } else if (data.runStatus === STATUS.CANCELED) {
+            message.textContent = '生成任务已中断';
+            message.dataset.state = 'pending';
         } else if (data.runStatus === STATUS.DONE) {
             message.textContent = '';
             delete message.dataset.state;
@@ -9437,6 +10118,7 @@ export class CanvasManager {
         const active = this._generationComposer;
         if (!active) return;
         const activeData = this.items.get(active.nodeId)?.data;
+        if (commit) this._cacheMediaGenerationPromptDraft(activeData);
         if (commit && active.changed && activeData?.nodeType === 'image') {
             this._rememberImageGenerationPreferences(activeData);
         }
@@ -9719,11 +10401,7 @@ export class CanvasManager {
         if (this._generationComposer?.nodeId === sourceId) this._closeGenerationComposer();
         this.graphView?.clearPorts(sourceId);
         entry.group.getAttr('generatorAnimation')?.stop?.();
-        (entry.group.getAttr('generatorPreviewVideos') || []).forEach(video => {
-            video.pause?.();
-            video.removeAttribute?.('src');
-            video.load?.();
-        });
+        this._disposeGeneratorPreviewMedia(entry.group);
         entry.group.destroy();
         this.items.delete(sourceId);
         this.selectedItems.delete(sourceId);
@@ -9752,6 +10430,9 @@ export class CanvasManager {
         }
         if (sourceItem?.kind === 'op' && ['image', 'video'].includes(sourceItem.nodeType)) {
             if (!filePath && !resultUrl) return null;
+            if (output?._generation && typeof output._generation === 'object') {
+                sourceItem.generation = JSON.parse(JSON.stringify(output._generation));
+            }
             const resultItem = output?._resultItem || null;
             const candidateIndex = output?._candidateIndex ?? resultItem?.candidateIndex ?? null;
             const results = appendGeneratorResult(sourceItem, {
@@ -9804,6 +10485,9 @@ export class CanvasManager {
         });
         const existing = this._findItemByFilePath(filePath);
         if (existing) {
+            if (output?._generation && typeof output._generation === 'object') {
+                existing.data.generation = JSON.parse(JSON.stringify(output._generation));
+            }
             if (!existing.data.fromNodeId && Date.now() - Number(existing.data.addedAt || 0) < 10000) {
                 const at = this._findResultSlot(sourceItem);
                 existing.data.fromNodeId = sourceItem.id;
@@ -9829,7 +10513,10 @@ export class CanvasManager {
             height: displaySize.height,
             mediaType: resolveGeneratorResultMediaType(output, filePath),
             addedAt: Date.now(),
-            fromNodeId: sourceItem.id
+            fromNodeId: sourceItem.id,
+            generation: output?._generation && typeof output._generation === 'object'
+                ? JSON.parse(JSON.stringify(output._generation))
+                : undefined
         };
 
         // 必须 await：_createCard 是异步的（canvas.js:2638），
@@ -9908,9 +10595,19 @@ export class CanvasManager {
             prepareImageReferences: (refs) => this.options.prepareImageReferences?.(refs) || [],
             createGenerationTask: (details) => this.options.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => this.options.updateGenerationTask?.(taskId, patch) || null,
-            recordGenerationError: (taskId, error) => this.options.recordGenerationError?.(taskId, error) || null
+            recordGenerationError: (taskId, error) => this.options.recordGenerationError?.(taskId, error) || null,
+            cancelGenerationTasks: (nodeId) => this.options.cancelGenerationTasks?.(nodeId) || false
         });
         return this.graphRunner;
+    }
+
+    async _cancelRunningGenerator(nodeId) {
+        const canceled = await this._ensureRunner().cancel(nodeId);
+        if (!canceled) return false;
+        this._showCanvasStatus('正在中断生成任务…', 1800);
+        this.refreshOpNode(nodeId);
+        this.emit('change');
+        return true;
     }
 
     /** 执行 nodeId 及其全部上游依赖 */
@@ -9949,7 +10646,7 @@ export class CanvasManager {
         this._showCanvasStatus('开始执行…');
         const result = await runner.runFrom(nodeId, options);
         if (!result.ok) {
-            this._showCanvasStatus(result.reason || '执行失败', 3200);
+            this._showCanvasStatus(result.canceled ? '生成任务已中断' : (result.reason || '执行失败'), 3200);
         } else {
             this._showCanvasStatus(`执行完成，共 ${result.ran?.length || 0} 个节点`, 2400);
             this.emit('change');
@@ -12214,7 +12911,7 @@ export class CanvasManager {
             return this.items.get(reference.itemId);
         }
         for (const item of this.items.values()) {
-            if (item.data.filePath === reference.filePath) return item;
+            if (this._copyableFilePath(item.data) === reference.filePath) return item;
         }
         return null;
     }
@@ -12445,7 +13142,7 @@ export class CanvasManager {
         this._clearReferenceDropHighlights();
         this._stopPlanReferenceDrag();
         this._togglePlanRowReference(pick.planId, pick.rowId, itemEntry);
-        this._setHoveredReferenceItem(itemEntry.data.id, itemEntry.data.filePath);
+        this._setHoveredReferenceItem(itemEntry.data.id, this._copyableFilePath(itemEntry.data));
         document.body.style.cursor = 'default';
     }
 
@@ -12459,8 +13156,9 @@ export class CanvasManager {
     }
 
     _getPlanReferencePreviewText(target = null) {
-        if (!target?.data?.filePath) return '选择素材 · Esc 取消';
-        return `点击连接：${this._truncateMiddle(this._fileNameFromPath(target.data.filePath), 24)}`;
+        const filePath = this._copyableFilePath(target?.data);
+        if (!filePath) return '选择素材 · Esc 取消';
+        return `点击连接：${this._truncateMiddle(this._fileNameFromPath(filePath), 24)}`;
     }
 
     _updatePlanReferencePreviewLabel(preview, end, target = null) {
@@ -12781,12 +13479,13 @@ export class CanvasManager {
     _togglePlanRowReference(planId, rowId, itemEntry) {
         const plan = this.planService?.getPlan?.(planId);
         const row = plan?.rows?.find(entry => entry.id === rowId);
-        if (!plan || !row || !itemEntry?.data?.filePath) return;
+        const filePath = this._copyableFilePath(itemEntry?.data);
+        if (!plan || !row || !filePath) return;
 
         const sourceReferences = this._getSourcePlanRowReferences(row);
         const outputReferences = this._getOutputPlanRowReferences(row);
         const existingIndex = sourceReferences.findIndex(reference =>
-            reference.itemId === itemEntry.data.id || reference.filePath === itemEntry.data.filePath
+            reference.itemId === itemEntry.data.id || reference.filePath === filePath
         );
         if (existingIndex >= 0) {
             sourceReferences.splice(existingIndex, 1);
@@ -12794,8 +13493,8 @@ export class CanvasManager {
         } else {
             sourceReferences.push({
                 itemId: itemEntry.data.id,
-                filePath: itemEntry.data.filePath,
-                name: this._fileNameFromPath(itemEntry.data.filePath),
+                filePath,
+                name: this._fileNameFromPath(filePath),
                 kind: 'source'
             });
             this._showCanvasStatus('已连接参考图片');
@@ -13518,7 +14217,10 @@ export class CanvasManager {
     _unloadContent(item) {
         // Operation nodes use vector shapes instead of media textures. Treat them as
         // already unloaded so the shared deletion path never calls Image-only APIs.
-        if (item?.data?.kind === 'op') return;
+        if (item?.data?.kind === 'op') {
+            this._disposeGeneratorPreviewMedia(item.group);
+            return;
+        }
 
         this._completeContentLoad(item);
         const transformerNode = this.imageTransformer?.nodes?.()[0];

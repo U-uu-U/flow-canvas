@@ -8,7 +8,11 @@
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
-const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
+const {
+    DEFAULT_MCP_CONFIG,
+    MCP_BOARD_TOOLS_VERSION,
+    normalizeMcpConfig
+} = require('../shared/plan-service-core.cjs');
 
 const DEFAULT_DATA = {
     version: 1,
@@ -18,6 +22,8 @@ const DEFAULT_DATA = {
     activeGroupId: null,    // 当前激活的文件夹组 ID
     items: [],
     connections: [],        // [{id, from: {nodeId, port}, to: {nodeId, port}}]
+    boardRevision: 0,
+    appliedTransactionKeys: [],
     mcp: { ...DEFAULT_MCP_CONFIG },
     viewport: { x: 0, y: 0, scale: 1 },
     defaultSaveFolder: null,
@@ -44,7 +50,14 @@ class Store {
         try {
             if (fs.existsSync(this.filePath)) {
                 const raw = fs.readFileSync(this.filePath, 'utf-8');
-                return this._normalizeData(JSON.parse(raw));
+                const parsed = JSON.parse(raw);
+                const normalized = this._normalizeData(parsed);
+                const currentBoardToolsVersion = Number(parsed.mcp?.boardToolsVersion);
+                if (!Number.isInteger(currentBoardToolsVersion)
+                    || currentBoardToolsVersion < MCP_BOARD_TOOLS_VERSION) {
+                    this.save(normalized);
+                }
+                return normalized;
             }
         } catch (err) {
             console.error('[Store] 加载失败:', err.message);
@@ -75,6 +88,10 @@ class Store {
             ? source.folderGroups.map(group => this._normalizeGroup(group))
             : [];
         const activeGroup = folderGroups.find(group => group.id === source.activeGroupId) || null;
+        const boardRevision = normalizeRevision(activeGroup?.boardRevision ?? source.boardRevision);
+        const appliedTransactionKeys = normalizeTransactionKeys(
+            activeGroup?.appliedTransactionKeys ?? source.appliedTransactionKeys
+        );
         const assetLibrarySource = source.assetLibrary && typeof source.assetLibrary === 'object'
             ? source.assetLibrary
             : {};
@@ -96,11 +113,13 @@ class Store {
             activeGroupId: activeGroup ? activeGroup.id : (source.activeGroupId || null),
             items: Array.isArray(source.items) ? [...source.items] : [],
             connections: Array.isArray(source.connections) ? [...source.connections] : [],
+            boardRevision,
+            appliedTransactionKeys,
             removedFromBoardPaths: Array.isArray(source.removedFromBoardPaths)
                 ? [...source.removedFromBoardPaths]
                 : [],
             removedFromBoardPathsInitialized: source.removedFromBoardPathsInitialized === true,
-            mcp: { ...DEFAULT_MCP_CONFIG, ...(source.mcp || {}) },
+            mcp: normalizeMcpConfig(source.mcp),
             viewport: { ...DEFAULT_DATA.viewport, ...(source.viewport || {}) },
             defaultSaveFolder: typeof source.defaultSaveFolder === 'string' ? source.defaultSaveFolder : null,
             activeGroupDefaultSaveFolder: activeGroup?.defaultSaveFolder || null,
@@ -131,7 +150,9 @@ class Store {
                 : [],
             removedFromBoardPathsInitialized: source.removedFromBoardPathsInitialized === true,
             plans: Array.isArray(source.plans) ? [...source.plans] : [],
-            connections: Array.isArray(source.connections) ? [...source.connections] : []
+            connections: Array.isArray(source.connections) ? [...source.connections] : [],
+            boardRevision: normalizeRevision(source.boardRevision),
+            appliedTransactionKeys: normalizeTransactionKeys(source.appliedTransactionKeys)
         };
 
         delete normalized.items;
@@ -189,6 +210,17 @@ class Store {
             try { fs.unlinkSync(entry.fullPath); } catch (_) { }
         });
     }
+}
+
+function normalizeRevision(value) {
+    const revision = Number(value);
+    return Number.isInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+function normalizeTransactionKeys(value) {
+    return [...new Set((Array.isArray(value) ? value : [])
+        .map(key => String(key || '').trim())
+        .filter(Boolean))].slice(-200);
 }
 
 module.exports = Store;

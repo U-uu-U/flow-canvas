@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flow-canvas.board-snapshot.v1",
+  "title": "Flow Canvas Board Snapshot",
+  "type": "object",
+  "required": ["schema", "projectId", "revision", "scope", "items", "connections"],
+  "properties": {
+    "schema": { "const": "flow-canvas.board-snapshot.v1" },
+    "projectId": { "type": ["string", "null"] },
+    "revision": { "type": "integer", "minimum": 0 },
+    "scope": { "enum": ["selection", "neighborhood", "viewport", "project", "full"] },
+    "items": { "type": "array", "items": { "type": "object" } },
+    "connections": { "type": "array", "items": { "$ref": "#/$defs/connection" } },
+    "plans": { "type": "array", "items": { "type": "object" } },
+    "viewport": { "$ref": "#/$defs/viewport" },
+    "selectedItemIds": { "type": "array", "items": { "type": "string" } },
+    "appliedTransactionKeys": { "type": "array", "items": { "type": "string" } },
+    "capturedAt": { "type": "number" }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "required": ["nodeId", "port"],
+      "properties": {
+        "nodeId": { "type": "string", "minLength": 1 },
+        "port": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "connection": {
+      "type": "object",
+      "required": ["id", "from", "to"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "from": { "$ref": "#/$defs/endpoint" },
+        "to": { "$ref": "#/$defs/endpoint" },
+        "kind": { "enum": ["flow", "history"] }
+      },
+      "additionalProperties": false
+    },
+    "viewport": {
+      "type": "object",
+      "required": ["x", "y", "scale"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "scale": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

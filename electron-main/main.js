@@ -178,6 +178,10 @@ function createWindow() {
     });
 
     mainWindow.webContents.on('did-start-loading', () => {
+        flowCanvasBridge?.setBoardToolsReady(false, {
+            code: 'RENDERER_RELOADING',
+            message: 'Flow Canvas renderer is reloading'
+        });
         if (mediaPreviewWasFullScreen === null) return;
         const shouldRemainFullScreen = mediaPreviewWasFullScreen === true;
         mediaPreviewWasFullScreen = null;
@@ -193,6 +197,10 @@ function createWindow() {
     }
 
     mainWindow.on('closed', () => {
+        flowCanvasBridge?.setBoardToolsReady(false, {
+            code: 'RENDERER_NOT_READY',
+            message: 'Flow Canvas main window was closed'
+        });
         mainWindow = null;
         mediaPreviewWasFullScreen = null;
         if (orbWindow && !orbWindow.isDestroyed()) {
@@ -1229,11 +1237,32 @@ async function classifyAssetWithProvider(filePath, provider = {}) {
 
 // ── IPC 处理 ────────────────────────────────────────────
 
+function isCurrentMainWindowSender(event) {
+    return Boolean(
+        mainWindow
+        && !mainWindow.isDestroyed()
+        && event?.sender === mainWindow.webContents
+    );
+}
+
 // 数据存储
 ipcMain.handle('store:load', () => store.load());
 ipcMain.handle('store:save', (_, data) => store.save(data));
 ipcMain.on('store:saveSync', (event, data) => {
     event.returnValue = store.save(data);
+});
+
+ipcMain.on('mcp:board-tools-ready', (event, ready) => {
+    if (!isCurrentMainWindowSender(event)) return;
+    flowCanvasBridge?.setBoardToolsReady(ready === true, {
+        code: 'RENDERER_NOT_READY',
+        message: 'Flow Canvas board renderer is not ready'
+    });
+});
+
+ipcMain.on('mcp:board-tool-response', (event, payload) => {
+    if (!isCurrentMainWindowSender(event)) return;
+    flowCanvasBridge?.handleBoardToolResponse(payload || {});
 });
 
 ipcMain.handle('api-config:load', () => {
@@ -1902,6 +1931,26 @@ function mergeAssetMetadata(current, patch) {
     return next;
 }
 
+async function writeAssetMetadataFile(filePath, patch) {
+    const assetPath = path.resolve(String(filePath || ''));
+    if (!fs.existsSync(assetPath) || !fs.statSync(assetPath).isFile()) {
+        throw new Error('素材文件不存在');
+    }
+    const metadataPath = `${assetPath}${ASSET_METADATA_SUFFIX}`;
+    const next = mergeAssetMetadata(readAssetMetadataFile(assetPath), {
+        ...(patch || {}),
+        assetPath,
+        updatedAt: new Date().toISOString()
+    });
+    const temporaryPath = `${metadataPath}.${process.pid}.tmp`;
+    await fs.promises.writeFile(temporaryPath, JSON.stringify(next, null, 2), 'utf8');
+    await fs.promises.rename(temporaryPath, metadataPath).catch(async () => {
+        await fs.promises.unlink(metadataPath).catch(() => {});
+        await fs.promises.rename(temporaryPath, metadataPath);
+    });
+    return next;
+}
+
 ipcMain.handle('asset:readMetadata', (_, filePaths) => {
     const paths = (Array.isArray(filePaths) ? filePaths : []).filter(Boolean).slice(0, 1000);
     const entries = paths.map(filePath => [String(filePath), readAssetMetadataFile(filePath)]);
@@ -1910,23 +1959,54 @@ ipcMain.handle('asset:readMetadata', (_, filePaths) => {
 
 ipcMain.handle('asset:updateMetadata', async (_, filePath, patch) => {
     try {
-        const assetPath = path.resolve(String(filePath || ''));
-        if (!fs.existsSync(assetPath) || !fs.statSync(assetPath).isFile()) {
+        const metadata = await writeAssetMetadataFile(filePath, patch);
+        return { success: true, metadata };
+    } catch (error) {
+        return { success: false, error: error?.message || String(error) };
+    }
+});
+
+ipcMain.handle('asset:archiveFile', async (_, filePath) => {
+    try {
+        const sourcePath = path.resolve(String(filePath || ''));
+        if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
             return { success: false, error: '素材文件不存在' };
         }
-        const metadataPath = `${assetPath}${ASSET_METADATA_SUFFIX}`;
-        const next = mergeAssetMetadata(readAssetMetadataFile(assetPath), {
-            ...(patch || {}),
-            assetPath,
-            updatedAt: new Date().toISOString()
-        });
-        const temporaryPath = `${metadataPath}.${process.pid}.tmp`;
-        await fs.promises.writeFile(temporaryPath, JSON.stringify(next, null, 2), 'utf8');
-        await fs.promises.rename(temporaryPath, metadataPath).catch(async () => {
-            await fs.promises.unlink(metadataPath).catch(() => {});
-            await fs.promises.rename(temporaryPath, metadataPath);
-        });
-        return { success: true, metadata: next };
+
+        const library = getAssetLibraryContext();
+        const targetDir = library.defaultFolder || library.managedFolder;
+        const result = await archiveLocalFile(sourcePath, targetDir);
+        if (!result?.success) return result;
+
+        let metadata = null;
+        let metadataError = '';
+        try {
+            const sourceMetadata = readAssetMetadataFile(sourcePath) || {};
+            metadata = await writeAssetMetadataFile(result.filePath, {
+                ...sourceMetadata,
+                source: {
+                    ...(sourceMetadata.source || {}),
+                    archivedFrom: sourcePath
+                },
+                archive: {
+                    originalPath: sourcePath,
+                    libraryFolder: targetDir,
+                    archivedAt: new Date().toISOString()
+                }
+            });
+        } catch (error) {
+            metadataError = error?.message || String(error);
+            console.warn('[AssetLibrary] 入库元数据写入失败:', metadataError);
+        }
+
+        return {
+            ...result,
+            success: true,
+            targetDir,
+            targetName: path.basename(targetDir),
+            metadata,
+            metadataError
+        };
     } catch (error) {
         return { success: false, error: error?.message || String(error) };
     }
@@ -2162,7 +2242,22 @@ ipcMain.handle('mcp:image:generate', async (_, body) => {
         }
         return { success: true, ...(await flowCanvasBridge.generateImageFromRenderer(body || {})) };
     } catch (err) {
-        return { success: false, error: err.message };
+        return {
+            success: false,
+            canceled: err?.code === 'GENERATION_CANCELED' || err?.name === 'AbortError',
+            error: err.message
+        };
+    }
+});
+
+ipcMain.handle('mcp:generation:cancel', async (_, clientTaskId) => {
+    try {
+        if (!flowCanvasBridge) {
+            return { success: false, canceled: false, error: 'Flow Canvas bridge is not ready' };
+        }
+        return { success: true, ...flowCanvasBridge.cancelGenerationFromRenderer(clientTaskId) };
+    } catch (err) {
+        return { success: false, canceled: false, error: err.message };
     }
 });
 
@@ -2198,7 +2293,11 @@ ipcMain.handle('mcp:video:generate', async (_, body) => {
         }
         return { success: true, ...(await flowCanvasBridge.generateVideoFromRenderer(body || {})) };
     } catch (err) {
-        return { success: false, error: err.message };
+        return {
+            success: false,
+            canceled: err?.code === 'GENERATION_CANCELED' || err?.name === 'AbortError',
+            error: err.message
+        };
     }
 });
 
@@ -2209,7 +2308,11 @@ ipcMain.handle('mcp:video:resume', async (_, body) => {
         }
         return { success: true, ...(await flowCanvasBridge.resumeVideoFromRenderer(body || {})) };
     } catch (err) {
-        return { success: false, error: err.message };
+        return {
+            success: false,
+            canceled: err?.code === 'GENERATION_CANCELED' || err?.name === 'AbortError',
+            error: err.message
+        };
     }
 });
 
@@ -2239,6 +2342,52 @@ function getAvailableArchivePath(saveDir, sourcePath) {
     throw new Error('No available archive filename');
 }
 
+function hashFile(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha256');
+        const stream = fs.createReadStream(filePath);
+        stream.on('error', reject);
+        stream.on('data', chunk => hash.update(chunk));
+        stream.on('end', () => resolve(hash.digest('hex')));
+    });
+}
+
+async function filesHaveSameContent(leftPath, rightPath) {
+    try {
+        const [leftStat, rightStat] = await Promise.all([
+            fs.promises.stat(leftPath),
+            fs.promises.stat(rightPath)
+        ]);
+        if (!leftStat.isFile() || !rightStat.isFile() || leftStat.size !== rightStat.size) return false;
+        const [leftHash, rightHash] = await Promise.all([hashFile(leftPath), hashFile(rightPath)]);
+        return leftHash === rightHash;
+    } catch (_) {
+        return false;
+    }
+}
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function findExistingArchivePath(saveDir, sourcePath) {
+    const parsed = path.parse(path.basename(sourcePath));
+    const sourceKey = crypto.createHash('md5').update(path.resolve(sourcePath)).digest('hex').slice(0, 8);
+    const pattern = new RegExp(
+        `^${escapeRegExp(parsed.name)}_${sourceKey}(?:_\\d+)?${escapeRegExp(parsed.ext)}$`,
+        process.platform === 'win32' ? 'i' : ''
+    );
+    const sourceName = path.basename(sourcePath);
+    const entries = await fs.promises.readdir(saveDir, { withFileTypes: true });
+    const candidates = entries
+        .filter(entry => entry.isFile() && (entry.name === sourceName || pattern.test(entry.name)))
+        .map(entry => path.join(saveDir, entry.name));
+    for (const candidate of candidates) {
+        if (await filesHaveSameContent(sourcePath, candidate)) return candidate;
+    }
+    return null;
+}
+
 async function archiveLocalFile(filePath, targetDir) {
     try {
         if (!filePath) {
@@ -2255,6 +2404,16 @@ async function archiveLocalFile(filePath, targetDir) {
 
         if (isPathInside(saveDir, sourcePath)) {
             return { success: true, filePath: sourcePath, archived: false, reason: 'already-in-target' };
+        }
+
+        const existingArchivePath = await findExistingArchivePath(saveDir, sourcePath);
+        if (existingArchivePath) {
+            return {
+                success: true,
+                filePath: existingArchivePath,
+                archived: false,
+                reason: 'already-archived'
+            };
         }
 
         const archivedPath = getAvailableArchivePath(saveDir, sourcePath);

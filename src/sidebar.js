@@ -46,6 +46,8 @@ export class SidebarManager {
                 id: Date.now().toString(),
                 name: '默认组',
                 folders: [...this.storeData.watchFolders],
+                boardRevision: 0,
+                appliedTransactionKeys: [],
                 removedFromBoardPaths: [],
                 removedFromBoardPathsInitialized: false
             };
@@ -79,6 +81,7 @@ export class SidebarManager {
             assetLibraryGrid: document.getElementById('assetLibraryGrid'),
             assetLibraryScope: document.getElementById('assetLibraryScope'),
             assetLibraryResultCount: document.getElementById('assetLibraryResultCount'),
+            assetLibraryRouteLabel: document.getElementById('assetLibraryRouteLabel'),
             fitAllBtn: document.getElementById('fitAllBtn'),
             packLayoutBtn: document.getElementById('packLayoutBtn'),
             seamlessLayoutBtn: document.getElementById('seamlessLayoutBtn'),
@@ -464,6 +467,14 @@ export class SidebarManager {
         const select = this.dom.assetLibrarySourceSelect;
         if (!select) return;
         const folders = this.getAssetLibraryFolders();
+        const defaultFolder = folders.find(folder =>
+            this._normalizePath(folder) === this._normalizePath(this.storeData.assetLibrary?.defaultFolder));
+        if (this.dom.assetLibraryRouteLabel) {
+            this.dom.assetLibraryRouteLabel.textContent = defaultFolder
+                ? `默认入库 · ${this._assetFolderName(defaultFolder)}`
+                : '默认入库 · Flow Canvas';
+            this.dom.assetLibraryRouteLabel.title = defaultFolder || this.assetLibraryManagedFolder || '';
+        }
         if (this.assetLibrarySource && !folders.some(folder =>
             this._normalizePath(folder) === this._normalizePath(this.assetLibrarySource))) {
             this.assetLibrarySource = '';
@@ -554,7 +565,7 @@ export class SidebarManager {
         return this.setAssetLibraryDefaultFolder(this.assetLibrarySource);
     }
 
-    toggleAssetLibrary(force) {
+    toggleAssetLibrary(force, options = {}) {
         const panel = this.dom.assetLibraryPanel;
         if (!panel) return;
         const shouldOpen = typeof force === 'boolean' ? force : panel.hidden;
@@ -567,7 +578,34 @@ export class SidebarManager {
         if (nodeSearch) nodeSearch.hidden = true;
         document.getElementById('canvasToolSearch')?.classList.remove('active');
         this._renderAssetLibrarySources();
-        void this._refreshAssetLibraryFiles();
+        if (options.refresh !== false) void this._refreshAssetLibraryFiles();
+    }
+
+    async revealArchivedAsset({ filePath, targetDir, metadata } = {}) {
+        if (!filePath) return false;
+        const matchingFolder = this.getAssetLibraryFolders().find(folder =>
+            this._normalizePath(folder) === this._normalizePath(targetDir));
+        this.assetLibrarySource = matchingFolder || '';
+        this.assetLibraryQuery = '';
+        this.assetLibraryCategory = '';
+        if (this.dom.assetLibrarySearch) {
+            this.dom.assetLibrarySearch.value = '';
+            this.dom.assetLibrarySearch.closest('.asset-library-search')?.classList.remove('has-value');
+        }
+        this.dom.assetLibraryTypeFilters?.querySelectorAll('.filter-chip').forEach(chip => {
+            chip.classList.toggle('active', chip.dataset.filter === 'all');
+        });
+        if (metadata) this.applyAssetMetadata(filePath, metadata);
+        this.toggleAssetLibrary(true, { refresh: false });
+        await this._refreshAssetLibraryFiles();
+
+        const card = [...(this.dom.assetLibraryGrid?.querySelectorAll('.asset-library-card') || [])]
+            .find(entry => this._normalizePath(entry.dataset.assetPath) === this._normalizePath(filePath));
+        if (!card) return false;
+        card.classList.add('is-newly-archived');
+        card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        setTimeout(() => card.classList.remove('is-newly-archived'), 2400);
+        return true;
     }
 
     async _refreshAssetLibraryFiles() {
@@ -713,7 +751,9 @@ export class SidebarManager {
             const onCanvas = boardPaths.has(this._normalizePath(filePath));
             const preview = type === 'image'
                 ? `<div class="asset-library-card-preview asset-kind-image"><img data-asset-thumbnail alt="" draggable="false"><svg class="flow-icon flow-icon-lg asset-library-card-fallback" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-image"></use></svg></div>`
-                : `<div class="asset-library-card-preview asset-kind-${type}"><svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#${this._assetTypeIcon(type)}"></use></svg><span>${this._escapeHtml(extension)}</span></div>`;
+                : type === 'video'
+                    ? `<div class="asset-library-card-preview asset-kind-video"><video data-asset-video-thumbnail aria-hidden="true" tabindex="-1" muted playsinline preload="metadata"></video><svg class="flow-icon flow-icon-lg asset-library-card-fallback" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg><span>${this._escapeHtml(extension)}</span><i class="asset-library-video-badge" aria-hidden="true"></i></div>`
+                    : `<div class="asset-library-card-preview asset-kind-${type}"><svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#${this._assetTypeIcon(type)}"></use></svg><span>${this._escapeHtml(extension)}</span></div>`;
             return `
                 <article class="asset-library-card ${onCanvas ? 'is-on-canvas' : ''} ${metadata?.favorite ? 'is-favorite' : ''} ${classificationStatus ? `classification-${this._escapeHtml(classificationStatus)}` : ''}" draggable="true"
                     data-asset-path="${this._escapeHtml(filePath)}" title="${this._escapeHtml(metadata?.summary || filePath)}">
@@ -731,23 +771,48 @@ export class SidebarManager {
                 </article>`;
         }).join('');
 
-        if (!window.IntersectionObserver || !window.flowCanvas?.thumb?.get) return;
+        if (!window.IntersectionObserver) return;
         this._assetThumbnailObserver = new IntersectionObserver(entries => {
             entries.forEach(entry => {
                 if (!entry.isIntersecting) return;
-                const image = entry.target;
-                this._assetThumbnailObserver?.unobserve(image);
-                const card = image.closest('.asset-library-card');
+                const previewMedia = entry.target;
+                this._assetThumbnailObserver?.unobserve(previewMedia);
+                const card = previewMedia.closest('.asset-library-card');
                 const filePath = card?.dataset.assetPath;
                 if (!filePath) return;
+
+                if (previewMedia.matches('[data-asset-video-thumbnail]')) {
+                    const revealFrame = () => {
+                        if (!previewMedia.isConnected || previewMedia.readyState < 2
+                            || !previewMedia.videoWidth || !previewMedia.videoHeight) return;
+                        previewMedia.classList.add('is-loaded');
+                    };
+                    previewMedia.addEventListener('loadedmetadata', () => {
+                        previewMedia.preload = 'auto';
+                        const seekTime = Number.isFinite(previewMedia.duration) && previewMedia.duration > 0
+                            ? Math.min(0.08, previewMedia.duration / 2)
+                            : 0;
+                        if (seekTime > 0) {
+                            try { previewMedia.currentTime = seekTime; } catch (_) { }
+                        }
+                    }, { once: true });
+                    previewMedia.addEventListener('loadeddata', revealFrame);
+                    previewMedia.addEventListener('seeked', revealFrame, { once: true });
+                    previewMedia.src = `local-res://${encodeURIComponent(filePath)}`;
+                    previewMedia.load();
+                    return;
+                }
+
+                if (!window.flowCanvas?.thumb?.get) return;
                 window.flowCanvas.thumb.get(filePath, 220).then(dataUrl => {
-                    if (!dataUrl || !image.isConnected) return;
-                    image.src = dataUrl;
-                    image.classList.add('is-loaded');
+                    if (!dataUrl || !previewMedia.isConnected) return;
+                    previewMedia.src = dataUrl;
+                    previewMedia.classList.add('is-loaded');
                 }).catch(() => {});
             });
         }, { root: grid, rootMargin: '100px' });
-        grid.querySelectorAll('[data-asset-thumbnail]').forEach(image => this._assetThumbnailObserver.observe(image));
+        grid.querySelectorAll('[data-asset-thumbnail], [data-asset-video-thumbnail]')
+            .forEach(media => this._assetThumbnailObserver.observe(media));
     }
 
     _collectAllFolders() {
@@ -774,7 +839,15 @@ export class SidebarManager {
 
     _migrateGroupDefaults() {
         const groups = this.storeData.folderGroups || [];
-        groups.forEach(group => this._ensureGroupDefaultFolder(group));
+        groups.forEach(group => {
+            this._ensureGroupDefaultFolder(group);
+            group.boardRevision = Number.isInteger(Number(group.boardRevision)) && Number(group.boardRevision) >= 0
+                ? Number(group.boardRevision)
+                : 0;
+            group.appliedTransactionKeys = [...new Set((Array.isArray(group.appliedTransactionKeys)
+                ? group.appliedTransactionKeys
+                : []).map(String).filter(Boolean))].slice(-200);
+        });
 
         const legacyDefault = this.storeData.defaultSaveFolder;
         if (legacyDefault) {
@@ -870,7 +943,8 @@ export class SidebarManager {
     bindEvents() {
         const setSidebarClosed = (isClosed) => {
             document.body.classList.toggle('sidebar-closed', isClosed);
-            if (!isClosed) this.toggleAssetLibrary(false);
+            this.toggleAssetLibrary(false);
+            this.dom.collapseBtn?.setAttribute('aria-expanded', isClosed ? 'false' : 'true');
             this.storeData.sidebarClosed = isClosed;
             if (window.flowCanvas && window.flowCanvas.store) {
                 window.flowCanvas.store.save(this.storeData);
@@ -891,9 +965,16 @@ export class SidebarManager {
             if (!filePath) return;
             this._showAssetClassificationMenu(filePath, Number(clientX) || 12, Number(clientY) || 12);
         });
+        document.addEventListener('asset-library-archived', event => {
+            void this.revealArchivedAsset(event.detail || {});
+        });
 
         if (this.dom.collapseBtn) {
+            this.dom.collapseBtn.addEventListener('pointerdown', (e) => {
+                e.stopPropagation();
+            });
             this.dom.collapseBtn.addEventListener('click', (e) => {
+                e.preventDefault();
                 e.stopPropagation();
                 toggleSidebar();
             });
@@ -1204,6 +1285,8 @@ export class SidebarManager {
             id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
             name: `文件夹组 ${count + 1}`,
             folders: [],
+            boardRevision: 0,
+            appliedTransactionKeys: [],
             defaultSaveFolder: null,
             removedFromBoardPaths: [],
             removedFromBoardPathsInitialized: true
@@ -1293,6 +1376,8 @@ export class SidebarManager {
                 this.storeData.watchFolders = [];
                 this.storeData.items = [];
                 this.storeData.connections = [];
+                this.storeData.boardRevision = 0;
+                this.storeData.appliedTransactionKeys = [];
                 this.storeData.viewport = { x: 0, y: 0, scale: 1 };
                 this.renderGroups();
                 this.emit('switchGroup', {
@@ -1321,6 +1406,8 @@ export class SidebarManager {
             oldGroup.savedItems = [...(this.storeData.items || [])];
             oldGroup.savedViewport = this.storeData.viewport ? { ...this.storeData.viewport } : null;
             oldGroup.connections = [...(this.storeData.connections || [])];
+            oldGroup.boardRevision = Number(this.storeData.boardRevision) || 0;
+            oldGroup.appliedTransactionKeys = [...(this.storeData.appliedTransactionKeys || [])];
             if (!Array.isArray(oldGroup.plans)) oldGroup.plans = [];
 
         }
@@ -1335,6 +1422,8 @@ export class SidebarManager {
         if (oldGroup && oldGroup.id !== groupId) {
             this.storeData.items = newGroup.savedItems || [];
             this.storeData.connections = [...(newGroup.connections || [])];
+            this.storeData.boardRevision = Number(newGroup.boardRevision) || 0;
+            this.storeData.appliedTransactionKeys = [...(newGroup.appliedTransactionKeys || [])];
             this.storeData.watchFolders = [...newGroup.folders];
             this.storeData.activeGroupDefaultSaveFolder = newGroup.defaultSaveFolder || null;
             this.storeData.viewport = newGroup.savedViewport

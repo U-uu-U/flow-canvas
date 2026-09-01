@@ -6,15 +6,36 @@
 // ============================================================
 
 import { NODE_TYPES } from './node-types.js';
-import { topoOrder, collectInputs, collectInputContext, mediaOutput, downstreamOf } from './graph-model.js';
+import {
+    topoOrder,
+    collectInputs,
+    collectInputContext,
+    mediaOutput,
+    generatorResultOutput,
+    downstreamOf
+} from './graph-model.js';
 
 export const STATUS = {
     IDLE: 'idle',
     QUEUED: 'queued',
     RUNNING: 'running',
     DONE: 'done',
-    ERROR: 'error'
+    ERROR: 'error',
+    CANCELED: 'canceled'
 };
+
+function cancellationError() {
+    const error = new Error('生成任务已中断');
+    error.name = 'AbortError';
+    error.code = 'GENERATION_CANCELED';
+    return error;
+}
+
+function isCancellationError(error) {
+    return error?.code === 'GENERATION_CANCELED'
+        || error?.name === 'AbortError'
+        || /任务已中断|已取消|cancel(?:led|ed)?/i.test(error?.message || String(error || ''));
+}
 
 export class GraphRunner {
     /**
@@ -31,6 +52,7 @@ export class GraphRunner {
     constructor(ctx) {
         this.ctx = ctx;
         this.activeNodes = new Set();
+        this.activeRuns = new Map();
         this.resultCache = new Map();
     }
 
@@ -69,6 +91,8 @@ export class GraphRunner {
         // 只锁本次运行真正涉及的节点。互不相干的链可并发，共享上游的链
         // 仍会被拒绝，避免同一节点的状态和结果被两个运行互相覆盖。
         order.forEach(id => this.activeNodes.add(id));
+        const runState = { targetId, order, canceled: false };
+        this.activeRuns.set(targetId, runState);
         const runCache = new Map();
 
         order.forEach(id => {
@@ -81,6 +105,11 @@ export class GraphRunner {
                 const item = items.get(id);
                 if (!item) continue;
 
+                if (runState.canceled) {
+                    this._setStatus(target, STATUS.CANCELED, '生成任务已中断');
+                    return { ok: false, canceled: true, reason: '生成任务已中断', ran: order };
+                }
+
                 // 上游失败时该节点已被标 error，跳过
                 if (item.runStatus === STATUS.ERROR) continue;
 
@@ -90,7 +119,12 @@ export class GraphRunner {
                     const configOverride = options?.configOverrides instanceof Map
                         ? options.configOverrides.get(id)
                         : options?.configOverrides?.[id];
-                    const output = await this._execute(item, connections, runCache, configOverride);
+                    const persistedProduct = id !== targetId ? generatorResultOutput(item) : {};
+                    const reusedProduct = Object.keys(persistedProduct).length > 0;
+                    const output = reusedProduct
+                        ? persistedProduct
+                        : await this._execute(item, connections, runCache, configOverride, runState);
+                    if (runState.canceled) throw cancellationError();
                     runCache.set(id, output);
                     this.resultCache.set(id, output);
                     this._setStatus(item, STATUS.DONE);
@@ -100,7 +134,7 @@ export class GraphRunner {
                     // 下一个节点可能在结果节点存在之前就跑起来。
                     // 单独 try：落地失败不该把已经跑成功的节点标成 error，
                     // 产物还在 resultCache 里，下游照样能取。
-                    if (item.kind === 'op' && typeof this.ctx.onResult === 'function') {
+                    if (!reusedProduct && item.kind === 'op' && typeof this.ctx.onResult === 'function') {
                         try {
                             const landedOutputs = Array.isArray(output?._batchResults)
                                 ? output._batchResults
@@ -114,6 +148,11 @@ export class GraphRunner {
                     }
                 } catch (err) {
                     const message = err?.message || String(err);
+                    if (runState.canceled || isCancellationError(err)) {
+                        runState.canceled = true;
+                        this._setStatus(target, STATUS.CANCELED, '生成任务已中断');
+                        return { ok: false, canceled: true, reason: '生成任务已中断', ran: order };
+                    }
                     this._setStatus(item, STATUS.ERROR, message);
 
                     // 级联标错下游，并跳过它们
@@ -129,6 +168,7 @@ export class GraphRunner {
             }
         } finally {
             order.forEach(id => this.activeNodes.delete(id));
+            this.activeRuns.delete(targetId);
         }
 
         return { ok: true, ran: order };
@@ -142,7 +182,7 @@ export class GraphRunner {
     /**
      * 单节点执行。media 是特例，不走 NODE_TYPES。
      */
-    async _execute(item, connections, resultCache = this.resultCache, configOverride = null) {
+    async _execute(item, connections, resultCache = this.resultCache, configOverride = null, runState = null) {
         if (item.kind !== 'op') {
             const out = mediaOutput(item);
             if (!Object.keys(out).length) throw new Error('素材缺少文件路径');
@@ -173,9 +213,20 @@ export class GraphRunner {
             createGenerationTask: this.ctx.createGenerationTask,
             updateGenerationTask: this.ctx.updateGenerationTask,
             recordGenerationError: this.ctx.recordGenerationError,
+            isCancelled: () => runState?.canceled === true,
             inputContext
         });
         return result || {};
+    }
+
+    async cancel(targetId) {
+        const runState = this.activeRuns.get(targetId);
+        if (!runState || runState.canceled) return false;
+        runState.canceled = true;
+        const target = this._items().get(targetId);
+        if (target) this._setStatus(target, STATUS.CANCELED, '生成任务已中断');
+        await this.ctx.cancelGenerationTasks?.(targetId);
+        return true;
     }
 
     /**

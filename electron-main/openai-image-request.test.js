@@ -39,11 +39,141 @@ const {
 const {
     buildMiniMaxH3RequestBody,
     buildMiniMaxH3TaskEndpoint,
+    buildSeedance25RequestBody,
     buildVideoGenerationEndpoint,
+    getVideoPayloadError,
+    getVideoResultUrl,
+    getVideoTaskProgress,
+    getVideoTaskStatus,
     isMiniMaxH3NativeEndpoint,
     isMiniMaxH3PerSecondEndpoint,
-    isMiniMaxH3UnavailableResponse
+    isMiniMaxH3UnavailableResponse,
+    isSeedance25Model,
+    resolveSeedance25AspectRatio,
+    videoModelFilePrefix
 } = require('./video-provider-adapters');
+
+test('视频文件名使用实际模型前缀而不是统一标成 Seedance', () => {
+    assert.equal(videoModelFilePrefix('minimax-h3'), 'minimax_h3');
+    assert.equal(videoModelFilePrefix('MiniMax-H3-c1'), 'minimax_h3');
+    assert.equal(videoModelFilePrefix('doubao-seedance-2-0'), 'seedance_2_0');
+    assert.equal(videoModelFilePrefix('seedance_v2.5'), 'seedance_2_5');
+    assert.equal(videoModelFilePrefix('Veo 3.1 Fast'), 'veo_3_1_fast');
+    assert.equal(videoModelFilePrefix(''), 'video');
+});
+
+test('Seedance 2.5 模型不会误匹配为 Seedance 2.0', () => {
+    assert.equal(isSeedance25Model('seedance_v2.5'), true);
+    assert.equal(isSeedance25Model('seedance-2.5'), true);
+    assert.equal(isSeedance25Model('doubao-seedance-2-0'), false);
+});
+
+test('Seedance 2.5 自适应比例按第一张参考图映射到上游支持值', () => {
+    assert.equal(resolveSeedance25AspectRatio('adaptive', 1280, 1920), '3:4');
+    assert.equal(resolveSeedance25AspectRatio('adaptive', 1920, 1080), '16:9');
+    assert.equal(resolveSeedance25AspectRatio('adaptive', 0, 0), '16:9');
+    assert.equal(resolveSeedance25AspectRatio('9:16', 1920, 1080), '9:16');
+});
+
+test('视频任务响应: 识别 HTTP 200 内嵌上游错误，不再永久停在 0%', () => {
+    const payload = {
+        error: {
+            message: '视频生成失败',
+            type: 'upstream_error',
+            code: 'upstream_error'
+        }
+    };
+    assert.equal(getVideoPayloadError(payload), '视频生成失败');
+    assert.equal(getVideoTaskStatus(payload), '');
+    assert.equal(getVideoTaskProgress(payload), null);
+});
+
+test('视频任务响应: 兼容 data/result/output 包装的状态、进度和下载地址', () => {
+    assert.equal(getVideoTaskStatus({ data: { status: 'succeeded' } }), 'succeeded');
+    assert.equal(getVideoTaskProgress({ result: { progress: 0.75 } }), 0.75);
+    assert.equal(
+        getVideoResultUrl({ output: { download_url: 'https://cdn.example/video.mp4' } }),
+        'https://cdn.example/video.mp4'
+    );
+});
+
+test('视频任务响应: completed 时不把任务查询地址误当成视频下载地址', () => {
+    const statusUrl = 'https://video.example/v1/videos/task_123';
+    assert.equal(getVideoResultUrl({
+        status: 'completed',
+        status_url: statusUrl,
+        url: statusUrl
+    }), '');
+    assert.equal(getVideoResultUrl({
+        status: 'completed',
+        status_url: statusUrl,
+        url: statusUrl,
+        result_url: `${statusUrl}/content?signature=valid`
+    }), `${statusUrl}/content?signature=valid`);
+    assert.equal(getVideoResultUrl({
+        id: 'task_123',
+        status: 'completed',
+        data: [
+            { url: statusUrl },
+            { url: `${statusUrl}/content?signature=valid` }
+        ]
+    }), `${statusUrl}/content?signature=valid`);
+});
+
+test('Seedance 2.5 请求体固定 720p、30 秒并限制 10 张参考图', () => {
+    const images = Array.from({ length: 10 }, (_, index) => ({
+        url: `data:image/jpeg;base64,image-${index}`,
+        role: 'reference_image'
+    }));
+    assert.deepEqual(buildSeedance25RequestBody({
+        endpoint: 'https://art.ravenhash.org/v1/video/generations',
+        model: 'seedance_v2.5',
+        prompt: 'cinematic motion',
+        duration: 30,
+        aspectRatio: '9:16',
+        referenceImages: images
+    }), {
+        model: 'seedance_v2.5',
+        prompt: 'cinematic motion',
+        resolution: '720p',
+        seconds: 30,
+        ratio: '9:16',
+        image_urls: images.map(image => image.url)
+    });
+    assert.deepEqual(buildSeedance25RequestBody({
+        endpoint: 'https://video.example.com/v1/videos',
+        model: 'seedance_v2.5',
+        prompt: 'direct request',
+        duration: 30,
+        referenceImages: images.slice(0, 1)
+    }), {
+        model: 'seedance_v2.5',
+        prompt: 'direct request',
+        resolution: '720p',
+        seconds: 30,
+        image_urls: [images[0].url]
+    });
+    assert.throws(
+        () => buildSeedance25RequestBody({ model: 'seedance_v2.5', prompt: 'x', duration: 10 }),
+        /固定 30 秒/
+    );
+    assert.throws(
+        () => buildSeedance25RequestBody({
+            model: 'seedance_v2.5',
+            prompt: 'x',
+            referenceImages: [...images, images[0]]
+        }),
+        /最多支持 10 张/
+    );
+    assert.throws(
+        () => buildSeedance25RequestBody({
+            model: 'seedance_v2.5',
+            prompt: 'x',
+            aspectRatio: 'adaptive'
+        }),
+        /不支持画幅比例 adaptive/
+    );
+});
 
 test('MiniMax H3 视频协议: 中转地址不被改写，显式任务中心按 ID 查询', () => {
     const endpoint = buildVideoGenerationEndpoint(
@@ -71,6 +201,22 @@ test('MiniMax H3 视频协议: 中转地址不被改写，显式任务中心按 
     assert.equal(
         buildVideoGenerationEndpoint('https://art.ravenhash.org/v1', 'seedance-2.0'),
         'https://art.ravenhash.org/v1/video/generations'
+    );
+    assert.equal(
+        buildVideoGenerationEndpoint('https://art.ravenhash.org/v1', 'seedance_v2.5'),
+        'https://art.ravenhash.org/v1/video/generations'
+    );
+    assert.equal(
+        buildVideoGenerationEndpoint('https://art.ravenhash.org/v1/video/generations', 'seedance_v2.5'),
+        'https://art.ravenhash.org/v1/video/generations'
+    );
+    assert.equal(
+        buildVideoGenerationEndpoint('https://video.zhubo.asia/v1', 'seedance_v2.5'),
+        'https://video.zhubo.asia/v1/videos'
+    );
+    assert.equal(
+        buildVideoGenerationEndpoint('https://relay.example/v1/videos', 'seedance_v2.5'),
+        'https://relay.example/v1/videos'
     );
     assert.equal(isMiniMaxH3NativeEndpoint(nativeEndpoint), true);
     assert.equal(isMiniMaxH3NativeEndpoint('https://art.ravenhash.org/v1'), false);

@@ -39,11 +39,20 @@ const {
 const { ReferenceCache } = require('./reference-cache');
 const {
     buildMiniMaxH3RequestBody,
+    buildSeedance25RequestBody,
     buildVideoGenerationEndpoint,
+    getVideoPayloadError,
+    getVideoResultUrl,
+    getVideoTaskId,
+    getVideoTaskProgress,
+    getVideoTaskStatus,
     isMiniMaxH3Model,
     isMiniMaxH3NativeEndpoint,
     isMiniMaxH3PerSecondEndpoint,
-    isMiniMaxH3UnavailableResponse
+    isMiniMaxH3UnavailableResponse,
+    isSeedance25Model,
+    resolveSeedance25AspectRatio,
+    videoModelFilePrefix
 } = require('./video-provider-adapters');
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
@@ -87,6 +96,33 @@ const RAVENHASH_IMAGE_SIZE_OPTIONS = [
     '3840x2160',
     '2160x3840'
 ];
+const BOARD_TOOL_REQUEST_TIMEOUT_MS = 20_000;
+
+function generationCanceledError() {
+    const error = new Error('生成任务已中断');
+    error.name = 'AbortError';
+    error.code = 'GENERATION_CANCELED';
+    return error;
+}
+
+function throwIfGenerationCanceled(signal) {
+    if (signal?.aborted) throw generationCanceledError();
+}
+
+function createLinkedAbortController(externalSignal, timeoutMs = 0) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (externalSignal?.aborted) abort();
+    else externalSignal?.addEventListener?.('abort', abort, { once: true });
+    const timeout = timeoutMs > 0 ? setTimeout(abort, timeoutMs) : null;
+    return {
+        controller,
+        cleanup() {
+            if (timeout) clearTimeout(timeout);
+            externalSignal?.removeEventListener?.('abort', abort);
+        }
+    };
+}
 
 function getReferenceCache() {
     if (!referenceCache) {
@@ -113,6 +149,10 @@ const ROUTE_TO_TOOL = {
     'GET /items/:itemId': 'flow_canvas.item.get',
     'PATCH /items/:itemId': 'flow_canvas.item.update',
     'DELETE /items/:itemId': 'flow_canvas.item.delete',
+    'POST /board/snapshot': 'flow_canvas.board.get_snapshot',
+    'POST /board/transactions/preview': 'flow_canvas.board.transaction.preview',
+    'POST /board/transactions/apply': 'flow_canvas.board.transaction.apply',
+    'POST /board/transactions/undo': 'flow_canvas.board.transaction.undo',
     'POST /images/generate': 'flow_canvas.image.generate',
     'POST /videos/generate': 'flow_canvas.video.generate'
 };
@@ -141,7 +181,7 @@ const KNOWN_TOOL_NAMES = new Set([
 ]);
 
 class FlowCanvasBridge {
-    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted, notifyVideoProgress }) {
+    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted, notifyVideoProgress, boardToolRequestTimeoutMs }) {
         this.store = store;
         this.getMainWindow = getMainWindow;
         this.getDefaultSaveFolder = getDefaultSaveFolder;
@@ -155,6 +195,44 @@ class FlowCanvasBridge {
         this.port = DEFAULT_MCP_CONFIG.port;
         this.allowedTools = new Set(DEFAULT_MCP_CONFIG.allowedTools);
         this.boardMutationQueue = Promise.resolve();
+        this.boardToolsReady = false;
+        this.pendingBoardToolRequests = new Map();
+        this.activeGenerationRequests = new Map();
+        this.canceledGenerationRequests = new Map();
+        this.boardToolRequestTimeoutMs = sanitizeBoardToolTimeout(boardToolRequestTimeoutMs);
+    }
+
+    async _runCancelableGeneration(clientTaskId, action) {
+        const id = String(clientTaskId || '').trim();
+        const controller = new AbortController();
+        const canceledUntil = id ? Number(this.canceledGenerationRequests.get(id)) || 0 : 0;
+        if (canceledUntil > Date.now()) controller.abort();
+        if (id) {
+            this.activeGenerationRequests.get(id)?.abort();
+            this.activeGenerationRequests.set(id, controller);
+        }
+        try {
+            throwIfGenerationCanceled(controller.signal);
+            const result = await action(controller.signal);
+            throwIfGenerationCanceled(controller.signal);
+            return result;
+        } finally {
+            if (id && this.activeGenerationRequests.get(id) === controller) {
+                this.activeGenerationRequests.delete(id);
+            }
+            if (id && (Number(this.canceledGenerationRequests.get(id)) || 0) <= Date.now()) {
+                this.canceledGenerationRequests.delete(id);
+            }
+        }
+    }
+
+    cancelGenerationFromRenderer(clientTaskId) {
+        const id = String(clientTaskId || '').trim();
+        if (!id) return { canceled: false, error: '缺少任务 ID' };
+        this.canceledGenerationRequests.set(id, Date.now() + 60_000);
+        const controller = this.activeGenerationRequests.get(id);
+        controller?.abort();
+        return { canceled: true, active: Boolean(controller) };
     }
 
     _commitBoardMutation(action) {
@@ -177,7 +255,13 @@ class FlowCanvasBridge {
 
         this.server = http.createServer((req, res) => {
             this._handleRequest(req, res).catch(error => {
-                this._sendJson(res, 500, { success: false, error: error.message });
+                const serialized = serializeBridgeError(error);
+                this._sendJson(res, serialized.status, {
+                    success: false,
+                    error: serialized.message,
+                    code: serialized.code,
+                    details: serialized.details
+                });
             });
         });
 
@@ -192,9 +276,108 @@ class FlowCanvasBridge {
     }
 
     stop() {
-        if (!this.server) return;
-        this.server.close();
-        this.server = null;
+        this.setBoardToolsReady(false, {
+            code: 'BRIDGE_STOPPED',
+            message: 'Flow Canvas bridge stopped'
+        });
+        if (this.server) {
+            this.server.close();
+            this.server = null;
+        }
+    }
+
+    setBoardToolsReady(ready, reason = {}) {
+        this.boardToolsReady = ready === true;
+        if (this.boardToolsReady) return;
+        this._rejectPendingBoardToolRequests(createBridgeError(
+            reason.code || 'RENDERER_NOT_READY',
+            reason.message || 'Flow Canvas board renderer is not ready',
+            reason.details,
+            reason.status || 503
+        ));
+    }
+
+    handleBoardToolResponse(payload = {}) {
+        const requestId = String(payload.requestId || '').trim();
+        const pending = this.pendingBoardToolRequests.get(requestId);
+        if (!pending) return false;
+        this.pendingBoardToolRequests.delete(requestId);
+        clearTimeout(pending.timer);
+
+        if (payload.success === true) {
+            pending.resolve(payload.result);
+            return true;
+        }
+
+        const error = payload.error && typeof payload.error === 'object' ? payload.error : {};
+        pending.reject(createBridgeError(
+            error.code || 'BOARD_TOOL_FAILED',
+            error.message || `Flow Canvas board tool failed: ${pending.toolName}`,
+            error.details,
+            error.status
+        ));
+        return true;
+    }
+
+    _requestBoardTool(toolName, input = {}) {
+        if (!this.boardToolsReady) {
+            return Promise.reject(createBridgeError(
+                'RENDERER_NOT_READY',
+                'Flow Canvas board renderer is not ready; open the canvas and wait for it to finish loading',
+                null,
+                503
+            ));
+        }
+
+        const window = this.getMainWindow?.();
+        if (!window || window.isDestroyed?.() || !window.webContents || window.webContents.isDestroyed?.()) {
+            return Promise.reject(createBridgeError(
+                'RENDERER_NOT_READY',
+                'Flow Canvas main window is unavailable',
+                null,
+                503
+            ));
+        }
+
+        const requestId = crypto.randomUUID?.() || makeId('board_request');
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.pendingBoardToolRequests.delete(requestId);
+                reject(createBridgeError(
+                    'BOARD_TOOL_TIMEOUT',
+                    `Flow Canvas board tool timed out: ${toolName}`,
+                    { toolName, timeoutMs: this.boardToolRequestTimeoutMs },
+                    504
+                ));
+            }, this.boardToolRequestTimeoutMs);
+            timer.unref?.();
+            this.pendingBoardToolRequests.set(requestId, { resolve, reject, timer, toolName });
+
+            try {
+                window.webContents.send('mcp:board-tool-request', {
+                    requestId,
+                    toolName,
+                    input: clone(input || {})
+                });
+            } catch (error) {
+                this.pendingBoardToolRequests.delete(requestId);
+                clearTimeout(timer);
+                reject(createBridgeError(
+                    'RENDERER_UNAVAILABLE',
+                    `Failed to send board tool request: ${error.message}`,
+                    { toolName },
+                    503
+                ));
+            }
+        });
+    }
+
+    _rejectPendingBoardToolRequests(error) {
+        for (const pending of this.pendingBoardToolRequests.values()) {
+            clearTimeout(pending.timer);
+            pending.reject(error);
+        }
+        this.pendingBoardToolRequests.clear();
     }
 
     async _handleRequest(req, res) {
@@ -244,6 +427,10 @@ class FlowCanvasBridge {
             ['GET', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['GET /items/:itemId'], ({ itemId }) => this._getItem(itemId)],
             ['PATCH', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['PATCH /items/:itemId'], ({ itemId }, body) => this._updateItem(itemId, body)],
             ['DELETE', /^\/items\/([^/]+)$/, ROUTE_TO_TOOL['DELETE /items/:itemId'], ({ itemId }) => this._deleteItem(itemId)],
+            ['POST', /^\/board\/snapshot$/, ROUTE_TO_TOOL['POST /board/snapshot'], (_, body) => this._requestBoardTool(ROUTE_TO_TOOL['POST /board/snapshot'], body)],
+            ['POST', /^\/board\/transactions\/preview$/, ROUTE_TO_TOOL['POST /board/transactions/preview'], (_, body) => this._requestBoardTool(ROUTE_TO_TOOL['POST /board/transactions/preview'], body)],
+            ['POST', /^\/board\/transactions\/apply$/, ROUTE_TO_TOOL['POST /board/transactions/apply'], (_, body) => this._commitBoardMutation(() => this._requestBoardTool(ROUTE_TO_TOOL['POST /board/transactions/apply'], body))],
+            ['POST', /^\/board\/transactions\/undo$/, ROUTE_TO_TOOL['POST /board/transactions/undo'], (_, body) => this._commitBoardMutation(() => this._requestBoardTool(ROUTE_TO_TOOL['POST /board/transactions/undo'], body))],
             ['POST', /^\/images\/generate$/, ROUTE_TO_TOOL['POST /images/generate'], (_, body) => this._generateImage(body)],
             ['POST', /^\/videos\/generate$/, ROUTE_TO_TOOL['POST /videos/generate'], (_, body) => this._generateVideo(body)]
         ];
@@ -276,7 +463,8 @@ class FlowCanvasBridge {
         return { data, planService };
     }
 
-    _saveAndNotify(data, event = 'mcp:update') {
+    _saveAndNotify(data, event = 'mcp:update', options = {}) {
+        if (options.bumpRevision !== false) bumpBoardRevision(data);
         const ok = this.store.save(data);
         if (!ok) throw new Error('Failed to save Flow Canvas board data');
         this.notifyRenderer?.(event, data);
@@ -291,6 +479,7 @@ class FlowCanvasBridge {
                 host: this.host,
                 port: this.port,
                 enabled: true,
+                boardToolsReady: this.boardToolsReady,
                 allowedTools: [...this.allowedTools]
             }
         };
@@ -309,6 +498,7 @@ class FlowCanvasBridge {
                 host: this.host,
                 port: this.port,
                 enabled: Boolean(this.server),
+                boardToolsReady: this.boardToolsReady,
                 allowedTools: [...this.allowedTools]
             }
         };
@@ -329,13 +519,14 @@ class FlowCanvasBridge {
         next.allowedTools = sanitizeAllowedTools(next.allowedTools);
         data.mcp = next;
         this.allowedTools = new Set(next.allowedTools);
-        this._saveAndNotify(data, 'mcp:config-updated');
+        this._saveAndNotify(data, 'mcp:config-updated', { bumpRevision: false });
         return {
             config: next,
             runtime: {
                 host: this.host,
                 port: this.port,
                 enabled: Boolean(this.server),
+                boardToolsReady: this.boardToolsReady,
                 allowedTools: [...this.allowedTools]
             },
             requiresRestart: this.port !== next.port || next.enabled === false
@@ -506,6 +697,13 @@ class FlowCanvasBridge {
     }
 
     async generateImageFromRenderer(body) {
+        return this._runCancelableGeneration(body?.clientTaskId, signal =>
+            this._generateImageFromRenderer(body, signal)
+        );
+    }
+
+    async _generateImageFromRenderer(body, signal) {
+        throwIfGenerationCanceled(signal);
         const prompt = String(body?.prompt || '').trim();
         if (!prompt) throw new Error('Missing prompt');
         const { data, planService } = this._loadWithPlanService();
@@ -524,6 +722,7 @@ class FlowCanvasBridge {
         if (body.provider !== 'builtin') {
             result = await tryGenerateWithOpenAI(prompt, targetDir, {
                 ...generationOptions,
+                signal,
                 onTaskSubmitted: ({ taskId, model, status }) => this.notifyTaskSubmitted?.({
                     clientTaskId: body.clientTaskId || null,
                     remoteTaskId: taskId,
@@ -540,10 +739,14 @@ class FlowCanvasBridge {
             }
         }
         if (!result?.success) {
+            throwIfGenerationCanceled(signal);
             result = await generateBuiltinPlaceholder(prompt, targetDir, generationOptions);
         }
 
+        throwIfGenerationCanceled(signal);
+
         const committed = await this._commitBoardMutation(async () => {
+            throwIfGenerationCanceled(signal);
             const { data: latestData, planService: latestPlanService } = this._loadWithPlanService();
             const shouldAddToCanvas = body.addToCanvas !== false
                 && (result.provider !== 'builtin' || body.addToCanvas === true);
@@ -552,7 +755,14 @@ class FlowCanvasBridge {
                     x: body.x,
                     y: body.y,
                     width: Number.isFinite(body.canvasWidth) ? body.canvasWidth : result.width,
-                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height
+                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height,
+                    generation: generationRecordFromRequest(
+                        'image',
+                        body,
+                        prompt,
+                        sourceContext.references,
+                        result
+                    )
                 })
                 : null;
 
@@ -617,6 +827,13 @@ class FlowCanvasBridge {
     }
 
     async generateVideoFromRenderer(body) {
+        return this._runCancelableGeneration(body?.clientTaskId, signal =>
+            this._generateVideoFromRenderer(body, signal)
+        );
+    }
+
+    async _generateVideoFromRenderer(body, signal) {
+        throwIfGenerationCanceled(signal);
         const prompt = String(body?.prompt || '').trim();
         if (!prompt) throw new Error('\u89c6\u9891\u63d0\u793a\u8bcd\u4e0d\u80fd\u4e3a\u7a7a');
         const { data, planService } = this._loadWithPlanService();
@@ -629,6 +846,7 @@ class FlowCanvasBridge {
         const audioSourceContext = collectAudioSourceReferences(data, body.audioReferences);
         const result = await tryGenerateWithOpenAIVideo(prompt, targetDir, {
             ...body,
+            signal,
             sourceReferences: sourceContext.references,
             videoReferences: videoSourceContext.references,
             audioReferences: audioSourceContext.references,
@@ -647,6 +865,7 @@ class FlowCanvasBridge {
                 ...progress
             })
         });
+        throwIfGenerationCanceled(signal);
         if (!result?.success) throw new Error(result?.error || '\u89c6\u9891\u751f\u6210 API \u8bf7\u6c42\u5931\u8d25');
         this.notifyTaskCompleted?.({
             clientTaskId: body.clientTaskId || null,
@@ -655,6 +874,7 @@ class FlowCanvasBridge {
         });
 
         const committed = await this._commitBoardMutation(async () => {
+            throwIfGenerationCanceled(signal);
             const { data: latestData, planService: latestPlanService } = this._loadWithPlanService();
             const item = body.addToCanvas === false
                 ? null
@@ -662,7 +882,18 @@ class FlowCanvasBridge {
                     x: body.x,
                     y: body.y,
                     width: Number.isFinite(body.canvasWidth) ? body.canvasWidth : result.width,
-                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height
+                    height: Number.isFinite(body.canvasHeight) ? body.canvasHeight : result.height,
+                    generation: generationRecordFromRequest(
+                        'video',
+                        body,
+                        prompt,
+                        [
+                            ...sourceContext.references,
+                            ...videoSourceContext.references,
+                            ...audioSourceContext.references
+                        ],
+                        result
+                    )
                 });
 
             if (body.planId && body.rowId && item) {
@@ -815,6 +1046,13 @@ class FlowCanvasBridge {
     }
 
     async resumeVideoFromRenderer(body) {
+        return this._runCancelableGeneration(body?.clientTaskId, signal =>
+            this._resumeVideoFromRenderer(body, signal)
+        );
+    }
+
+    async _resumeVideoFromRenderer(body, signal) {
+        throwIfGenerationCanceled(signal);
         const taskId = String(body?.taskId || '').trim();
         if (!taskId) throw new Error('\u7f3a\u5c11\u53ef\u6062\u590d\u7684\u89c6\u9891\u4efb\u52a1 ID');
         const prompt = String(body?.prompt || '').trim();
@@ -840,7 +1078,8 @@ class FlowCanvasBridge {
             { id: taskId, task_id: taskId, status: 'pending', recovering: true },
             {
                 model,
-                preferVideoTaskEndpoint: isMiniMaxH3Model(model),
+                signal,
+                preferVideoTaskEndpoint: isMiniMaxH3Model(model) || isSeedance25Model(model),
                 onTaskIdResolved: (resolvedTaskId) => this.notifyTaskSubmitted?.({
                     clientTaskId: body.clientTaskId || null,
                     remoteTaskId: resolvedTaskId,
@@ -856,9 +1095,11 @@ class FlowCanvasBridge {
                 })
             }
         );
+        throwIfGenerationCanceled(signal);
         const resolvedTaskId = completed.taskId || taskId;
         this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'download' });
-        const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        const filePath = await downloadVideo(completed.url, targetDir, prompt, model, signal);
+        throwIfGenerationCanceled(signal);
         this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'completed' });
         this.notifyTaskCompleted?.({ remoteTaskId: resolvedTaskId, filePath });
         const item = body.addToCanvas === false
@@ -867,7 +1108,11 @@ class FlowCanvasBridge {
                 x: body.x,
                 y: body.y,
                 width: body.canvasWidth,
-                height: body.canvasHeight
+                height: body.canvasHeight,
+                generation: generationRecordFromRequest('video', {
+                    ...body,
+                    providerConfig: { ...providerConfig, model }
+                }, prompt, [], { taskId: resolvedTaskId })
             });
         this._saveAndNotify(data, 'mcp:video-recovered');
         return {
@@ -896,11 +1141,78 @@ class FlowCanvasBridge {
     }
 }
 
+function generationRecordFromRequest(kind, body = {}, prompt = '', references = [], result = {}) {
+    const providerConfig = body.providerConfig || {};
+    const model = String(providerConfig.model || body.model || '').trim();
+    const baseConfig = {
+        prompt: String(prompt || ''),
+        providerId: providerConfig.id || null,
+        sourceProviderId: providerConfig.sourceProviderId || providerConfig.id || null,
+        model
+    };
+    const config = kind === 'video'
+        ? {
+            ...baseConfig,
+            resolution: body.resolution || '',
+            ratio: body.ratio || '',
+            duration: body.duration ?? '',
+            cameraFixed: body.cameraFixed === true,
+            generateAudio: body.generateAudio === true,
+            webSearch: body.webSearch === true,
+            watermark: body.watermark === true
+        }
+        : {
+            ...baseConfig,
+            size: body.size || '',
+            ratio: body.midjourney?.ratio || '',
+            quality: body.quality || '',
+            responseFormat: body.responseFormat || '',
+            historyDisabled: body.historyDisabled !== false,
+            stream: body.stream === true,
+            webSearch: body.webSearch === true,
+            count: Number(body.n) || 1,
+            ...(body.midjourney && typeof body.midjourney === 'object' ? {
+                midjourneyVersion: body.midjourney.version || '',
+                midjourneyRaw: body.midjourney.raw === true,
+                midjourneyStylize: body.midjourney.stylize ?? '',
+                midjourneyChaos: body.midjourney.chaos ?? ''
+            } : {})
+        };
+    return {
+        nodeType: kind,
+        title: kind === 'video' ? '视频生成' : '图片生成',
+        prompt: String(prompt || ''),
+        config,
+        model,
+        providerId: providerConfig.id || null,
+        sourceProviderId: providerConfig.sourceProviderId || providerConfig.id || null,
+        references: (Array.isArray(references) ? references : []).map(reference => ({
+            itemId: reference?.itemId || reference?.id || null,
+            filePath: reference?.filePath || ''
+        })),
+        taskId: result?.taskId || null,
+        generatedAt: Date.now(),
+        directWorkspace: true
+    };
+}
+
 function addBoardItem(data, filePath, options = {}) {
     if (!Array.isArray(data.items)) data.items = [];
     restoreRemovedBoardPath(data, filePath);
     const existing = data.items.find(item => item.filePath === filePath);
-    if (existing) return existing;
+    if (existing) {
+        if (options.generation && typeof options.generation === 'object') {
+            existing.generation = clone(options.generation);
+        }
+        if (options.fromNodeId) existing.fromNodeId = options.fromNodeId;
+        if (Number.isFinite(options.width) && !Number.isFinite(existing.width)) {
+            existing.width = options.width;
+        }
+        if (Number.isFinite(options.height) && !Number.isFinite(existing.height)) {
+            existing.height = options.height;
+        }
+        return existing;
+    }
 
     const viewport = data.viewport || { x: 0, y: 0, scale: 1 };
     const scale = Number.isFinite(viewport.scale) && viewport.scale > 0 ? viewport.scale : 1;
@@ -913,6 +1225,10 @@ function addBoardItem(data, filePath, options = {}) {
         y: Number.isFinite(options.y) ? options.y : defaultY,
         width: Number.isFinite(options.width) ? options.width : undefined,
         height: Number.isFinite(options.height) ? options.height : undefined,
+        generation: options.generation && typeof options.generation === 'object'
+            ? clone(options.generation)
+            : undefined,
+        fromNodeId: options.fromNodeId || undefined,
         addedAt: Date.now()
     };
     Object.keys(item).forEach(key => item[key] === undefined && delete item[key]);
@@ -966,6 +1282,15 @@ function syncActiveGroupItems(data) {
     if (!activeGroup) return;
     activeGroup.savedItems = clone(data.items || []);
     activeGroup.savedViewport = clone(data.viewport || { x: 0, y: 0, scale: 1 });
+}
+
+function bumpBoardRevision(data) {
+    const activeGroup = (data.folderGroups || []).find(group => group.id === data.activeGroupId) || null;
+    const current = Number(activeGroup?.boardRevision ?? data.boardRevision);
+    const next = (Number.isInteger(current) && current >= 0 ? current : 0) + 1;
+    data.boardRevision = next;
+    if (activeGroup) activeGroup.boardRevision = next;
+    return next;
 }
 
 function getRemovedBoardPathOwner(data) {
@@ -1249,7 +1574,7 @@ function decodeImageBase64(value) {
     return Buffer.from(source.replace(/\s+/g, ''), 'base64');
 }
 
-async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '') {
+async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '', signal = null) {
     const base64Value = String(
         image?.b64_json
         || image?.base64
@@ -1295,14 +1620,15 @@ async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '') {
     }
     const imageRes = await net.fetch(imageUrl, {
         headers: requestHeaders,
-        redirect: 'follow'
+        redirect: 'follow',
+        signal
     });
     if (!imageRes.ok) throw new Error(`Image download failed: ${imageRes.status}`);
     return Buffer.from(await imageRes.arrayBuffer());
 }
 
-async function saveGeneratedImage(image, endpoint, targetDir, prompt, apiKey = '') {
-    const buffer = await resolveGeneratedImageBuffer(image, endpoint, apiKey);
+async function saveGeneratedImage(image, endpoint, targetDir, prompt, apiKey = '', signal = null) {
+    const buffer = await resolveGeneratedImageBuffer(image, endpoint, apiKey, signal);
     if (!buffer) return null;
     const metadata = await sharp(buffer).metadata().catch(() => ({}));
     const source = image?.url?.url || image?.url || image?.image_url?.url || image?.image_url || '';
@@ -1364,7 +1690,7 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
             throw new Error('图片生成任务已完成，但响应中没有图片数据');
         }
 
-        await sleep(retryDelay);
+        await sleep(retryDelay, options.signal);
         let response;
         let text;
         try {
@@ -1375,7 +1701,8 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
                     Authorization: `Bearer ${apiKey}`,
                     Accept: 'application/json'
                 },
-                redirect: 'follow'
+                redirect: 'follow',
+                signal: options.signal
             }, '查询图片任务状态'));
             if ([404, 405].includes(response.status) && taskEndpointIndex < taskEndpoints.length - 1) {
                 taskEndpointIndex += 1;
@@ -1386,11 +1713,13 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
                         Authorization: `Bearer ${apiKey}`,
                         Accept: 'application/json'
                     },
-                    redirect: 'follow'
+                    redirect: 'follow',
+                    signal: options.signal
                 }, '查询 Midjourney 图片任务状态'));
             }
             consecutiveConnectionFailures = 0;
         } catch (error) {
+            throwIfGenerationCanceled(options.signal);
             consecutiveConnectionFailures += 1;
             if (consecutiveConnectionFailures < 8) {
                 console.warn('[FlowCanvasBridge] Image task polling interrupted; retrying:', error.message);
@@ -1502,8 +1831,8 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         let compatibilityFallbackUsed = false;
         const retryDelays = [2000, 5000];
         for (; requestAttempt <= retryDelays.length; requestAttempt += 1) {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 300000);
+            throwIfGenerationCanceled(options.signal);
+            const requestAbort = createLinkedAbortController(options.signal, 300000);
             const activeRequestId = compatibilityFallbackUsed ? `${requestId}-mj-compat` : requestId;
             try {
                 res = await net.fetch(endpoint, {
@@ -1518,20 +1847,21 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                         'X-Log-Id': activeRequestId
                     },
                     body: requestPayload,
-                    signal: controller.signal,
+                    signal: requestAbort.controller.signal,
                     redirect: 'follow'
                 });
             } catch (error) {
+                throwIfGenerationCanceled(options.signal);
                 const attempts = requestAttempt + 1;
                 if (!isRetryableImageNetworkError(error) || requestAttempt >= retryDelays.length) {
                     throw remoteConnectionError('提交图片生成请求', endpoint, error, attempts);
                 }
                 const retryDelay = retryDelays[requestAttempt];
                 console.warn(`[FlowCanvasBridge] Image API connection failed; retrying in ${retryDelay}ms (${attempts}/${retryDelays.length}): ${error.message}`);
-                await sleep(retryDelay);
+                await sleep(retryDelay, options.signal);
                 continue;
             } finally {
-                clearTimeout(timeoutId);
+                requestAbort.cleanup();
             }
             if (res.ok) break;
 
@@ -1553,7 +1883,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                 retryDelays[requestAttempt]
             );
             console.warn(`[FlowCanvasBridge] Image API returned HTTP ${res.status}; retrying in ${retryDelay}ms (${requestAttempt + 1}/${retryDelays.length})`);
-            await sleep(retryDelay);
+            await sleep(retryDelay, options.signal);
         }
         if (!res.ok) {
             const text = responseErrorText || await res.text();
@@ -1593,7 +1923,8 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     location,
                     retryAfter: res.headers.get('retry-after'),
                     model,
-                    nativeMidjourney
+                    nativeMidjourney,
+                    signal: options.signal
                 });
                 image = completed.image;
                 finalPayload = completed.payload;
@@ -1615,8 +1946,9 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         const imageEntries = getGeneratedImageDataList(finalPayload);
         if (!imageEntries.length && image) imageEntries.push(image);
         const savedImages = (await Promise.all(imageEntries.map(entry =>
-            saveGeneratedImage(entry, endpoint, targetDir, prompt, apiKey)
+            saveGeneratedImage(entry, endpoint, targetDir, prompt, apiKey, options.signal)
         ))).filter(Boolean);
+        throwIfGenerationCanceled(options.signal);
         if (!savedImages.length) return { success: false, error: 'OpenAI response did not include image data' };
 
         let outputImages = savedImages;
@@ -1712,13 +2044,15 @@ function remoteConnectionError(stage, endpoint, error, attempts = 1) {
 async function fetchTextWithRetry(url, options, stage, attempts = 3) {
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+        throwIfGenerationCanceled(options?.signal);
         try {
             const response = await net.fetch(url, options);
             const text = await response.text();
             return { response, text };
         } catch (error) {
+            throwIfGenerationCanceled(options?.signal);
             lastError = error;
-            if (attempt < attempts - 1) await sleep(750 * (attempt + 1));
+            if (attempt < attempts - 1) await sleep(750 * (attempt + 1), options?.signal);
         }
     }
     throw remoteConnectionError(stage, url, lastError, attempts);
@@ -2118,37 +2452,6 @@ async function uploadTemporaryReferences(
     return urls;
 }
 
-function getVideoResultUrl(payload) {
-    const first = Array.isArray(payload?.data) ? payload.data[0] : null;
-    const candidates = [
-        typeof first === 'string' ? first : first?.url,
-        payload?.content?.video_url,
-        payload?.video_url,
-        payload?.result_url,
-        payload?.metadata?.url,
-        payload?.url
-    ];
-    return candidates.find(value => typeof value === 'string' && value.trim()) || '';
-}
-
-function getVideoTaskId(payload) {
-    const value = payload?.task_id || payload?.id || payload?.data?.task_id || payload?.data?.id;
-    return value == null ? '' : String(value).trim();
-}
-
-function getVideoPayloadError(payload = {}) {
-    const error = payload?.error;
-    const message = typeof error === 'string'
-        ? error
-        : error?.message || payload?.message || payload?.msg || '';
-    if (isFailedVideoStatus(payload?.status)) return String(message || '服务端未提供失败原因').trim();
-    const code = String(payload?.code ?? '').trim().toLowerCase();
-    if (message && code && !['0', '1', '200', 'success', 'ok'].includes(code)) {
-        return String(message).trim();
-    }
-    return '';
-}
-
 function createVideoRecoveryId() {
     return `fc_${crypto.randomUUID().replace(/-/g, '')}`;
 }
@@ -2206,8 +2509,21 @@ function videoTaskProgressStage(status) {
     return 'processing';
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms, signal = null) {
+    if (!signal) return new Promise(resolve => setTimeout(resolve, ms));
+    throwIfGenerationCanceled(signal);
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            signal.removeEventListener('abort', abort);
+            resolve();
+        }, ms);
+        const abort = () => {
+            clearTimeout(timeout);
+            signal.removeEventListener('abort', abort);
+            reject(generationCanceledError());
+        };
+        signal.addEventListener('abort', abort, { once: true });
+    });
 }
 
 async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialResponse, options = {}) {
@@ -2244,7 +2560,8 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
     const isRecoveringSubmission = initialResponse?.recovering === true;
     options.onProgress?.({ stage: isRecoveringSubmission ? 'recovering' : 'queued' });
     for (let attempt = 0; attempt < 720; attempt += 1) {
-        if (attempt > 0) await sleep(5000);
+        if (attempt > 0) await sleep(5000, options.signal);
+        throwIfGenerationCanceled(options.signal);
         let taskUrl = taskUrls[taskUrlIndex];
         let response;
         let text;
@@ -2252,7 +2569,8 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
             ({ response, text } = await fetchTextWithRetry(taskUrl, {
                 method: 'GET',
                 headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-                redirect: 'follow'
+                redirect: 'follow',
+                signal: options.signal
             }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001'));
             if ([404, 405].includes(response.status)
                 || (isMiniMaxH3Model(options.model) && response.status === 400)) {
@@ -2264,12 +2582,14 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
                     ({ response, text } = await fetchTextWithRetry(taskUrl, {
                         method: 'GET',
                         headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-                        redirect: 'follow'
+                        redirect: 'follow',
+                        signal: options.signal
                     }, '\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u72b6\u6001'));
                 }
             }
             consecutiveConnectionFailures = 0;
         } catch (error) {
+            throwIfGenerationCanceled(options.signal);
             consecutiveConnectionFailures += 1;
             if (consecutiveConnectionFailures < 24) {
                 console.warn('[FlowCanvasBridge] Video status connection interrupted; polling will continue:', error.message);
@@ -2293,7 +2613,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
             throw new Error('\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u65f6\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON');
         }
         const payloadError = getVideoPayloadError(payload);
-        if (payloadError && !getVideoTaskId(payload) && !getVideoResultUrl(payload)) {
+        if (payloadError && !getVideoResultUrl(payload)) {
             throw new Error(`查询视频任务失败（${describeRemoteEndpoint(taskUrl)}）：${payloadError}`);
         }
         const resolvedTaskId = getVideoTaskId(payload);
@@ -2304,18 +2624,19 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
             options.onTaskIdResolved?.(currentTaskId, payload);
         }
         const url = getVideoResultUrl(payload);
-        if (url && (isCompletedVideoStatus(payload?.status) || !payload?.status)) {
+        const taskStatus = getVideoTaskStatus(payload);
+        if (url && (isCompletedVideoStatus(taskStatus) || !taskStatus)) {
             options.onProgress?.({ stage: 'download', progress: 100 });
             return { payload, url, taskId: currentTaskId };
         }
-        if (isFailedVideoStatus(payload?.status)) {
-            const reason = payload?.error?.message || payload?.message || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
+        if (isFailedVideoStatus(taskStatus)) {
+            const reason = getVideoPayloadError(payload) || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
             throw new Error(`\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff1a${reason}`);
         }
         options.onProgress?.({
-            stage: videoTaskProgressStage(payload?.status),
-            progress: videoTaskProgressPercent(payload?.progress),
-            remoteStatus: String(payload?.status || '') || null
+            stage: videoTaskProgressStage(taskStatus),
+            progress: videoTaskProgressPercent(getVideoTaskProgress(payload)),
+            remoteStatus: taskStatus || null
         });
     }
     throw new Error('\u89c6\u9891\u751f\u6210\u8d85\u65f6\uff1a\u7b49\u5f85 60 \u5206\u949f\u540e\u4ecd\u672a\u5b8c\u6210');
@@ -2339,16 +2660,18 @@ function uniqueVideoName(prefix, prompt, ext = '.mp4') {
     return `${prefix}_${hash}${VIDEO_EXTENSIONS.has(ext) ? ext : '.mp4'}`;
 }
 
-async function downloadVideo(url, targetDir, prompt) {
+async function downloadVideo(url, targetDir, prompt, model = '', signal = null) {
     let response;
     let buffer;
     let lastError;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+        throwIfGenerationCanceled(signal);
         try {
-            response = await net.fetch(url, { method: 'GET', redirect: 'follow' });
+            response = await net.fetch(url, { method: 'GET', redirect: 'follow', signal });
         } catch (error) {
+            throwIfGenerationCanceled(signal);
             lastError = error;
-            if (attempt < 2) await sleep(750 * (attempt + 1));
+            if (attempt < 2) await sleep(750 * (attempt + 1), signal);
             continue;
         }
         if (!response.ok) {
@@ -2362,19 +2685,25 @@ async function downloadVideo(url, targetDir, prompt) {
             buffer = Buffer.from(await response.arrayBuffer());
             break;
         } catch (error) {
+            throwIfGenerationCanceled(signal);
             lastError = error;
-            if (attempt < 2) await sleep(750 * (attempt + 1));
+            if (attempt < 2) await sleep(750 * (attempt + 1), signal);
         }
     }
     if (!buffer) throw remoteConnectionError('\u4e0b\u8f7d\u751f\u6210\u89c6\u9891', url, lastError, 3);
     if (buffer.length === 0) throw new Error('\u670d\u52a1\u5668\u8fd4\u56de\u4e86\u7a7a\u89c6\u9891\u6587\u4ef6');
-    const filePath = path.join(targetDir, uniqueVideoName('seedance', prompt, videoExtensionFromUrl(url, response.headers.get('content-type'))));
+    const filePath = path.join(targetDir, uniqueVideoName(
+        videoModelFilePrefix(model),
+        prompt,
+        videoExtensionFromUrl(url, response.headers.get('content-type'))
+    ));
     fs.writeFileSync(filePath, buffer);
     return filePath;
 }
 
 async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
     try {
+        throwIfGenerationCanceled(options.signal);
         options.onProgress?.({ stage: 'prepare' });
         const providerConfig = options.providerConfig || {};
         const apiKey = String(providerConfig.apiKey || process.env.FLOW_CANVAS_VIDEO_API_KEY || '').trim();
@@ -2387,10 +2716,22 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         if (!endpoint) return { success: false, error: '\u672a\u914d\u7f6e\u89c6\u9891 API \u5730\u5740' };
 
         const isMiniMaxH3 = isMiniMaxH3Model(model);
+        const isSeedance25 = isSeedance25Model(model);
         const body = { model, prompt };
         const resolution = String(options.resolution || '').trim();
-        const ratio = String(options.ratio || '').trim();
+        let ratio = String(options.ratio || '').trim();
         const duration = Number(options.duration);
+        if (isSeedance25 && (!ratio || ratio === 'adaptive')) {
+            const firstReference = options.sourceReferences?.[0] || null;
+            let width = Number(firstReference?.width);
+            let height = Number(firstReference?.height);
+            if ((!(width > 0) || !(height > 0)) && firstReference?.filePath) {
+                const metadata = await sharp(String(firstReference.filePath)).rotate().metadata().catch(() => ({}));
+                width = Number(metadata.width);
+                height = Number(metadata.height);
+            }
+            ratio = resolveSeedance25AspectRatio(ratio, width, height);
+        }
         if (isMiniMaxH3) {
             Object.assign(body, buildMiniMaxH3RequestBody({
                 endpoint,
@@ -2399,6 +2740,14 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 duration: Number.isInteger(duration) ? duration : undefined,
                 aspectRatio: ratio || undefined,
                 resolution: resolution || undefined
+            }));
+        } else if (isSeedance25) {
+            Object.assign(body, buildSeedance25RequestBody({
+                endpoint,
+                model,
+                prompt,
+                duration: Number.isInteger(duration) ? duration : undefined,
+                aspectRatio: ratio || undefined
             }));
         } else {
             if (resolution) body.resolution = resolution;
@@ -2415,17 +2764,22 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         const images = await collectVideoReferenceImages(
             options.sourceReferences || [],
             options.compressReferenceImages === true,
-            9
+            isSeedance25 ? 10 : 9
         );
-        const videos = collectVideoReferenceVideos(
-            videoReferences,
-            isMiniMaxH3 ? 50 * 1024 * 1024 : 128 * 1024 * 1024
-        );
-        const audioUrls = collectVideoReferenceAudio(
-            options.audioReferences || [],
-            3,
-            isMiniMaxH3 ? 15 * 1024 * 1024 : 32 * 1024 * 1024
-        );
+        throwIfGenerationCanceled(options.signal);
+        const videos = isSeedance25
+            ? []
+            : collectVideoReferenceVideos(
+                videoReferences,
+                isMiniMaxH3 ? 50 * 1024 * 1024 : 128 * 1024 * 1024
+            );
+        const audioUrls = isSeedance25
+            ? []
+            : collectVideoReferenceAudio(
+                options.audioReferences || [],
+                3,
+                isMiniMaxH3 ? 15 * 1024 * 1024 : 32 * 1024 * 1024
+            );
         if (isMiniMaxH3) {
             const uploadProviders = temporaryUploadProviders(providerConfig);
             const imageUrls = await uploadTemporaryReferences(
@@ -2434,18 +2788,21 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 uploadProviders,
                 options.onProgress
             );
+            throwIfGenerationCanceled(options.signal);
             const referenceVideoUrls = await uploadTemporaryReferences(
                 videos,
                 '参考视频',
                 uploadProviders,
                 options.onProgress
             );
+            throwIfGenerationCanceled(options.signal);
             const referenceAudioUrls = await uploadTemporaryReferences(
                 audioUrls,
                 '参考音频',
                 uploadProviders,
                 options.onProgress
             );
+            throwIfGenerationCanceled(options.signal);
             Object.assign(body, buildMiniMaxH3RequestBody({
                 endpoint,
                 model,
@@ -2456,6 +2813,22 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 referenceImages: imageUrls,
                 referenceVideos: referenceVideoUrls,
                 referenceAudios: referenceAudioUrls
+            }));
+        } else if (isSeedance25) {
+            const imageUrls = await uploadTemporaryReferences(
+                images.map(image => image.url),
+                '参考图片',
+                temporaryUploadProviders(providerConfig),
+                options.onProgress,
+                'Seedance 2.5 任务'
+            );
+            Object.assign(body, buildSeedance25RequestBody({
+                endpoint,
+                model,
+                prompt,
+                duration: Number.isInteger(duration) ? duration : undefined,
+                aspectRatio: ratio || undefined,
+                referenceImages: imageUrls
             }));
         } else {
             if (images.length > 0) body.images = images;
@@ -2481,10 +2854,12 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                     'X-Log-Id': recoveryId
                 },
                 body: JSON.stringify(body),
-                redirect: 'follow'
+                redirect: 'follow',
+                signal: options.signal
             });
             text = await response.text();
         } catch (error) {
+            throwIfGenerationCanceled(options.signal);
             if (!isAmbiguousVideoSubmitError(error)) {
                 throw remoteConnectionError('\u63d0\u4ea4\u89c6\u9891\u751f\u6210\u4efb\u52a1', endpoint, error);
             }
@@ -2544,7 +2919,8 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         }
         const completed = await pollOpenAiVideoTask(endpoint, apiKey, taskId, initialResponse, {
             model,
-            preferVideoTaskEndpoint: isMiniMaxH3,
+            preferVideoTaskEndpoint: isMiniMaxH3 || isSeedance25,
+            signal: options.signal,
             onTaskIdResolved: (resolvedTaskId, payload) => options.onTaskSubmitted?.({
                 taskId: resolvedTaskId,
                 model,
@@ -2553,8 +2929,10 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
             }),
             onProgress: options.onProgress
         });
+        throwIfGenerationCanceled(options.signal);
         options.onProgress?.({ stage: 'download' });
-        const filePath = await downloadVideo(completed.url, targetDir, prompt);
+        const filePath = await downloadVideo(completed.url, targetDir, prompt, model, options.signal);
+        throwIfGenerationCanceled(options.signal);
         options.onProgress?.({ stage: 'completed' });
         return {
             success: true,
@@ -2703,6 +3081,39 @@ function sanitizePort(port) {
     const value = Number(port);
     if (!Number.isInteger(value) || value < 1024 || value > 65535) return DEFAULT_MCP_CONFIG.port;
     return value;
+}
+
+function sanitizeBoardToolTimeout(value) {
+    const timeout = Number(value);
+    if (!Number.isFinite(timeout) || timeout < 10) return BOARD_TOOL_REQUEST_TIMEOUT_MS;
+    return Math.min(Math.round(timeout), 120_000);
+}
+
+function createBridgeError(code, message, details = null, status = null) {
+    const error = new Error(String(message || 'Flow Canvas bridge request failed'));
+    error.code = String(code || 'BRIDGE_ERROR');
+    error.details = details == null ? null : clone(details);
+    error.status = status != null && Number.isInteger(Number(status)) ? Number(status) : bridgeErrorStatus(error.code);
+    return error;
+}
+
+function bridgeErrorStatus(code) {
+    if (code === 'REVISION_CONFLICT') return 409;
+    if (code === 'TOOL_NOT_FOUND') return 404;
+    if (code.startsWith('INVALID_') || code === 'TOO_MANY_OPERATIONS' || code === 'PROJECT_MISMATCH') return 400;
+    if (code === 'BOARD_TOOL_TIMEOUT') return 504;
+    if (['RENDERER_NOT_READY', 'RENDERER_RELOADING', 'RENDERER_UNAVAILABLE', 'TOOL_UNAVAILABLE', 'BRIDGE_STOPPED'].includes(code)) return 503;
+    return 500;
+}
+
+function serializeBridgeError(error) {
+    const code = String(error?.code || 'BRIDGE_ERROR');
+    return {
+        code,
+        message: String(error?.message || 'Flow Canvas bridge request failed'),
+        details: error?.details == null ? null : clone(error.details),
+        status: Number.isInteger(Number(error?.status)) ? Number(error.status) : bridgeErrorStatus(code)
+    };
 }
 
 function sanitizeAllowedTools(allowedTools) {
