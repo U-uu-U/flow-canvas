@@ -51,7 +51,7 @@ NODE_TYPES['number_input'] = {
     }
 };
 
-// ── 图像生成节点（Nano Banana / OpenAI 兼容） ─────────────
+// ── 图像生成节点（服务器 art 白名单） ─────────────
 NODE_TYPES['image_gen'] = {
     type: 'image_gen',
     title: '图像生成',
@@ -69,43 +69,17 @@ NODE_TYPES['image_gen'] = {
         { key: 'width', label: '宽度', type: 'number', default: 1024 },
         { key: 'height', label: '高度', type: 'number', default: 1024 },
     ],
-    async execute(inputs, config, ctx) {
+    async execute(inputs, config) {
         const prompt = inputs.prompt || '';
         if (!prompt) throw new Error('请连接 Prompt 输入');
 
-        // 从 agent-sidebar 的 provider 配置中获取 API 信息
-        const provider = ctx.getActiveProvider();
-        if (!provider || !provider.apiKey) {
-            throw new Error('请先在 AI 助手设置中配置 API');
-        }
-
-        const requestBody = {
-            model: provider.model,
-            messages: [
-                {
-                    role: 'user',
-                    content: prompt + (config.negativePrompt ? `\n\nNegative: ${config.negativePrompt}` : '')
-                }
-            ],
-            // 图像生成参数（OpenAI 兼容格式，部分平台支持）
-            max_tokens: 4096,
-        };
-
-        const response = await fetch(provider.endpoint, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${provider.apiKey}`
-            },
-            body: JSON.stringify(requestBody)
+        const gateway = window.flowCanvasGateway;
+        if (!gateway) throw new Error('AI 网关未初始化');
+        const data = await gateway.imageGeneration({
+            prompt: prompt + (config.negativePrompt ? `\n\nNegative: ${config.negativePrompt}` : ''),
+            size: `${Number(config.width) || 1024}x${Number(config.height) || 1024}`,
+            response_format: 'url'
         });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`API 错误 ${response.status}: ${errText.slice(0, 200)}`);
-        }
-
-        const data = await response.json();
 
         // 尝试从返回中提取图片（支持多种格式）
         let imageUrl = null;

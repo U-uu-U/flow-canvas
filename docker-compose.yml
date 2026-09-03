@@ -1,0 +1,13 @@
+services:
+  flowcanvas-gateway:
+    build: .
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    volumes:
+      - flowcanvas-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  flowcanvas-data:

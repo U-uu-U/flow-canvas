@@ -2,6 +2,7 @@ import { CanvasManager } from './canvas.js';
 import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
+import { GatewayClient } from './gateway.js';
 
 let storeData = null;
 let canvasManager = null;
@@ -11,9 +12,12 @@ let agentSidebar = null;
 
 async function bootstrap() {
     try {
+        // 旧版本可能把 API Key 放在 localStorage；只清理该配置，不上传迁移。
+        localStorage.removeItem('flow-canvas-agent-providers');
+        window.flowCanvasGateway = new GatewayClient();
+
         // 1. 加载数据
         storeData = await window.flowCanvas.store.load();
-        console.log('[Main] 数据加载完成', storeData);
 
         // 2. 初始化核心模块
         sidebarManager = new SidebarManager(storeData);
@@ -44,7 +48,6 @@ async function bootstrap() {
 
         // ── 文件夹组切换 ──
         sidebarManager.on('switchGroup', async (data) => {
-            console.log('[Main] 切换文件夹组, folders:', data.folders.length, ', items:', data.items.length);
 
             // 1. 清空当前画布
             canvasManager.clearAll();
@@ -88,7 +91,6 @@ async function bootstrap() {
         // 统一更新文件计数的辅助函数
         function syncStats() {
             const count = canvasManager.items.size;
-            console.log('[Main] syncStats: canvasManager.items.size =', count, ', storeData.items.length =', storeData.items.length);
             sidebarManager.updateStats(count);
         }
 
@@ -114,7 +116,6 @@ async function bootstrap() {
         // 监听后端文件变更
         window.flowCanvas.onFileChange((msg) => {
             const { event, filePath } = msg;
-            console.log('[Main] 收到文件变更:', event, filePath);
 
             if (event === 'add') {
                 const item = canvasManager.addFile(filePath);
@@ -168,7 +169,6 @@ async function bootstrap() {
 
         // 监听主进程拦截到的拖拽图片（will-navigate 拦截方式）
         window.flowCanvas.onExternalImageDropped((filePath) => {
-            console.log('[Main] 收到主进程拖拽图片:', filePath);
             canvasManager._addCapturedFile(filePath);
         });
 
@@ -211,5 +211,4 @@ function updateBodyState() {
     }
 }
 
-// 启动
 bootstrap();

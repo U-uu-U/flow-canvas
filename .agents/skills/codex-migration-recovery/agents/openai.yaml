@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codex Migration Recovery"
+  short_description: "Recover hidden local Codex threads"
+  default_prompt: "Use $codex-migration-recovery to find and export old Codex thread context."
+
+policy:
+  allow_implicit_invocation: true

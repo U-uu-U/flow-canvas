@@ -1,0 +1,14 @@
+module.exports = {
+    // 缩略图配置
+    THUMBNAIL_MAX_DIMENSION: 200,
+    THUMBNAIL_CACHE_MAX_MB: 50,
+
+    // API Key 限制
+    API_KEY_MAX_LENGTH: 4096,
+
+    // 文件监听配置
+    WATCHER_MAX_DEPTH: 2,
+    WATCHER_SCAN_MAX_DEPTH: 5,
+    WATCHER_STABILITY_THRESHOLD_MS: 2000,
+    WATCHER_POLL_INTERVAL_MS: 500
+};

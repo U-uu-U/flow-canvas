@@ -3,6 +3,12 @@
 // ============================================================
 
 import Konva from 'konva';
+import { NODE_TYPES } from './node-types.js';
+import { connectionsWithout } from './graph-model.js';
+import { GraphLayer } from './graph-layer.js';
+import { GraphRunner, STATUS } from './graph-runner.js';
+import { NodeOverlay, estimateCardHeight, nodeCardWidth } from './node-overlay.js';
+import { UndoStack } from './undo-stack.js';
 
 const IMAGE_DEFAULT_WIDTH = 300;
 const DOC_DEFAULT_SIZE = 150;
@@ -15,6 +21,7 @@ export class CanvasManager {
         this.items = new Map();
         this.selectedItems = new Set();
         this.currentFilter = 'all';
+        this.connections = storeData.connections || [];
 
         const container = document.getElementById(containerId);
         this.stage = new Konva.Stage({
@@ -50,6 +57,31 @@ export class CanvasManager {
         this.gifOverlay.style.overflow = 'hidden';
         container.appendChild(this.gifOverlay);
 
+        // ── 节点图：DOM 卡片层 + Konva 端口连线层 + 执行器 + 撤销栈 ──
+        this.undoStack = new UndoStack();
+
+        this.nodeOverlay = new NodeOverlay(container, {
+            onConfigChange: (id, key, value) => this._onNodeConfigChange(id, key, value),
+            onConfigCommit: () => this.emit('change'),
+            onRun: (id) => this.runNode(id),
+            getResult: (id) => this.runner.getResult(id)
+        });
+
+        this.graphLayer = new GraphLayer(this.stage, {
+            getItems: () => this._itemDataMap(),
+            getConnections: () => this.connections,
+            getBounds: (id) => this._nodeBounds(id),
+            onConnect: (conn, replaces) => this._addConnection(conn, replaces),
+            onDisconnect: (connId) => this._removeConnection(connId),
+            onNotice: (msg) => this.emit('notice', msg)
+        });
+
+        this.runner = new GraphRunner({
+            getItems: () => this._itemDataMap(),
+            getConnections: () => this.connections,
+            onStatus: (id) => this.nodeOverlay.updateStatus(id)
+        });
+
         if (storeData.viewport) {
             this.stage.position({ x: storeData.viewport.x, y: storeData.viewport.y });
             this.stage.scale({ x: storeData.viewport.scale, y: storeData.viewport.scale });
@@ -72,6 +104,7 @@ export class CanvasManager {
                 requestAnimationFrame(() => {
                     this._rafPending = false;
                     this.syncGifs();
+                    this.syncNodeCards();
                     this.syncBackground();
                     this._scheduleCullCheck();
                 });
@@ -89,7 +122,13 @@ export class CanvasManager {
         });
         ro.observe(container);
 
+        const abortBtn = document.getElementById('canvasAbortBtn');
+        if (abortBtn) {
+            abortBtn.addEventListener('click', () => this.abortRun());
+        }
+
         document.addEventListener('context-remove', (e) => {
+            this._pushUndo();
             if (e.detail.itemIds) {
                 e.detail.itemIds.forEach(id => this.removeItemById(id));
             } else if (e.detail.filePaths) {
@@ -118,6 +157,186 @@ export class CanvasManager {
                 }
             }
         });
+    }
+
+    // ── 节点图 ──────────────────────────────────────────────
+
+    /** op 节点的 DOM 卡片跟随画布。与 syncGifs() 同一套坐标算法。 */
+    syncNodeCards() {
+        const positions = new Map();
+        this.items.forEach(item => {
+            if (item.data.kind !== 'op') return;
+            positions.set(item.data.id, {
+                x: item.group.x(),
+                y: item.group.y(),
+                visible: item.group.isVisible()
+            });
+        });
+        this.nodeOverlay.sync(positions, this.stage.scaleX(), this.stage.position());
+    }
+
+    /** 端口/连线层需要的纯数据视图。 */
+    _itemDataMap() {
+        const map = new Map();
+        this.items.forEach((item, id) => map.set(id, item.data));
+        return map;
+    }
+
+    /** 节点在画布坐标下的矩形，端口定位用。 */
+    _nodeBounds(nodeId) {
+        const item = this.items.get(nodeId);
+        if (!item || !item.group.isVisible()) return null;
+
+        const data = item.data;
+        if (data.kind === 'op') {
+            return {
+                x: item.group.x(), y: item.group.y(),
+                width: nodeCardWidth(data.nodeType),
+                height: estimateCardHeight(data.nodeType)
+            };
+        }
+
+        const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
+        return {
+            x: item.group.x(), y: item.group.y(),
+            width: node?.width() || data.width || DOC_DEFAULT_SIZE,
+            height: node?.height() || data.height || DOC_DEFAULT_SIZE
+        };
+    }
+
+    _onNodeConfigChange(nodeId, key, value) {
+        const item = this.items.get(nodeId);
+        if (!item) return;
+        item.data.config = item.data.config || {};
+        item.data.config[key] = value;
+    }
+
+    /** 在视口中心插入一个功能节点。 */
+    addOpNode(nodeType) {
+        const def = NODE_TYPES[nodeType];
+        if (!def) {
+            this.emit('notice', `未知节点类型：${nodeType}`);
+            return null;
+        }
+
+        this._pushUndo();
+
+        const container = this.stage.container();
+        const scale = this.stage.scaleX();
+        const pos = this.stage.position();
+        const centerX = (container.offsetWidth / 2 - pos.x) / scale;
+        const centerY = (container.offsetHeight / 2 - pos.y) / scale;
+
+        const config = {};
+        (def.config || []).forEach(field => {
+            if (field.default !== undefined) config[field.key] = field.default;
+        });
+
+        const data = {
+            id: `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+            kind: 'op',
+            nodeType,
+            config,
+            x: Math.round(centerX - nodeCardWidth(nodeType) / 2),
+            y: Math.round(centerY - estimateCardHeight(nodeType) / 2),
+            width: nodeCardWidth(nodeType),
+            height: estimateCardHeight(nodeType),
+            addedAt: Date.now()
+        };
+
+        this._createCard(data);
+        this.storeData.items = this.storeData.items || [];
+        this.storeData.items.push(data);
+
+        this.graphLayer.rebuild();
+        this.syncNodeCards();
+        this.selectItem(data.id, false);
+        this.emit('change');
+        return data;
+    }
+
+    _addConnection(conn, replaces) {
+        this._pushUndo();
+        if (replaces) {
+            this.connections = this.connections.filter(c => c.id !== replaces.id);
+        }
+        this.connections.push({
+            id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+            from: conn.from,
+            to: conn.to
+        });
+        this.graphLayer.rebuild();
+        this.emit('change');
+    }
+
+    _removeConnection(connectionId) {
+        const before = this.connections.length;
+        this._pushUndo();
+        this.connections = this.connections.filter(c => c.id !== connectionId);
+        if (this.connections.length === before) {
+            this.undoStack.past.pop(); // 没删掉任何东西，撤销点无意义
+            return;
+        }
+        if (this.graphLayer.getSelectedEdgeId() === connectionId) {
+            this.graphLayer.selectedEdgeId = null;
+        }
+        this.graphLayer.rebuild();
+        this.emit('change');
+    }
+
+    async runNode(nodeId) {
+        this._setRunningState(true);
+        const result = await this.runner.runFrom(nodeId);
+        this._setRunningState(false);
+        if (!result.ok && !result.aborted) this.emit('notice', result.reason);
+        // 结果可能要渲染到下游预览卡片
+        this.nodeOverlay.cards.forEach((_, id) => this.nodeOverlay.updateStatus(id));
+        return result;
+    }
+
+    _setRunningState(running) {
+        const btn = document.getElementById('canvasAbortBtn');
+        if (!btn) return;
+        btn.style.display = running ? '' : 'none';
+    }
+
+    abortRun() {
+        this.runner.abort();
+    }
+
+    // ── 撤销 / 重做 ─────────────────────────────────────────
+
+    _pushUndo() {
+        this.undoStack.push(this._currentItemDataList(), this.connections);
+    }
+
+    _currentItemDataList() {
+        return [...this.items.values()].map(item => item.data);
+    }
+
+    undo() {
+        const snap = this.undoStack.undo(this._currentItemDataList(), this.connections);
+        if (!snap) return false;
+        this._restoreSnapshot(snap);
+        return true;
+    }
+
+    redo() {
+        const snap = this.undoStack.redo(this._currentItemDataList(), this.connections);
+        if (!snap) return false;
+        this._restoreSnapshot(snap);
+        return true;
+    }
+
+    /** 全量重建。数据量是 KB 级，不值得做增量 diff。 */
+    _restoreSnapshot(snap) {
+        this.clearAll({ keepUndo: true });
+        this.storeData.items = snap.items;
+        this.connections = snap.connections;
+        this.renderInitialItems();
+        this.graphLayer.rebuild();
+        this.syncNodeCards();
+        this.emit('change');
     }
 
     syncBackground() {
@@ -423,6 +642,10 @@ export class CanvasManager {
                         item.data.y = item.group.y();
                     }
                 });
+
+                // 端口/连线/DOM 卡片跟随
+                this.syncNodeCards();
+                this.graphLayer.syncGeometry();
             }
         });
 
@@ -445,6 +668,9 @@ export class CanvasManager {
                     this.selectItem(group.attrs.id, true);
                 }
 
+                // 拖动前存一个撤销点（位置变化可撤销）
+                this._pushUndo();
+
                 // ── Ctrl+拖拽：在原位留下副本，拖走原件 ──
                 if (e.evt && e.evt.ctrlKey) {
                     const clonedDataList = [];
@@ -461,6 +687,13 @@ export class CanvasManager {
                             height: item.data.height,
                             addedAt: Date.now()
                         };
+                        // 功能节点要带上类型与参数，否则克隆出一张空白媒体卡
+                        if (item.data.kind === 'op') {
+                            cloneData.kind = 'op';
+                            cloneData.nodeType = item.data.nodeType;
+                            cloneData.config = JSON.parse(JSON.stringify(item.data.config || {}));
+                            cloneData.status = 'idle';
+                        }
                         this._createCard(cloneData);
                         clonedDataList.push(cloneData);
                     });
@@ -483,7 +716,25 @@ export class CanvasManager {
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
+            if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                if (e.shiftKey) this.redo();
+                else this.undo();
+                return;
+            }
+            if ((e.key === 'y' || e.key === 'Y') && e.ctrlKey) {
+                e.preventDefault();
+                this.redo();
+                return;
+            }
+
             if (e.key === 'Delete' || e.key === 'Backspace') {
+                // 选中的是连线时优先删连线
+                const edgeId = this.graphLayer.getSelectedEdgeId();
+                if (edgeId) {
+                    this._removeConnection(edgeId);
+                    return;
+                }
                 if (this.selectedItems.size > 0) {
                     const idsToRemove = [...this.selectedItems];
                     const filePaths = idsToRemove.map(id => this.items.get(id)?.data.filePath).filter(Boolean);
@@ -495,6 +746,8 @@ export class CanvasManager {
                     }
                 }
             } else if (e.key === 'Escape') {
+                this.graphLayer.cancelDrag();
+                this.graphLayer.clearEdgeSelection();
                 this.clearSelection();
                 this.contextMenu.hide();
             } else if (e.key === 'a' && e.ctrlKey) {
@@ -516,7 +769,6 @@ export class CanvasManager {
         window.addEventListener('drop', async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            console.log('[Canvas] 触发全局 drop 事件, types:', Array.from(e.dataTransfer.types));
 
             // 1. 尝试获取拖拽的图片 URL
             const uriList = e.dataTransfer.getData('text/uri-list') || '';
@@ -542,7 +794,6 @@ export class CanvasManager {
             // 3. 尝试获取拖拽的本地文件
             const files = e.dataTransfer.files;
 
-            console.log('[Canvas] drop 数据: url=', url, '解析出的图片URL=', parsedImgUrl, '本地文件数=', files?.length);
 
             let imageUrl = null;
 
@@ -553,7 +804,6 @@ export class CanvasManager {
             }
 
             if (imageUrl) {
-                console.log('[Canvas] 拖拽图片 URL:', imageUrl);
                 const targetDir = this.storeData.defaultSaveFolder || (this.storeData.watchFolders && this.storeData.watchFolders[0]);
                 const result = await window.flowCanvas.image.downloadFromUrl(imageUrl, targetDir);
                 if (result.success) {
@@ -687,7 +937,6 @@ export class CanvasManager {
     }
 
     async _handlePaste() {
-        console.log('[Canvas] 尝试粘贴图片...');
         const targetDir = this.storeData.defaultSaveFolder || (this.storeData.watchFolders && this.storeData.watchFolders[0]);
         const result = await window.flowCanvas.image.pasteFromClipboard(targetDir);
         if (result && result.success) {
@@ -750,6 +999,13 @@ export class CanvasManager {
     _updateSelectionVisuals() {
         this.items.forEach(item => {
             const isSelected = this.selectedItems.has(item.data.id);
+
+            // op 节点的 displayNode 是透明命中区，选中态交给 DOM 卡片的 CSS
+            if (item.data.kind === 'op') {
+                this.nodeOverlay.setSelected(item.data.id, isSelected);
+                return;
+            }
+
             const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg');
             if (node) {
                 if (isSelected) {
@@ -764,8 +1020,7 @@ export class CanvasManager {
     }
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
-    clearAll() {
-        console.log('[Canvas] clearAll: 清除', this.items.size, '个卡片');
+    clearAll(options = {}) {
         this.items.forEach(item => {
             if (item.group) item.group.destroy();
             if (item.gifDomElement) item.gifDomElement.remove();
@@ -780,6 +1035,12 @@ export class CanvasManager {
         });
         this.items.clear();
         this.selectedItems.clear();
+        this.nodeOverlay.clear();
+        if (!options.keepUndo) {
+            this.connections = [];
+            this.undoStack.clear();
+        }
+        this.graphLayer.rebuild();
         this.layer.batchDraw();
     }
 
@@ -790,15 +1051,23 @@ export class CanvasManager {
             this.stage.scale({ x: viewport.scale || 1, y: viewport.scale || 1 });
             this.stage.batchDraw();
             this.syncGifs();
+            this.syncNodeCards();
             this.syncBackground();
         }
     }
 
     renderInitialItems() {
         const items = this.storeData.items || [];
-        console.log('[Canvas] renderInitialItems: storeData.items 数量 =', items.length);
+        // 运行态不持久化，加载后一律回到 idle
+        items.forEach(item => {
+            if (item.kind === 'op') {
+                item.runStatus = STATUS.IDLE;
+                item.runError = '';
+            }
+        });
         items.forEach(item => this._createCard(item));
-        console.log('[Canvas] renderInitialItems 完成: this.items.size =', this.items.size);
+        this.graphLayer.rebuild();
+        this.syncNodeCards();
         // 首次渲染后立即执行视口裁剪，加载可见内容
         requestAnimationFrame(() => this._cullCheck());
     }
@@ -813,6 +1082,8 @@ export class CanvasManager {
     }
 
     async _createCard(data) {
+        if (data.kind === 'op') return this._createOpCard(data);
+
         const fileType = this._getFileType(data.filePath);
 
         const group = new Konva.Group({
@@ -885,6 +1156,63 @@ export class CanvasManager {
         return group;
     }
 
+    /**
+     * 功能节点：Konva 只放一个透明命中矩形，视觉由 DOM 卡片承担。
+     * 矩形取名 displayNode，这样框选 / fitAll / _shelfLayout / dragend
+     * 里既有的宽高读取逻辑都不用改。
+     */
+    _createOpCard(data) {
+        const width = nodeCardWidth(data.nodeType);
+        const height = estimateCardHeight(data.nodeType);
+        data.width = width;
+        data.height = height;
+
+        const group = new Konva.Group({
+            x: data.x || 0, y: data.y || 0,
+            draggable: true,
+            id: data.id,
+            name: 'nodeGroup'
+        });
+
+        const hit = new Konva.Rect({
+            name: 'displayNode',
+            width, height,
+            fill: 'rgba(0,0,0,0.001)', // 近乎透明但仍参与命中检测
+            cornerRadius: 10
+        });
+        group.add(hit);
+
+        group.on('mouseenter', () => document.body.style.cursor = 'pointer');
+        group.on('mouseleave', () => document.body.style.cursor = 'default');
+
+        group.on('click', (e) => {
+            if (e.evt.button === 2) return;
+            if (e.evt.ctrlKey || e.evt.shiftKey) {
+                if (this.selectedItems.has(data.id)) {
+                    this.selectedItems.delete(data.id);
+                    this._updateSelectionVisuals();
+                } else {
+                    this.selectItem(data.id, true);
+                }
+            } else {
+                this.selectItem(data.id, false);
+            }
+        });
+
+        group.on('contextmenu', (e) => {
+            e.cancelBubble = true;
+            e.evt.preventDefault();
+            if (!this.selectedItems.has(data.id)) this.selectItem(data.id, false);
+            // op 节点没有文件，不弹「复制文件 / 在资源管理器打开」那套菜单
+        });
+
+        this.layer.add(group);
+        this.items.set(data.id, { group, data, loaded: true, isThumbnail: false, isOp: true });
+        this.nodeOverlay.createCard(data);
+
+        return group;
+    }
+
     // ══════════════════════════════════════════════════════════
     // ── 视口裁剪 (Viewport Culling) + LOD 缩略图 ──────────
     // ══════════════════════════════════════════════════════════
@@ -942,6 +1270,8 @@ export class CanvasManager {
         this.items.forEach(item => {
             // 被隐藏的节点（筛选器隐藏）跳过
             if (!item.group.isVisible()) return;
+            // op 节点没有文件内容，不参与 LOD / 纹理卸载
+            if (item.data.kind === 'op') return;
 
             const inView = this._isInViewport(item, vp);
 
@@ -1080,7 +1410,7 @@ export class CanvasManager {
             };
             img.src = dataUrl;
         } catch (err) {
-            console.warn('[Canvas] _loadLowRes 失败:', item.data.filePath, err);
+            console.warn('[Canvas] 低分辨率缩略图加载失败:', err.message);
         }
     }
 
@@ -1136,7 +1466,8 @@ export class CanvasManager {
                     gifImg.style.display = 'none'; // 默认隐藏，鼠标移入才显示
 
                     this.gifOverlay.appendChild(gifImg);
-                    const itemEntry = this.items.get(filePath);
+                    // items 以 data.id 为键，早先这里传 filePath 导致引用一直挂不上
+                    const itemEntry = this.items.get(item.data.id);
                     if (itemEntry) {
                         itemEntry.gifDomElement = gifImg;
                         group.on('dragmove', () => this.syncGifs());
@@ -1158,15 +1489,15 @@ export class CanvasManager {
             };
             imgObj.onerror = () => {
                 if (retryCount < MAX_RETRIES) {
-                    console.warn(`[Canvas] 图片加载失败，${RETRY_DELAY}ms 后重试 (${retryCount + 1}/${MAX_RETRIES}):`, filePath);
+                    console.warn(`[Canvas] 图片加载失败，${RETRY_DELAY}ms 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
                     setTimeout(() => this._loadThumbnail(group, data, retryCount + 1), RETRY_DELAY);
                 } else {
-                    console.error('[Canvas] 图片加载最终失败（已重试' + MAX_RETRIES + '次）:', filePath);
+                    console.error('[Canvas] 图片加载最终失败（已重试' + MAX_RETRIES + '次）');
                 }
             };
             imgObj.src = imgUrl;
         } catch (err) {
-            console.error('[Canvas] 图片异常:', filePath, err);
+            console.error('[Canvas] 图片加载异常:', err.message);
         }
     }
 
@@ -1305,7 +1636,7 @@ export class CanvasManager {
         });
 
         video.addEventListener('error', () => {
-            console.error('[Canvas] 视频加载失败:', data.filePath);
+            console.error('[Canvas] 视频加载失败');
         });
     }
 
@@ -1360,6 +1691,11 @@ export class CanvasManager {
             }
             item.group.destroy();
             this.items.delete(id);
+            // 连到这个节点的边一并清除（素材节点也可能有输出连线）
+            this.connections = connectionsWithout(this.connections, id);
+            this.nodeOverlay.remove(id);
+            this.runner.clearResult(id);
+            this.graphLayer.rebuild();
         }
     }
 
@@ -1374,6 +1710,11 @@ export class CanvasManager {
         this.currentFilter = types; // 现在是数组
         this.items.forEach((item, id) => {
             const filePath = item.data.filePath;
+            // 功能节点不参与文件类型筛选，始终可见
+            if (item.data.kind === 'op') {
+                item.group.show();
+                return;
+            }
             if (types.includes('all') || types.length === 0 || types.includes(this._getFileType(filePath))) {
                 item.group.show();
                 if (item.gifDomElement) item.gifDomElement.style.display = '';
@@ -1384,6 +1725,8 @@ export class CanvasManager {
         });
         this.layer.batchDraw();
         this.syncGifs();
+        this.syncNodeCards();
+        this.graphLayer.syncGeometry();
     }
 
     /**

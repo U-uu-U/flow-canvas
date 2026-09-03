@@ -4,6 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: local-res: http: https:; media-src 'self' blob: local-res: http: https:; connect-src 'self' http: https: ws: wss:; object-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Flow Canvas</title>
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -137,6 +139,10 @@
         <main class="canvas-area">
             <div class="canvas-grid-overlay" id="canvasGrid"></div>
             <div id="canvasContainer"></div>
+            <!-- 生成中止按钮（运行时显示） -->
+            <button class="canvas-abort-btn" id="canvasAbortBtn" style="display:none" title="中断当前生成">
+                <span class="abort-indicator"></span>中断
+            </button>
             <!-- 画布空状态 -->
             <div class="canvas-empty" id="canvasEmpty">
                 <div class="canvas-empty-icon">◆</div>
@@ -181,9 +187,7 @@
 
                 <!-- 模型选择器（头部下方） -->
                 <div class="agent-model-bar">
-                    <select class="agent-model-select" id="agentModelSelect">
-                        <option value="">-- 请先添加 API --</option>
-                    </select>
+                    <span class="agent-model-select agent-model-label" id="agentModelSelect">服务器 AI</span>
                     <button class="agent-clear-btn" id="agentClearBtn" title="清空对话">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                             stroke-width="2">
@@ -194,70 +198,24 @@
                     </button>
                 </div>
 
-                <!-- 设置面板（默认隐藏） -->
+                <!-- 服务路由设置面板（默认隐藏） -->
                 <div class="agent-settings" id="agentSettings">
-                    <!-- 已保存的 API 列表 -->
-                    <div class="agent-provider-list" id="agentProviderList">
-                        <!-- 动态渲染 -->
+                    <div class="agent-setting-group">
+                        <label class="agent-setting-label" for="agentBaseUrl">模型 Base URL</label>
+                        <input class="agent-setting-input" id="agentBaseUrl" type="url" autocomplete="off"
+                            spellcheck="false" placeholder="https://example.com/v1">
                     </div>
-
-                    <!-- 添加 API 按钮 -->
-                    <button class="agent-add-api-btn" id="agentAddApiBtn">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                            stroke-width="2">
-                            <line x1="12" y1="5" x2="12" y2="19"></line>
-                            <line x1="5" y1="12" x2="19" y2="12"></line>
-                        </svg>
-                        添加 API
-                    </button>
-
-                    <!-- 添加/编辑 API 表单（默认隐藏） -->
-                    <div class="agent-api-form" id="agentApiForm" style="display:none;">
-                        <div class="agent-api-form-header">
-                            <span id="agentApiFormTitle">添加新 API</span>
-                            <button class="agent-api-form-close" id="agentApiFormClose">✕</button>
-                        </div>
-
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">快速模板</label>
-                            <div class="agent-template-chips">
-                                <button class="agent-template-chip" data-template="openai">OpenAI</button>
-                                <button class="agent-template-chip" data-template="gemini">Google Gemini</button>
-                                <button class="agent-template-chip" data-template="claude">Claude</button>
-                                <button class="agent-template-chip" data-template="deepseek">DeepSeek</button>
-                                <button class="agent-template-chip" data-template="custom">自定义</button>
-                            </div>
-                        </div>
-
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">名称</label>
-                            <input type="text" class="agent-setting-input" id="agentFormName" placeholder="例：GPT-4o">
-                        </div>
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">API 格式</label>
-                            <select class="agent-setting-input" id="agentFormType">
-                                <option value="openai">OpenAI 兼容</option>
-                                <option value="google">Google Gemini</option>
-                            </select>
-                        </div>
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">API 端点</label>
-                            <input type="text" class="agent-setting-input" id="agentFormEndpoint"
-                                placeholder="https://api.openai.com/v1/chat/completions">
-                        </div>
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">API Key</label>
-                            <input type="password" class="agent-setting-input" id="agentFormKey" placeholder="sk-...">
-                        </div>
-                        <div class="agent-setting-group">
-                            <label class="agent-setting-label">模型</label>
-                            <input type="text" class="agent-setting-input" id="agentFormModel" placeholder="gpt-4o">
-                        </div>
-
-                        <button class="agent-save-settings-btn" id="agentFormSaveBtn">保存</button>
+                    <div class="agent-service-status" id="agentServiceStatus" data-route="free">免费服务</div>
+                    <div class="agent-setting-group" style="margin-top: 12px;">
+                        <label class="agent-setting-label" for="agentRavenhashKey">RavenHash API Key</label>
+                        <input class="agent-setting-input" id="agentRavenhashKey" type="password" autocomplete="off"
+                            spellcheck="false" placeholder="输入中转站 API Key">
                     </div>
-
-                    <!-- 系统提示词（独立区域） -->
+                    <div class="agent-key-actions">
+                        <button class="agent-save-settings-btn" id="agentKeySaveBtn" type="button">保存</button>
+                        <button class="agent-key-clear-btn" id="agentKeyClearBtn" type="button">清除</button>
+                    </div>
+                    <div class="agent-key-status" id="agentKeyStatus" data-state="empty">尚未配置 API Key</div>
                     <div class="agent-setting-group" style="margin-top: 12px;">
                         <label class="agent-setting-label">系统提示词（全局）</label>
                         <textarea class="agent-setting-input agent-setting-textarea" id="agentSystemPrompt"

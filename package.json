@@ -6,18 +6,67 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5180 && electron .\"",
-        "electron:build": "vite build && electron-builder"
+        "gateway:config": "node scripts/write-gateway-config.js",
+        "electron:dev": "npm run gateway:config && concurrently \"vite\" \"wait-on http://localhost:5180 && electron .\"",
+        "electron:build": "npm run gateway:config && vite build && electron-builder && node scripts/verify-electron-package.js",
+        "test": "node --test server/*.test.js electron-main/*.test.js shared/*.test.js src/*.test.js",
+        "server:start": "node server/index.js",
+        "server:dev": "node --watch server/index.js",
+        "server:test": "node --test server/*.test.js"
+    },
+    "build": {
+        "appId": "com.flowcanvas.app",
+        "productName": "Flow Canvas",
+        "copyright": "Copyright © 2024",
+        "directories": {
+            "output": "release"
+        },
+        "files": [
+            "dist/index.html",
+            "dist/assets/**/*",
+            "electron-main/*.js",
+            "!electron-main/*.test.js",
+            "electron-main/gateway-config.json",
+            "shared/logger.js",
+            "shared/url-utils.js",
+            "package.json"
+        ],
+        "mac": {
+            "category": "public.app-category.productivity",
+            "target": [
+                { "target": "dmg", "arch": ["universal"] }
+            ],
+            "identity": null
+        },
+        "dmg": {
+            "title": "Flow Canvas",
+            "window": { "width": 540, "height": 380 }
+        },
+        "win": {
+            "target": [
+                { "target": "nsis", "arch": ["x64"] }
+            ]
+        },
+        "nsis": {
+            "oneClick": true,
+            "perMachine": false,
+            "deleteAppDataOnUninstall": false
+        }
     },
     "dependencies": {
         "chokidar": "^3.6.0",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
         "gsap": "^3.15.0",
         "konva": "^9.3.6",
+        "multer": "^2.2.0",
         "sharp": "^0.33.2"
     },
     "devDependencies": {
         "concurrently": "^8.2.2",
         "electron": "^28.3.3",
+        "electron-builder": "^24.13.3",
         "vite": "^5.4.0",
         "wait-on": "^7.2.0"
     }

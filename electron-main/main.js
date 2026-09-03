@@ -2,11 +2,18 @@
 // Flow Canvas — Electron Main Process
 // ============================================================
 
-const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, nativeImage, dialog, protocol, net, safeStorage, session } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const Store = require('./store');
 const Watcher = require('./watcher');
 const Thumbnailer = require('./thumbnailer');
+const { prepareGatewayHeaders } = require('./gateway-auth');
+const { gatewayBaseUrl: packagedGatewayUrl } = require('./gateway-config.json');
+const createLogger = require('../shared/logger');
+const { API_KEY_MAX_LENGTH } = require('./constants');
+
+const logger = createLogger('Main');
 
 let mainWindow = null;
 let store = null;
@@ -14,6 +21,51 @@ let watcher = null;
 let thumbnailer = null;
 
 const isDev = !app.isPackaged;
+const DEV_SERVER_URL = 'http://localhost:5180';
+const getRavenhashKeyPath = () => path.join(app.getPath('userData'), 'ravenhash-api-key.bin');
+const FLOWCANVAS_GATEWAY_URL = String(
+    process.env.FLOWCANVAS_GATEWAY_URL
+    || packagedGatewayUrl
+    || 'http://localhost:8787'
+).replace(/\/+$/, '');
+
+function isTrustedRenderer(event) {
+    return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents);
+}
+
+function readRavenhashKey() {
+    try {
+        const keyPath = getRavenhashKeyPath();
+        if (!fs.existsSync(keyPath) || !safeStorage.isEncryptionAvailable()) return '';
+        return safeStorage.decryptString(fs.readFileSync(keyPath));
+    } catch (_) {
+        return '';
+    }
+}
+
+function configureGatewayAuthorization() {
+    let gatewayUrl;
+    try {
+        gatewayUrl = new URL(FLOWCANVAS_GATEWAY_URL);
+    } catch (_) {
+        throw new Error('FLOWCANVAS_GATEWAY_URL 配置无效');
+    }
+    if (!['http:', 'https:'].includes(gatewayUrl.protocol)
+        || gatewayUrl.username || gatewayUrl.password || gatewayUrl.search || gatewayUrl.hash) {
+        throw new Error('FLOWCANVAS_GATEWAY_URL 必须是无内嵌凭证、查询参数或锚点的 HTTP(S) URL');
+    }
+    const filter = { urls: [`${gatewayUrl.protocol}//${gatewayUrl.host}/*`] };
+
+    session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
+        const headers = prepareGatewayHeaders({
+            requestUrl: details.url,
+            requestHeaders: details.requestHeaders,
+            gatewayBaseUrl: FLOWCANVAS_GATEWAY_URL,
+            readApiKey: readRavenhashKey
+        });
+        callback({ requestHeaders: headers });
+    });
+}
 
 // 注册私有协议权限
 protocol.registerSchemesAsPrivileged([
@@ -28,13 +80,15 @@ function createWindow() {
         minWidth: 800,
         minHeight: 600,
         backgroundColor: '#0f0f14',
-        frame: false,
-        titleBarStyle: 'hidden',
-        titleBarOverlay: {
+        // Mac 上 frame:false 会吃掉红绿灯按钮；用 hiddenInset 保留交通灯并留出空间
+        frame: process.platform !== 'darwin',
+        titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+        trafficLightPosition: process.platform === 'darwin' ? { x: 12, y: 12 } : undefined,
+        titleBarOverlay: process.platform !== 'darwin' ? {
             color: '#0f0f14',
             symbolColor: '#8a8f98',
             height: 38
-        },
+        } : undefined,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -45,10 +99,15 @@ function createWindow() {
 
     // 拦截外部拖拽图片导致的页面导航，自动下载图片并通知渲染进程
     mainWindow.webContents.on('will-navigate', async (e, url) => {
+        if (isDev) {
+            try {
+                if (new URL(url).origin === new URL(DEV_SERVER_URL).origin) return;
+            } catch (_) { /* 交给下面的外部 URL 判断 */ }
+        }
         e.preventDefault();
         // 检查是否像图片URL
         if (/^https?:\/\//i.test(url)) {
-            console.log('[Main] 拦截到拖拽导航 URL:', url);
+            logger.debug('拦截到拖拽导航', { url: url.substring(0, 100) });
             try {
                 // 从 store 读取默认保存文件夹
                 const data = store.load();
@@ -57,16 +116,16 @@ function createWindow() {
                 if (result.success) {
                     mainWindow.webContents.send('external-image-dropped', result.filePath);
                 } else {
-                    console.error('[Main] 拖拽图片下载失败:', result.error);
+                    logger.error('拖拽图片下载失败', { error: result.error });
                 }
             } catch (err) {
-                console.error('[Main] 拖拽图片处理异常:', err);
+                logger.error('拖拽图片处理异常', { error: err.message });
             }
         }
     });
 
     if (isDev) {
-        mainWindow.loadURL('http://localhost:5180');
+        mainWindow.loadURL(DEV_SERVER_URL);
         // DevTools 按需打开（F12），不再自动常驻，节省 ~47MB
         mainWindow.webContents.on('before-input-event', (e, input) => {
             if (input.key === 'F12' && input.type === 'keyDown') {
@@ -96,6 +155,41 @@ function initServices() {
 }
 
 // ── IPC 处理 ────────────────────────────────────────────
+
+ipcMain.handle('credentials:hasRavenhashKey', event => {
+    if (!isTrustedRenderer(event)) return false;
+    try {
+        const keyPath = getRavenhashKeyPath();
+        return safeStorage.isEncryptionAvailable() && fs.existsSync(keyPath);
+    } catch (_) {
+        return false;
+    }
+});
+
+ipcMain.handle('credentials:setRavenhashKey', (event, value) => {
+    if (!isTrustedRenderer(event)) return false;
+    try {
+        const key = String(value || '').trim();
+        if (!key || key.length > API_KEY_MAX_LENGTH || !safeStorage.isEncryptionAvailable()) return false;
+        const keyPath = getRavenhashKeyPath();
+        fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+        fs.writeFileSync(keyPath, safeStorage.encryptString(key));
+        return true;
+    } catch (_) {
+        return false;
+    }
+});
+
+ipcMain.handle('credentials:clearRavenhashKey', event => {
+    if (!isTrustedRenderer(event)) return false;
+    try {
+        const keyPath = getRavenhashKeyPath();
+        if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+        return true;
+    } catch (_) {
+        return false;
+    }
+});
 
 // 数据存储
 ipcMain.handle('store:load', () => store.load());
@@ -152,14 +246,37 @@ ipcMain.handle('thumb:get', async (_, filePath) => {
     return thumbnailer.getThumbnail(filePath);
 });
 
-// 剪贴板 — 复制文件引用（和资源管理器右键→复制一样）
+// 剪贴板 — 复制文件引用（和资源管理器/Finder 右键→复制一样）
 ipcMain.handle('clipboard:copy', async (_, filePath) => {
     try {
         const fs = require('fs');
-        const os = require('os');
         const { exec } = require('child_process');
 
-        // 通过 PowerShell SetFileDropList 写入文件引用
+        if (process.platform === 'darwin') {
+            // Mac：用 osascript 把文件引用写入剪贴板
+            const escaped = filePath.replace(/"/g, '\\"');
+            const script = `set the clipboard to (POSIX file "${escaped}")`;
+            return new Promise((resolve) => {
+                exec(`osascript -e '${script.replace(/'/g, "'\\''")}'`,
+                    { timeout: 8000 },
+                    (err) => {
+                        if (err) {
+                            logger.warn('osascript 复制失败，降级为文本', { error: err.message });
+                            clipboard.writeText(filePath);
+                            resolve({ success: true, type: 'text' });
+                        } else {
+                            const fileSize = fs.statSync(filePath).size;
+                            const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+                            logger.info('文件引用写入成功', { fileName: path.basename(filePath), sizeMB });
+                            resolve({ success: true, type: 'file', sizeMB });
+                        }
+                    }
+                );
+            });
+        }
+
+        // Windows：通过 PowerShell SetFileDropList 写入文件引用
+        const os = require('os');
         const scriptPath = path.join(os.tmpdir(), 'flow_clipboard.ps1');
         const psContent = [
             'Add-Type -AssemblyName System.Windows.Forms',
@@ -178,20 +295,20 @@ ipcMain.handle('clipboard:copy', async (_, filePath) => {
                 (err, stdout) => {
                     try { fs.unlinkSync(scriptPath); } catch (_) { }
                     if (err || !(stdout || '').includes('DONE')) {
-                        console.warn('[Clipboard] PowerShell 失败，降级为文本:', err?.message);
+                        logger.warn('PowerShell 复制失败，降级为文本', { error: err?.message });
                         clipboard.writeText(filePath);
                         resolve({ success: true, type: 'text' });
                     } else {
                         const fileSize = fs.statSync(filePath).size;
                         const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
-                        console.log(`[Clipboard] 文件引用写入成功: ${path.basename(filePath)} (${sizeMB}MB)`);
+                        logger.info('文件引用写入成功', { fileName: path.basename(filePath), sizeMB });
                         resolve({ success: true, type: 'file', sizeMB });
                     }
                 }
             );
         });
     } catch (err) {
-        console.error('[Clipboard] 复制失败:', err);
+        logger.error('剪贴板复制失败', { error: err.message });
         return { success: false, error: err.message };
     }
 });
@@ -232,7 +349,7 @@ ipcMain.on('drag:start', (event, filePathOrPaths) => {
             });
         }
     } catch (err) {
-        console.error('[Main] startDrag 失败:', err);
+        logger.error('原生拖拽启动失败', { error: err.message });
     }
 });
 
@@ -253,9 +370,6 @@ ipcMain.handle('window:getAlwaysOnTop', () => {
 });
 
 // ── 网页图片摘取 ────────────────────────────────────────
-const fs = require('fs');
-const https = require('https');
-const http = require('http');
 const crypto = require('crypto');
 
 function getSaveDir() {
@@ -342,9 +456,14 @@ app.whenReady().then(() => {
         // 去除可能的 query 字符串并标准化路径
         const normalizedPath = decodedPath.split('?')[0].replace(/\\/g, '/');
         // 使用 net.fetch 获取文件原生流返回给前端
-        return net.fetch('file:///' + normalizedPath);
+        // Mac 路径以 / 开头，直接拼会变四斜杠；Windows 路径以盘符开头无此问题
+        const fileUrl = normalizedPath.startsWith('/')
+            ? 'file://' + normalizedPath
+            : 'file:///' + normalizedPath;
+        return net.fetch(fileUrl);
     });
 
+    configureGatewayAuthorization();
     initServices();
     createWindow();
 });

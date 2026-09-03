@@ -5,6 +5,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('flowCanvas', {
+    credentials: {
+        hasRavenhashKey: () => ipcRenderer.invoke('credentials:hasRavenhashKey'),
+        setRavenhashKey: (value) => ipcRenderer.invoke('credentials:setRavenhashKey', value),
+        clearRavenhashKey: () => ipcRenderer.invoke('credentials:clearRavenhashKey'),
+    },
+
     // 数据存储
     store: {
         load: () => ipcRenderer.invoke('store:load'),

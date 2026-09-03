@@ -1,0 +1,58 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]: Flow Canvas
+    - generic [ref=e6]: "Flow Canvas startup error: Flow Canvas preload bridge is unavailable"
+  - generic [ref=e7]:
+    - complementary [ref=e9]:
+      - button "收起栏目" [ref=e10] [cursor=pointer]
+      - generic [ref=e12]:
+        - switch "资源节省 关闭" [ref=e14] [cursor=pointer]:
+          - generic [ref=e16]:
+            - generic [ref=e17]: 资源节省
+            - generic [ref=e18]: 关闭
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - generic [ref=e22]: 文件夹组
+            - button "新建文件夹组" [ref=e23] [cursor=pointer]
+          - generic [ref=e24]: 点击 + 新建文件夹组每组独立管理文件
+        - generic [ref=e26]:
+          - generic [ref=e27] [cursor=pointer]:
+            - generic [ref=e28]: 过滤器
+            - generic [ref=e29]: ▾
+          - generic [ref=e31]:
+            - button "全部" [ref=e32] [cursor=pointer]
+            - button "图片" [ref=e33] [cursor=pointer]
+            - button "视频" [ref=e34] [cursor=pointer]
+            - button "音频" [ref=e35] [cursor=pointer]
+            - button "文档" [ref=e36] [cursor=pointer]
+            - button "其他" [ref=e37] [cursor=pointer]
+        - generic [ref=e38]:
+          - generic [ref=e39] [cursor=pointer]:
+            - generic [ref=e40]: 画布
+            - generic [ref=e41]: ▾
+          - generic [ref=e43]:
+            - button "适配全部" [ref=e44] [cursor=pointer]
+            - button "紧凑排列" [ref=e45] [cursor=pointer]
+            - button "无缝拼接" [ref=e46] [cursor=pointer]
+            - button "新建规划表" [ref=e47] [cursor=pointer]
+            - button "生成 .md 引用" [ref=e48] [cursor=pointer]
+        - generic [ref=e49]:
+          - generic [ref=e50] [cursor=pointer]:
+            - generic [ref=e51]: 窗口
+            - generic [ref=e52]: ▾
+          - button "置顶窗口" [ref=e55] [cursor=pointer]
+        - generic [ref=e59]: 0 个文件
+      - text: ▶
+    - main [ref=e60]:
+      - generic "仅统计当前 Flow Canvas 白板窗口":
+        - generic: "-- MB"
+        - generic: 0/0
+      - generic:
+        - generic: Flow Canvas
+        - generic: 关联一个本地文件夹开始使用
+        - button "添加文件夹" [ref=e62] [cursor=pointer]
+    - generic "模式选择":
+      - button "视频模式"
+      - button "图片模式"
+      - button "阅览模式"
+    - button "收起为置顶浮动按钮" [ref=e63] [cursor=pointer]

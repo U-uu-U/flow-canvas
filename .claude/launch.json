@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flow-canvas-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "E:/案例/flow-canvas-test-1", "run", "dev", "--", "--port", "5173"],
+      "port": 5173
+    }
+  ]
+}

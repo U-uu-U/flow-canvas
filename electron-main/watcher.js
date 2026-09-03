@@ -7,6 +7,15 @@
 const chokidar = require('chokidar');
 const path = require('path');
 const fs = require('fs');
+const createLogger = require('../shared/logger');
+const {
+    WATCHER_MAX_DEPTH,
+    WATCHER_SCAN_MAX_DEPTH,
+    WATCHER_STABILITY_THRESHOLD_MS,
+    WATCHER_POLL_INTERVAL_MS
+} = require('./constants');
+
+const logger = createLogger('Watcher');
 
 // 支持的文件扩展名
 const SUPPORTED_EXT = new Set([
@@ -42,10 +51,10 @@ class Watcher {
             ignored: /(^|[\/\\])\../, // 忽略隐藏文件
             persistent: true,
             ignoreInitial: true,
-            depth: 2,                    // 减少监听深度，降低句柄占用
+            depth: WATCHER_MAX_DEPTH,
             awaitWriteFinish: {
-                stabilityThreshold: 2000, // 大文件写入等待更久
-                pollInterval: 500         // 降低轮询频率
+                stabilityThreshold: WATCHER_STABILITY_THRESHOLD_MS,
+                pollInterval: WATCHER_POLL_INTERVAL_MS
             }
         });
 
@@ -62,7 +71,7 @@ class Watcher {
         });
 
         this.watchers.set(folderPath, watcher);
-        console.log('[Watcher] 开始监听:', folderPath);
+        logger.info('开始监听文件夹', { folderName: path.basename(folderPath) });
     }
 
     remove(folderPath) {
@@ -70,7 +79,7 @@ class Watcher {
         if (watcher) {
             watcher.close();
             this.watchers.delete(folderPath);
-            console.log('[Watcher] 停止监听:', folderPath);
+            logger.info('停止监听文件夹', { folderName: path.basename(folderPath) });
         }
     }
 
@@ -81,9 +90,9 @@ class Watcher {
     scanFolder(folderPath) {
         const files = [];
         try {
-            this._walkDir(folderPath, files, 0, 5);
+            this._walkDir(folderPath, files, 0, WATCHER_SCAN_MAX_DEPTH);
         } catch (err) {
-            console.error('[Watcher] 扫描失败:', err.message);
+            logger.error('扫描文件夹失败', { folderName: path.basename(folderPath), error: err.message });
         }
         return files;
     }

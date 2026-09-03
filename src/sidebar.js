@@ -310,7 +310,6 @@ export class SidebarManager {
 
                 // 首次扫描文件
                 const files = await window.flowCanvas.folder.scan(folderPath);
-                console.log(`[Sidebar] Found ${files.length} files in ${folderPath}`);
                 if (files && files.length > 0) {
                     this.emit('scanFiles', files);
                 }

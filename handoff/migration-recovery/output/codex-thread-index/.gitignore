@@ -1,0 +1,6 @@
+*
+!.gitignore
+!.gitkeep
+!thread-exports/
+thread-exports/*
+!thread-exports/.gitkeep

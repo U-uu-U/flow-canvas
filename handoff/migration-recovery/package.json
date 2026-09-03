@@ -1,0 +1,13 @@
+{
+  "name": "codex-migration-recovery",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Codex thread index and recovery utilities.",
+  "scripts": {
+    "index": "node build-codex-thread-index.mjs",
+    "export": "node build-codex-thread-index.mjs --export-thread",
+    "recover": "node build-codex-thread-index.mjs --export-query",
+    "check": "node --check build-codex-thread-index.mjs"
+  }
+}
