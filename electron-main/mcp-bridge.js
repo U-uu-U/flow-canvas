@@ -2452,6 +2452,32 @@ async function uploadTemporaryReferences(
     return urls;
 }
 
+async function uploadVideoReferencesOrUseOriginals(
+    entries,
+    labelPrefix,
+    providers,
+    onProgress,
+    failureSubject = '视频任务'
+) {
+    if (entries.length === 0) return [];
+    try {
+        return await uploadTemporaryReferences(
+            entries,
+            labelPrefix,
+            providers,
+            onProgress,
+            failureSubject
+        );
+    } catch (error) {
+        // Keep the provider's native Base64 path available when temporary hosts are unavailable.
+        console.warn(
+            `[FlowCanvasBridge] ${labelPrefix}临时上传失败，改为直接提交原始素材：`,
+            error?.message || String(error)
+        );
+        return entries;
+    }
+}
+
 function createVideoRecoveryId() {
     return `fc_${crypto.randomUUID().replace(/-/g, '')}`;
 }
@@ -2780,29 +2806,29 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 3,
                 isMiniMaxH3 ? 15 * 1024 * 1024 : 32 * 1024 * 1024
             );
+        const uploadProviders = temporaryUploadProviders(providerConfig);
+        const imageUrls = await uploadVideoReferencesOrUseOriginals(
+            images.map(image => image.url),
+            '参考图片',
+            uploadProviders,
+            options.onProgress
+        );
+        throwIfGenerationCanceled(options.signal);
+        const referenceVideoUrls = await uploadVideoReferencesOrUseOriginals(
+            videos,
+            '参考视频',
+            uploadProviders,
+            options.onProgress
+        );
+        throwIfGenerationCanceled(options.signal);
+        const referenceAudioUrls = await uploadVideoReferencesOrUseOriginals(
+            audioUrls,
+            '参考音频',
+            uploadProviders,
+            options.onProgress
+        );
+        throwIfGenerationCanceled(options.signal);
         if (isMiniMaxH3) {
-            const uploadProviders = temporaryUploadProviders(providerConfig);
-            const imageUrls = await uploadTemporaryReferences(
-                images.map(image => image.url),
-                '参考图片',
-                uploadProviders,
-                options.onProgress
-            );
-            throwIfGenerationCanceled(options.signal);
-            const referenceVideoUrls = await uploadTemporaryReferences(
-                videos,
-                '参考视频',
-                uploadProviders,
-                options.onProgress
-            );
-            throwIfGenerationCanceled(options.signal);
-            const referenceAudioUrls = await uploadTemporaryReferences(
-                audioUrls,
-                '参考音频',
-                uploadProviders,
-                options.onProgress
-            );
-            throwIfGenerationCanceled(options.signal);
             Object.assign(body, buildMiniMaxH3RequestBody({
                 endpoint,
                 model,
@@ -2815,13 +2841,6 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 referenceAudios: referenceAudioUrls
             }));
         } else if (isSeedance25) {
-            const imageUrls = await uploadTemporaryReferences(
-                images.map(image => image.url),
-                '参考图片',
-                temporaryUploadProviders(providerConfig),
-                options.onProgress,
-                'Seedance 2.5 任务'
-            );
             Object.assign(body, buildSeedance25RequestBody({
                 endpoint,
                 model,
@@ -2831,9 +2850,14 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 referenceImages: imageUrls
             }));
         } else {
-            if (images.length > 0) body.images = images;
-            if (videos.length > 0) body.videos = videos;
-            if (audioUrls.length > 0) body.audio_urls = audioUrls;
+            if (images.length > 0) {
+                body.images = images.map((image, index) => ({
+                    ...image,
+                    url: imageUrls[index] || image.url
+                }));
+            }
+            if (referenceVideoUrls.length > 0) body.videos = referenceVideoUrls;
+            if (referenceAudioUrls.length > 0) body.audio_urls = referenceAudioUrls;
         }
 
         const recoveryId = createVideoRecoveryId();
