@@ -52,6 +52,7 @@ const {
     isMiniMaxH3UnavailableResponse,
     isSeedance25Model,
     resolveSeedance25AspectRatio,
+    seedance25ReferenceImageLimit,
     videoModelFilePrefix
 } = require('./video-provider-adapters');
 
@@ -2790,7 +2791,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         const images = await collectVideoReferenceImages(
             options.sourceReferences || [],
             options.compressReferenceImages === true,
-            isSeedance25 ? 10 : 9
+            isSeedance25 ? seedance25ReferenceImageLimit(model) : 9
         );
         throwIfGenerationCanceled(options.signal);
         const videos = isSeedance25

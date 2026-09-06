@@ -2,8 +2,17 @@ function isMiniMaxH3Model(model) {
     return /minimax[^a-z0-9]*h3/i.test(String(model || ''));
 }
 
+function isSeedance25BackupModel(model) {
+    return /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i.test(String(model || '').trim());
+}
+
 function isSeedance25Model(model) {
-    return /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(String(model || ''));
+    return isSeedance25BackupModel(model)
+        || /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(String(model || ''));
+}
+
+function seedance25ReferenceImageLimit(model) {
+    return isSeedance25BackupModel(model) ? 9 : 10;
 }
 
 function resolveSeedance25AspectRatio(selectedRatio, width, height) {
@@ -140,8 +149,12 @@ function buildSeedance25RequestBody({
     const durationValue = duration === undefined || duration === null || duration === ''
         ? 30
         : Number(duration);
-    if (durationValue !== 30) {
-        throw new Error('Seedance 2.5 当前仅支持固定 30 秒视频');
+    if (isSeedance25BackupModel(model)) {
+        if (durationValue !== 30) {
+            throw new Error('Seedance 2.5 备用路线仅支持固定 30 秒视频');
+        }
+    } else if (!Number.isInteger(durationValue) || durationValue < 4 || durationValue > 30) {
+        throw new Error('Seedance 2.5 时长仅支持 4 到 30 秒的整数');
     }
 
     const images = Array.isArray(referenceImages)
@@ -150,7 +163,10 @@ function buildSeedance25RequestBody({
             .map(image => String(image || '').trim())
             .filter(Boolean)
         : [];
-    if (images.length > 10) throw new Error('Seedance 2.5 最多支持 10 张参考图片');
+    const referenceImageLimit = seedance25ReferenceImageLimit(model);
+    if (images.length > referenceImageLimit) {
+        throw new Error(`Seedance 2.5 最多支持 ${referenceImageLimit} 张参考图片`);
+    }
 
     const ratioValue = aspectRatio == null ? '' : String(aspectRatio).trim();
     const allowedRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
@@ -475,8 +491,10 @@ module.exports = {
     isMiniMaxH3NativeEndpoint,
     isMiniMaxH3PerSecondEndpoint,
     isMiniMaxH3UnavailableResponse,
+    isSeedance25BackupModel,
     isSeedance25Model,
     normalizeMiniMaxH3RequestModel,
     resolveSeedance25AspectRatio,
+    seedance25ReferenceImageLimit,
     videoModelFilePrefix
 };
