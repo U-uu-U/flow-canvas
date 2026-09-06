@@ -708,7 +708,8 @@ NODE_TYPES['video'] = {
         );
         const videoModel = String(provider.model || config.model || '');
         const h3Model = /minimax[^a-z0-9]*h3/i.test(videoModel);
-        const seedance25Model = /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(videoModel);
+        const seedance25Model = /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(videoModel)
+            || /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i.test(videoModel.trim());
         const useAdaptiveReferenceRatio = (h3Model || seedance25Model)
             && (config.ratio === 'adaptive' || config.ratioMode !== 'manual');
         const supportedRatios = seedance25Model

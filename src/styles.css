@@ -6384,6 +6384,7 @@ body.video-mode .agent-model-bar {
 
 .video-selected-model-summary {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     margin: 12px 0 10px 52px;
@@ -6397,6 +6398,22 @@ body.video-mode .agent-model-bar {
     border-radius: 4px;
     background: #29313d;
     color: #aac8f8;
+}
+
+.video-selected-model-route,
+.video-selected-model-price {
+    padding: 3px 6px;
+    border: 1px solid #484b52;
+    border-radius: 4px;
+    background: #292b30;
+    color: #c5c8ce;
+}
+
+.video-selected-model-price {
+    border-color: #3d5548;
+    background: #26362f;
+    color: #9ed7b9;
+    font-variant-numeric: tabular-nums;
 }
 
 .video-selected-model-capabilities {

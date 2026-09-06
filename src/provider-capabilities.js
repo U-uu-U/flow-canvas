@@ -18,7 +18,7 @@ export function inferProviderCapability(provider = {}) {
     if (explicit) return explicit;
 
     const marker = `${provider.model || ''} ${provider.endpoint || ''} ${provider.name || ''}`.toLowerCase();
-    if (/(seedance|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|minimax[^a-z0-9]*h3|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker)) {
+    if (/(seedance|^sd2[._-]?5(?:\s|$)|artsdance|dreamina|video|kling|可灵|sora|runway|veo|vidu|minimax[^a-z0-9]*h3|hunyuan|腾讯|通义.*视频|wan[^\s]*(?:t2v|i2v))/.test(marker)) {
         return PROVIDER_CAPABILITIES.VIDEO;
     }
     if (/(image|gpt-image|dall-e|imagen|flux|stable|sdxl|midjourney)/.test(marker)) {

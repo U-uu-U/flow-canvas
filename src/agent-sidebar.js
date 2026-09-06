@@ -66,11 +66,50 @@ function normalizeRavenHashEndpoint(endpoint) {
 
 const VIDEO_MODEL_PROFILES = [
     {
+        matchModel: /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i,
+        label: 'Seedance 2.5',
+        routeLabel: '备用路线',
+        price: { amount: 6, currency: 'CNY', unit: 'request' },
+        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
+        resolutions: ['720p'],
+        durations: [30],
+        durationControl: 'fixed',
+        supportsWebSearch: false,
+        supportsCameraFixed: false,
+        supportsGeneratedAudio: false,
+        supportsWatermark: false,
+        referenceLimits: { image: 9, video: 0, audio: 0 },
+        defaultRatio: 'adaptive',
+        resolveAdaptiveRatio: true,
+        adaptiveFallbackRatio: '16:9',
+        defaultResolution: '720p',
+        defaultDuration: 30
+    },
+    {
+        matchModel: /^seedance_v2\.5$/i,
+        label: 'HM-Seedance 2.5',
+        price: { amount: 1.5, currency: 'CNY', unit: 'request' },
+        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
+        resolutions: ['720p'],
+        durations: Array.from({ length: 27 }, (_, index) => index + 4),
+        durationControl: 'slider',
+        supportsWebSearch: false,
+        supportsCameraFixed: false,
+        supportsGeneratedAudio: false,
+        supportsWatermark: false,
+        referenceLimits: { image: 10, video: 0, audio: 0 },
+        defaultRatio: 'adaptive',
+        resolveAdaptiveRatio: true,
+        adaptiveFallbackRatio: '16:9',
+        defaultResolution: '720p',
+        defaultDuration: 30
+    },
+    {
         match: /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i,
         label: 'Seedance 2.5',
         ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
         resolutions: ['720p'],
-        durations: [30],
+        durations: Array.from({ length: 27 }, (_, index) => index + 4),
         durationControl: 'slider',
         supportsWebSearch: false,
         supportsCameraFixed: false,
@@ -162,6 +201,21 @@ const VIDEO_MODEL_PROFILES = [
         defaultDuration: 5
     }
 ];
+
+function formatVideoModelPrice(price) {
+    if (price?.currency !== 'CNY' || price?.unit !== 'request') return '';
+    const amount = Number(price.amount);
+    if (!Number.isFinite(amount) || amount < 0) return '';
+    return `¥${Number.isInteger(amount) ? amount : amount.toFixed(2)}/次`;
+}
+
+function formatVideoModelProfile(profile, includeLabel = true) {
+    return [
+        includeLabel ? profile?.label : '',
+        profile?.routeLabel,
+        formatVideoModelPrice(profile?.price)
+    ].filter(Boolean).join(' · ');
+}
 
 const DEFAULT_VIDEO_MODEL_PROFILE = {
     label: '未收录模型',
@@ -407,6 +461,8 @@ export class AgentSidebar {
         this.videoSelectedModelName = document.getElementById('videoSelectedModelName');
         this.videoSelectedModelId = document.getElementById('videoSelectedModelId');
         this.videoSelectedModelProfile = document.getElementById('videoSelectedModelProfile');
+        this.videoSelectedModelRoute = document.getElementById('videoSelectedModelRoute');
+        this.videoSelectedModelPrice = document.getElementById('videoSelectedModelPrice');
         this.videoSelectedModelProviderType = document.getElementById('videoSelectedModelProviderType');
         this.videoSelectedModelResolutions = document.getElementById('videoSelectedModelResolutions');
         this.videoSelectedModelDurations = document.getElementById('videoSelectedModelDurations');
@@ -1276,7 +1332,10 @@ export class AgentSidebar {
             const name = document.createElement('strong');
             name.textContent = provider.model || provider.name || '未命名模型';
             const meta = document.createElement('small');
-            meta.textContent = provider.name || '未命名 API';
+            const videoProfile = kind === 'video' ? this._getVideoModelProfile(provider) : null;
+            meta.textContent = kind === 'video'
+                ? [provider.name || '未命名 API', formatVideoModelProfile(videoProfile)].filter(Boolean).join(' · ')
+                : (provider.name || '未命名 API');
             copy.append(name, meta);
             const check = document.createElement('span');
             check.className = 'agent-composer-list-check';
@@ -2872,7 +2931,10 @@ export class AgentSidebar {
             const model = document.createElement('strong');
             model.textContent = provider.model || provider.name || '未命名模型';
             const meta = document.createElement('small');
-            meta.textContent = `${provider.name || '未命名 API'} · ${profile.label}`;
+            meta.textContent = [
+                provider.name || '未命名 API',
+                formatVideoModelProfile(profile)
+            ].filter(Boolean).join(' · ');
             copy.append(model, meta);
 
             const arrow = document.createElement('span');
@@ -3319,6 +3381,15 @@ export class AgentSidebar {
         if (this.videoSelectedModelName) this.videoSelectedModelName.textContent = provider.name || provider.model;
         if (this.videoSelectedModelId) this.videoSelectedModelId.textContent = provider.model;
         if (this.videoSelectedModelProfile) this.videoSelectedModelProfile.textContent = profile.label || '\u89c6\u9891\u6a21\u578b';
+        if (this.videoSelectedModelRoute) {
+            this.videoSelectedModelRoute.textContent = profile.routeLabel || '';
+            this.videoSelectedModelRoute.hidden = !profile.routeLabel;
+        }
+        if (this.videoSelectedModelPrice) {
+            const priceText = formatVideoModelPrice(profile.price);
+            this.videoSelectedModelPrice.textContent = priceText;
+            this.videoSelectedModelPrice.hidden = !priceText;
+        }
         if (this.videoSelectedModelProviderType) this.videoSelectedModelProviderType.textContent = providerTypes[provider.type] || '\u81ea\u5b9a\u4e49 API';
         if (this.videoSelectedModelResolutions) {
             const text = resolutions.length ? resolutions.map(value => this._formatResolution(value)).join(' / ') : '\u63a5\u53e3\u9ed8\u8ba4';
@@ -3345,8 +3416,11 @@ export class AgentSidebar {
 
     _getVideoModelProfile(provider) {
         if (!provider?.model) return null;
+        const model = String(provider.model).trim();
         const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
-        return VIDEO_MODEL_PROFILES.find(profile => profile.match.test(marker)) || DEFAULT_VIDEO_MODEL_PROFILE;
+        return VIDEO_MODEL_PROFILES.find(profile => profile.matchModel?.test(model))
+            || VIDEO_MODEL_PROFILES.find(profile => profile.match?.test(marker))
+            || DEFAULT_VIDEO_MODEL_PROFILE;
     }
 
     _getVideoReferenceLimits(profile) {
@@ -5732,7 +5806,10 @@ export class AgentSidebar {
                 if (!matchesRole) return;
                 const option = document.createElement('option');
                 option.value = p.id;
-                option.textContent = `${p.name} (${p.model})`;
+                const profileMeta = role === 'video'
+                    ? formatVideoModelProfile(this._getVideoModelProfile(p), false)
+                    : '';
+                option.textContent = `${p.name} (${p.model})${profileMeta ? ` · ${profileMeta}` : ''}`;
                 if (p.id === selectedId) {
                     option.selected = true;
                 }

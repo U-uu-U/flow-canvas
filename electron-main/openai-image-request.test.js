@@ -48,8 +48,10 @@ const {
     isMiniMaxH3NativeEndpoint,
     isMiniMaxH3PerSecondEndpoint,
     isMiniMaxH3UnavailableResponse,
+    isSeedance25BackupModel,
     isSeedance25Model,
     resolveSeedance25AspectRatio,
+    seedance25ReferenceImageLimit,
     videoModelFilePrefix
 } = require('./video-provider-adapters');
 
@@ -65,6 +67,9 @@ test('视频文件名使用实际模型前缀而不是统一标成 Seedance', ()
 test('Seedance 2.5 模型不会误匹配为 Seedance 2.0', () => {
     assert.equal(isSeedance25Model('seedance_v2.5'), true);
     assert.equal(isSeedance25Model('seedance-2.5'), true);
+    assert.equal(isSeedance25Model('sd2.5'), true);
+    assert.equal(isSeedance25BackupModel('sd2.5'), true);
+    assert.equal(isSeedance25BackupModel('seedance_v2.5'), false);
     assert.equal(isSeedance25Model('doubao-seedance-2-0'), false);
 });
 
@@ -120,7 +125,7 @@ test('视频任务响应: completed 时不把任务查询地址误当成视频�
     }), `${statusUrl}/content?signature=valid`);
 });
 
-test('Seedance 2.5 请求体固定 720p、30 秒并限制 10 张参考图', () => {
+test('HM-Seedance 2.5 请求体固定 720p、支持 4 到 30 秒并限制 10 张参考图', () => {
     const images = Array.from({ length: 10 }, (_, index) => ({
         url: `data:image/jpeg;base64,image-${index}`,
         role: 'reference_image'
@@ -144,18 +149,22 @@ test('Seedance 2.5 请求体固定 720p、30 秒并限制 10 张参考图', () =
         endpoint: 'https://video.example.com/v1/videos',
         model: 'seedance_v2.5',
         prompt: 'direct request',
-        duration: 30,
+        duration: 4,
         referenceImages: images.slice(0, 1)
     }), {
         model: 'seedance_v2.5',
         prompt: 'direct request',
         resolution: '720p',
-        seconds: 30,
+        seconds: 4,
         image_urls: [images[0].url]
     });
     assert.throws(
-        () => buildSeedance25RequestBody({ model: 'seedance_v2.5', prompt: 'x', duration: 10 }),
-        /固定 30 秒/
+        () => buildSeedance25RequestBody({ model: 'seedance_v2.5', prompt: 'x', duration: 3 }),
+        /4 到 30 秒/
+    );
+    assert.throws(
+        () => buildSeedance25RequestBody({ model: 'seedance_v2.5', prompt: 'x', duration: 31 }),
+        /4 到 30 秒/
     );
     assert.throws(
         () => buildSeedance25RequestBody({
@@ -173,6 +182,38 @@ test('Seedance 2.5 请求体固定 720p、30 秒并限制 10 张参考图', () =
         }),
         /不支持画幅比例 adaptive/
     );
+    assert.equal(seedance25ReferenceImageLimit('seedance_v2.5'), 10);
+});
+
+test('Seedance 2.5 备用路线固定 30 秒并限制 9 张参考图', () => {
+    const images = Array.from({ length: 9 }, (_, index) => `https://example.com/ref-${index}.jpg`);
+    assert.deepEqual(buildSeedance25RequestBody({
+        model: 'sd2.5',
+        prompt: 'backup route',
+        duration: 30,
+        aspectRatio: '16:9',
+        referenceImages: images
+    }), {
+        model: 'sd2.5',
+        prompt: 'backup route',
+        resolution: '720p',
+        seconds: 30,
+        ratio: '16:9',
+        image_urls: images
+    });
+    assert.throws(
+        () => buildSeedance25RequestBody({ model: 'sd2.5', prompt: 'x', duration: 10 }),
+        /备用路线仅支持固定 30 秒/
+    );
+    assert.throws(
+        () => buildSeedance25RequestBody({
+            model: 'sd2.5',
+            prompt: 'x',
+            referenceImages: [...images, 'https://example.com/extra.jpg']
+        }),
+        /最多支持 9 张/
+    );
+    assert.equal(seedance25ReferenceImageLimit('sd2.5'), 9);
 });
 
 test('MiniMax H3 视频协议: 中转地址不被改写，显式任务中心按 ID 查询', () => {
@@ -204,6 +245,10 @@ test('MiniMax H3 视频协议: 中转地址不被改写，显式任务中心按 
     );
     assert.equal(
         buildVideoGenerationEndpoint('https://art.ravenhash.org/v1', 'seedance_v2.5'),
+        'https://art.ravenhash.org/v1/video/generations'
+    );
+    assert.equal(
+        buildVideoGenerationEndpoint('https://art.ravenhash.org/v1', 'sd2.5'),
         'https://art.ravenhash.org/v1/video/generations'
     );
     assert.equal(
