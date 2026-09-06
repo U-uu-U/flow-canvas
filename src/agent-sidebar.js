@@ -41,6 +41,14 @@ import {
     normalizeCustomAgentSkills,
     removeCustomAgentSkill
 } from './agent-skills.js';
+import {
+    AGENT_CONVERSATION_LIMIT,
+    createAgentConversation,
+    deriveAgentConversationTitle,
+    mergeAgentConversationFiles,
+    normalizeAgentConversationProject,
+    normalizeAgentConversationFiles
+} from './agent-conversations.js';
 
 const DEFAULT_TEMPLATES = {
     'ravenhash-text': { name: 'RavenHash Text', capability: 'text', type: 'openai', endpoint: 'https://ai.ravenhash.org/v1', model: '' },
@@ -294,6 +302,8 @@ export class AgentSidebar {
         this.projectComposerSaveTimer = null;
         this.restoringProjectComposer = false;
         this.selectedPromptPresetIds = { image: '', video: '' };
+        this.activeConversationId = null;
+        this.conversationFiles = [];
         this.messages = [];
         this.pendingAgentAttachments = [];
         this.pendingAgentSource = null;
@@ -330,6 +340,20 @@ export class AgentSidebar {
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
         this.modePicker = document.getElementById('creationModePicker');
         this.modeTitle = document.getElementById('creationModeTitle');
+        this.conversationMenuBtn = document.getElementById('agentConversationMenuBtn');
+        this.conversationTitleBtn = document.getElementById('agentConversationTitleBtn');
+        this.conversationTitleEl = document.getElementById('agentConversationTitle');
+        this.conversationPopover = document.getElementById('agentConversationPopover');
+        this.conversationSummary = document.getElementById('agentConversationSummary');
+        this.conversationList = document.getElementById('agentConversationList');
+        this.newConversationBtn = document.getElementById('agentNewConversationBtn');
+        this.filesBtn = document.getElementById('agentFilesBtn');
+        this.filesCount = document.getElementById('agentFilesCount');
+        this.filesPopover = document.getElementById('agentFilesPopover');
+        this.filesSummary = document.getElementById('agentFilesSummary');
+        this.filesList = document.getElementById('agentFilesList');
+        this.sidebarCloseBtn = document.getElementById('agentSidebarCloseBtn');
+        this.agentHeader = document.querySelector('.agent-header');
         this.messagesEl = document.getElementById('agentMessages');
         this.inputEl = document.getElementById('agentInput');
         this.agentAttachmentTray = document.getElementById('agentAttachmentTray');
@@ -494,7 +518,7 @@ export class AgentSidebar {
         this._renderPromptPresets('video');
         this.apiConfigReady = this._restoreDurableApiConfig();
         this._restoreAgentConversation(this.activeProjectCacheKey);
-        this._restorePendingAgentAttachments(this.activeProjectCacheKey);
+        this._restorePendingAgentAttachments();
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
         window.flowCanvas?.browserSync?.onTaskCompleted?.((event) => this._handleTaskCompleted(event));
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
@@ -577,23 +601,290 @@ export class AgentSidebar {
             }));
     }
 
-    _saveAgentConversation(key = this.activeProjectCacheKey, messages = this.messages) {
+    _createAgentConversationId() {
+        return `task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    _normalizeAgentConversationProject(state) {
+        return normalizeAgentConversationProject(state, {
+            createId: () => this._createAgentConversationId(),
+            normalizeMessages: messages => this._normalizeAgentMessages(messages)
+        });
+    }
+
+    _saveAgentConversationProject(key, project, store = this._loadAgentConversationStore()) {
         try {
-            const store = this._loadAgentConversationStore();
-            store[key] = {
-                messages: this._normalizeAgentMessages(messages),
-                updatedAt: new Date().toISOString()
-            };
+            store[key] = project;
             localStorage.setItem(AGENT_CONVERSATION_STORAGE_KEY, JSON.stringify(store));
+            return true;
         } catch (error) {
             console.warn('[AgentSidebar] Failed to save Agent conversation:', error);
+            return false;
         }
     }
 
-    _restoreAgentConversation(key = this.activeProjectCacheKey) {
-        const state = this._loadAgentConversationStore()[key];
-        this.messages = this._normalizeAgentMessages(state?.messages);
+    _activeConversationCacheKey(
+        projectKey = this.activeProjectCacheKey,
+        conversationId = this.activeConversationId
+    ) {
+        return `${projectKey}::${conversationId || '__default_task__'}`;
+    }
+
+    _isActiveConversation(projectKey, conversationId) {
+        return this.activeProjectCacheKey === projectKey && this.activeConversationId === conversationId;
+    }
+
+    _saveAgentConversation(
+        key = this.activeProjectCacheKey,
+        messages = this.messages,
+        { conversationId = this.activeConversationId, files, title, customTitle } = {}
+    ) {
+        const store = this._loadAgentConversationStore();
+        const project = this._normalizeAgentConversationProject(store[key]);
+        const targetId = conversationId || project.activeConversationId;
+        const conversation = project.conversations.find(entry => entry.id === targetId)
+            || project.conversations[0];
+        const normalizedMessages = this._normalizeAgentMessages(messages);
+        conversation.messages = normalizedMessages;
+        if (files !== undefined) conversation.files = normalizeAgentConversationFiles(files);
+        if (title !== undefined) {
+            conversation.title = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 40) || '新任务';
+            conversation.customTitle = customTitle !== false;
+        } else if (!conversation.customTitle) {
+            conversation.title = deriveAgentConversationTitle(normalizedMessages);
+        }
+        conversation.updatedAt = Date.now();
+        project.conversations = project.conversations.slice(0, AGENT_CONVERSATION_LIMIT);
+        const saved = this._saveAgentConversationProject(key, project, store);
+        if (saved && this._isActiveConversation(key, conversation.id)) {
+            this.messages = normalizedMessages;
+            this.conversationFiles = normalizeAgentConversationFiles(conversation.files);
+            this._renderAgentConversationHeader(project);
+        }
+        return conversation;
+    }
+
+    _restoreAgentConversation(key = this.activeProjectCacheKey, conversationId = null) {
+        const store = this._loadAgentConversationStore();
+        const project = this._normalizeAgentConversationProject(store[key]);
+        if (conversationId && project.conversations.some(entry => entry.id === conversationId)) {
+            project.activeConversationId = conversationId;
+        }
+        const conversation = project.conversations.find(entry => entry.id === project.activeConversationId)
+            || project.conversations[0];
+        this.activeConversationId = conversation.id;
+        this.messages = this._normalizeAgentMessages(conversation.messages);
+        this.conversationFiles = normalizeAgentConversationFiles(conversation.files);
+        this._saveAgentConversationProject(key, project, store);
         this._renderAgentMessages();
+        this._renderAgentConversationHeader(project);
+    }
+
+    _renderAgentConversationHeader(projectState = null) {
+        const project = projectState || this._normalizeAgentConversationProject(
+            this._loadAgentConversationStore()[this.activeProjectCacheKey]
+        );
+        const active = project.conversations.find(entry => entry.id === this.activeConversationId)
+            || project.conversations[0];
+        if (this.conversationTitleEl) this.conversationTitleEl.textContent = active?.title || '新任务';
+        if (this.conversationTitleBtn) this.conversationTitleBtn.title = active?.title || '新任务';
+        if (this.conversationNameInput && document.activeElement !== this.conversationNameInput) {
+            this.conversationNameInput.value = active?.title || '新任务';
+        }
+        if (this.conversationSummary) {
+            this.conversationSummary.textContent = `${project.conversations.length} 个任务`;
+        }
+        if (this.conversationDeleteBtn) this.conversationDeleteBtn.disabled = false;
+        this._renderAgentConversationList(project);
+        this._renderAgentFiles();
+    }
+
+    _renderAgentConversationList(projectState = null) {
+        if (!this.conversationList) return;
+        const project = projectState || this._normalizeAgentConversationProject(
+            this._loadAgentConversationStore()[this.activeProjectCacheKey]
+        );
+        this.conversationList.replaceChildren();
+        [...project.conversations]
+            .sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt))
+            .forEach(conversation => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'agent-conversation-item';
+                button.classList.toggle('active', conversation.id === this.activeConversationId);
+                button.dataset.agentConversationId = conversation.id;
+                button.setAttribute('aria-pressed', String(conversation.id === this.activeConversationId));
+                const icon = document.createElement('svg');
+                icon.className = 'flow-icon flow-icon-sm';
+                icon.setAttribute('aria-hidden', 'true');
+                const use = document.createElement('use');
+                use.setAttribute('href', './icons/flow-icons.svg#icon-folder');
+                icon.appendChild(use);
+                const copy = document.createElement('span');
+                const title = document.createElement('strong');
+                title.textContent = conversation.title || '新任务';
+                const detail = document.createElement('small');
+                const count = this._normalizeAgentMessages(conversation.messages).filter(message => message.role === 'user').length;
+                detail.textContent = count ? `${count} 条指令` : '尚未开始';
+                copy.append(title, detail);
+                const check = document.createElement('svg');
+                check.className = 'flow-icon flow-icon-sm agent-conversation-check';
+                check.setAttribute('aria-hidden', 'true');
+                const checkUse = document.createElement('use');
+                checkUse.setAttribute('href', './icons/flow-icons.svg#icon-check');
+                check.appendChild(checkUse);
+                button.append(icon, copy, check);
+                this.conversationList.appendChild(button);
+            });
+    }
+
+    _createAgentConversation() {
+        this._saveAgentConversation();
+        this._savePendingAgentAttachments();
+        const store = this._loadAgentConversationStore();
+        const project = this._normalizeAgentConversationProject(store[this.activeProjectCacheKey]);
+        const conversation = createAgentConversation({
+            createId: () => this._createAgentConversationId(),
+            normalizeMessages: messages => this._normalizeAgentMessages(messages)
+        });
+        project.conversations.unshift(conversation);
+        project.conversations = project.conversations.slice(0, AGENT_CONVERSATION_LIMIT);
+        project.activeConversationId = conversation.id;
+        this._saveAgentConversationProject(this.activeProjectCacheKey, project, store);
+        this.activeConversationId = conversation.id;
+        this.messages = [];
+        this.conversationFiles = [];
+        this._restorePendingAgentAttachments();
+        this._renderAgentMessages();
+        this._renderAgentConversationHeader(project);
+        this._closeAgentHeaderPopovers();
+        this.inputEl?.focus();
+    }
+
+    _switchAgentConversation(conversationId) {
+        const targetId = String(conversationId || '');
+        if (!targetId || targetId === this.activeConversationId) {
+            this._closeAgentHeaderPopovers();
+            return;
+        }
+        this._saveAgentConversation();
+        this._savePendingAgentAttachments();
+        this._restoreAgentConversation(this.activeProjectCacheKey, targetId);
+        this._restorePendingAgentAttachments();
+        this._closeAgentHeaderPopovers();
+        this.inputEl?.focus();
+    }
+
+    _renameAgentConversation() {
+        const title = String(this.conversationNameInput?.value || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+        if (!title) {
+            this.conversationNameInput?.focus();
+            return;
+        }
+        this._saveAgentConversation(this.activeProjectCacheKey, this.messages, {
+            conversationId: this.activeConversationId,
+            files: this.conversationFiles,
+            title,
+            customTitle: true
+        });
+        this._closeAgentHeaderPopovers();
+    }
+
+    _deleteAgentConversation() {
+        const store = this._loadAgentConversationStore();
+        const project = this._normalizeAgentConversationProject(store[this.activeProjectCacheKey]);
+        const active = project.conversations.find(entry => entry.id === this.activeConversationId);
+        if (!active || !window.confirm(`删除任务对话“${active.title}”？`)) return;
+        this._clearPendingAgentAttachments(this._activeConversationCacheKey());
+        project.conversations = project.conversations.filter(entry => entry.id !== active.id);
+        if (project.conversations.length === 0) {
+            project.conversations.push(createAgentConversation({
+                createId: () => this._createAgentConversationId(),
+                normalizeMessages: messages => this._normalizeAgentMessages(messages)
+            }));
+        }
+        project.activeConversationId = project.conversations[0].id;
+        this._saveAgentConversationProject(this.activeProjectCacheKey, project, store);
+        this._restoreAgentConversation(this.activeProjectCacheKey, project.activeConversationId);
+        this._restorePendingAgentAttachments();
+        this._closeAgentHeaderPopovers();
+        this.inputEl?.focus();
+    }
+
+    _captureAgentConversationFiles(files = [], direction = 'input') {
+        this.conversationFiles = mergeAgentConversationFiles(
+            this.conversationFiles,
+            files,
+            direction
+        );
+        this._renderAgentFiles();
+        return this.conversationFiles;
+    }
+
+    _renderAgentFiles() {
+        const files = normalizeAgentConversationFiles(this.conversationFiles);
+        if (this.filesCount) {
+            this.filesCount.textContent = String(files.length);
+            this.filesCount.hidden = files.length === 0;
+        }
+        if (this.filesSummary) {
+            const inputCount = files.filter(file => file.direction === 'input').length;
+            const outputCount = files.length - inputCount;
+            this.filesSummary.textContent = files.length
+                ? `输入 ${inputCount} · 产出 ${outputCount}`
+                : '当前对话还没有输入或产出文件';
+        }
+        if (!this.filesList) return;
+        this.filesList.replaceChildren();
+        if (files.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'agent-files-empty';
+            empty.textContent = '当前对话中发送或生成的文件会保留在这里。';
+            this.filesList.appendChild(empty);
+            return;
+        }
+        files.forEach(file => {
+            const item = document.createElement('div');
+            item.className = `agent-file-item ${file.kind} ${file.direction}`;
+            item.title = file.filePath || file.url || file.name;
+            const icon = document.createElement('span');
+            icon.innerHTML = `<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-${file.kind}"></use></svg>`;
+            const copy = document.createElement('span');
+            const name = document.createElement('strong');
+            name.textContent = file.name;
+            const detail = document.createElement('small');
+            detail.textContent = file.detail || (file.direction === 'output' ? '产出文件' : '输入文件');
+            copy.append(name, detail);
+            item.append(icon, copy);
+            this.filesList.appendChild(item);
+        });
+    }
+
+    _agentHeaderPopoverEntries() {
+        return [
+            { name: 'conversation', buttons: [this.conversationMenuBtn, this.conversationTitleBtn], popover: this.conversationPopover },
+            { name: 'files', buttons: [this.filesBtn], popover: this.filesPopover }
+        ];
+    }
+
+    _closeAgentHeaderPopovers(except = null) {
+        this._agentHeaderPopoverEntries().forEach(entry => {
+            if (entry.name === except) return;
+            if (entry.popover) entry.popover.hidden = true;
+            entry.buttons.forEach(button => button?.setAttribute('aria-expanded', 'false'));
+        });
+    }
+
+    _toggleAgentHeaderPopover(name) {
+        const entry = this._agentHeaderPopoverEntries().find(candidate => candidate.name === name);
+        if (!entry?.popover) return;
+        const opening = entry.popover.hidden;
+        this._closeAgentHeaderPopovers();
+        if (!opening) return;
+        if (name === 'conversation') this._renderAgentConversationHeader();
+        if (name === 'files') this._renderAgentFiles();
+        entry.popover.hidden = false;
+        entry.buttons.forEach(button => button?.setAttribute('aria-expanded', 'true'));
     }
 
     _loadPendingAgentAttachmentStore() {
@@ -641,7 +932,7 @@ export class AgentSidebar {
     }
 
     _savePendingAgentAttachments(
-        key = this.activeProjectCacheKey,
+        key = this._activeConversationCacheKey(),
         attachments = this.pendingAgentAttachments,
         source = this.pendingAgentSource
     ) {
@@ -663,8 +954,15 @@ export class AgentSidebar {
         }
     }
 
-    _restorePendingAgentAttachments(key = this.activeProjectCacheKey) {
-        const state = this._loadPendingAgentAttachmentStore()[key];
+    _restorePendingAgentAttachments(key = this._activeConversationCacheKey()) {
+        const store = this._loadPendingAgentAttachmentStore();
+        let state = store[key];
+        if (!state && key === this._activeConversationCacheKey() && store[this.activeProjectCacheKey]) {
+            state = store[this.activeProjectCacheKey];
+            store[key] = state;
+            delete store[this.activeProjectCacheKey];
+            localStorage.setItem(AGENT_PENDING_ATTACHMENTS_STORAGE_KEY, JSON.stringify(store));
+        }
         this.pendingAgentAttachments = this._normalizePendingAgentAttachments(state?.attachments);
         this.pendingAgentSource = this._normalizePendingAgentSource(state?.source);
         this._renderPendingAgentAttachments();
@@ -737,8 +1035,8 @@ export class AgentSidebar {
         this.inputEl?.focus();
     }
 
-    _clearPendingAgentAttachments(key = this.activeProjectCacheKey) {
-        if (key === this.activeProjectCacheKey) {
+    _clearPendingAgentAttachments(key = this._activeConversationCacheKey()) {
+        if (key === this._activeConversationCacheKey()) {
             this.pendingAgentAttachments = [];
             this.pendingAgentSource = null;
             this._renderPendingAgentAttachments();
@@ -757,7 +1055,7 @@ export class AgentSidebar {
 
     _consumePendingAgentAttachments(key, attachments, source) {
         const expectedSignature = this._pendingAgentAttachmentSignature(attachments, source);
-        if (key === this.activeProjectCacheKey) {
+        if (key === this._activeConversationCacheKey()) {
             const currentSignature = this._pendingAgentAttachmentSignature(
                 this.pendingAgentAttachments,
                 this.pendingAgentSource
@@ -874,7 +1172,11 @@ export class AgentSidebar {
 
     _clearAgentConversation() {
         this.messages = [];
-        this._saveAgentConversation();
+        this.conversationFiles = [];
+        this._saveAgentConversation(this.activeProjectCacheKey, this.messages, {
+            conversationId: this.activeConversationId,
+            files: this.conversationFiles
+        });
         this._renderAgentMessages();
         this.inputEl?.focus();
     }
@@ -1288,14 +1590,20 @@ export class AgentSidebar {
 
         const userInstruction = String(instruction || '').trim();
         const displayPrompt = userInstruction || source.effectivePrompt || source.prompt;
-        const conversationKey = this.activeProjectCacheKey;
+        const projectKey = this.activeProjectCacheKey;
+        const conversationId = this.activeConversationId;
+        const attachmentCacheKey = this._activeConversationCacheKey(projectKey, conversationId);
+        const conversationFiles = this._captureAgentConversationFiles(attachments, 'input');
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
             { role: 'user', content: displayPrompt }
         ]);
         this.messages = requestMessages;
         this._appendAgentMessageElement('user', displayPrompt);
-        this._saveAgentConversation(conversationKey, requestMessages);
+        this._saveAgentConversation(projectKey, requestMessages, {
+            conversationId,
+            files: conversationFiles
+        });
         if (fromSidebar && this.inputEl) {
             this.inputEl.value = '';
             this.inputEl.style.height = 'auto';
@@ -1325,7 +1633,7 @@ export class AgentSidebar {
         } catch (error) {
             typing?.remove();
             const reason = `Agent 整理失败：${error?.message || error}`;
-            if (this.activeProjectCacheKey === conversationKey) this._appendAgentError(reason);
+            if (this._isActiveConversation(projectKey, conversationId)) this._appendAgentError(reason);
             return { ok: false, reason };
         } finally {
             this.isAgentSending = false;
@@ -1340,11 +1648,15 @@ export class AgentSidebar {
             ...requestMessages,
             { role: 'assistant', content: assistantContent }
         ]);
-        if (this.activeProjectCacheKey === conversationKey) {
+        if (this._isActiveConversation(projectKey, conversationId)) {
             this.messages = completedMessages;
             this._appendAgentMessageElement('assistant', assistantContent);
         }
-        this._saveAgentConversation(conversationKey, completedMessages);
+        this._saveAgentConversation(projectKey, completedMessages, {
+            conversationId,
+            files: conversationFiles
+        });
+        this._consumePendingAgentAttachments(attachmentCacheKey, attachments, source);
 
         try {
             const execution = await this.options.executeImageNodeFromAgent?.({
@@ -1356,13 +1668,29 @@ export class AgentSidebar {
             });
             if (!execution) throw new Error('画布没有接收 Agent 生图任务');
             if (execution.ok === false) throw new Error(execution.reason || '图片生成失败');
+            const outputFiles = (Array.isArray(execution.filePaths) ? execution.filePaths : [])
+                .filter(Boolean)
+                .map(filePath => ({
+                    mediaType: 'image',
+                    filePath,
+                    name: String(filePath).replace(/\\/g, '/').split('/').pop()
+                }));
+            if (outputFiles.length) {
+                const completedFiles = this._isActiveConversation(projectKey, conversationId)
+                    ? this._captureAgentConversationFiles(outputFiles, 'output')
+                    : mergeAgentConversationFiles(conversationFiles, outputFiles, 'output');
+                this._saveAgentConversation(projectKey, completedMessages, {
+                    conversationId,
+                    files: completedFiles
+                });
+            }
             return execution;
         } catch (error) {
             const reason = `图片生成失败：${error?.message || error}`;
-            if (this.activeProjectCacheKey === conversationKey) this._appendAgentError(reason);
+            if (this._isActiveConversation(projectKey, conversationId)) this._appendAgentError(reason);
             return { ok: false, reason };
         } finally {
-            if (this.activeProjectCacheKey === conversationKey) this.inputEl?.focus();
+            if (this._isActiveConversation(projectKey, conversationId)) this.inputEl?.focus();
         }
     }
 
@@ -1376,7 +1704,9 @@ export class AgentSidebar {
         }
         const text = String(prompt ?? this.inputEl?.value ?? '').trim();
         if (!text || this.isAgentSending) return;
-        const conversationKey = this.activeProjectCacheKey;
+        const projectKey = this.activeProjectCacheKey;
+        const conversationId = this.activeConversationId;
+        const attachmentCacheKey = this._activeConversationCacheKey(projectKey, conversationId);
         const pendingAttachments = this._normalizePendingAgentAttachments(this.pendingAgentAttachments);
         const pendingSource = this._normalizePendingAgentSource(this.pendingAgentSource);
         const provider = this._getTextProvider();
@@ -1388,6 +1718,7 @@ export class AgentSidebar {
             this._appendAgentError('本地文字 AI 接口不可用，请完全退出并重新启动 Flow Canvas。');
             return;
         }
+        const conversationFiles = this._captureAgentConversationFiles(pendingAttachments, 'input');
 
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
@@ -1395,7 +1726,10 @@ export class AgentSidebar {
         ]);
         this.messages = requestMessages;
         this._appendAgentMessageElement('user', text);
-        this._saveAgentConversation(conversationKey, requestMessages);
+        this._saveAgentConversation(projectKey, requestMessages, {
+            conversationId,
+            files: conversationFiles
+        });
         if (this.inputEl) {
             this.inputEl.value = '';
             this.inputEl.style.height = 'auto';
@@ -1422,22 +1756,25 @@ export class AgentSidebar {
                 { role: 'assistant', content }
             ]);
             typing?.remove();
-            if (this.activeProjectCacheKey === conversationKey) {
+            if (this._isActiveConversation(projectKey, conversationId)) {
                 this.messages = completedMessages;
                 const messageElement = this._appendAgentMessageElement('assistant', content);
                 this._attachAgentPlanAction(messageElement, content);
             }
-            this._saveAgentConversation(conversationKey, completedMessages);
-            this._consumePendingAgentAttachments(conversationKey, pendingAttachments, pendingSource);
+            this._saveAgentConversation(projectKey, completedMessages, {
+                conversationId,
+                files: conversationFiles
+            });
+            this._consumePendingAgentAttachments(attachmentCacheKey, pendingAttachments, pendingSource);
         } catch (error) {
             typing?.remove();
-            if (this.activeProjectCacheKey === conversationKey) {
+            if (this._isActiveConversation(projectKey, conversationId)) {
                 this._appendAgentError(`请求失败：${error?.message || error}`);
             }
         } finally {
             this.isAgentSending = false;
             if (this.sendBtn) this.sendBtn.disabled = false;
-            if (this.activeProjectCacheKey === conversationKey) this.inputEl?.focus();
+            if (this._isActiveConversation(projectKey, conversationId)) this.inputEl?.focus();
         }
     }
 
@@ -1599,12 +1936,12 @@ export class AgentSidebar {
         if (saveCurrent) {
             this._saveProjectComposer(this.activeProjectCacheKey);
             this._saveAgentConversation(this.activeProjectCacheKey);
-            this._savePendingAgentAttachments(this.activeProjectCacheKey);
+            this._savePendingAgentAttachments();
         }
         this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
         this.activeProjectCacheKey = nextKey;
         this._restoreAgentConversation(nextKey);
-        this._restorePendingAgentAttachments(nextKey);
+        this._restorePendingAgentAttachments();
 
         const state = this._loadProjectComposerCache()[nextKey] || null;
         this.restoringProjectComposer = true;
@@ -2116,6 +2453,18 @@ export class AgentSidebar {
             void this._setDefaultAssetLibraryFolder(this.assetLibraryFolderSelect.value);
         });
         document.addEventListener('keydown', event => this._captureShortcut(event), true);
+        this.conversationMenuBtn?.addEventListener('click', () => this._toggleAgentHeaderPopover('conversation'));
+        this.conversationTitleBtn?.addEventListener('click', () => this._toggleAgentHeaderPopover('conversation'));
+        this.newConversationBtn?.addEventListener('click', () => this._createAgentConversation());
+        this.conversationList?.addEventListener('click', event => {
+            const button = event.target.closest('[data-agent-conversation-id]');
+            if (button) this._switchAgentConversation(button.dataset.agentConversationId);
+        });
+        this.filesBtn?.addEventListener('click', () => this._toggleAgentHeaderPopover('files'));
+        this.sidebarCloseBtn?.addEventListener('click', () => {
+            this._closeAgentHeaderPopovers();
+            this.close();
+        });
         this.sendBtn?.addEventListener('click', () => {
             this._closeAgentComposerPopovers();
             void this._sendAgentMessage();
@@ -2199,7 +2548,6 @@ export class AgentSidebar {
         this.taskHistoryBtn?.addEventListener('click', event => {
             event.stopPropagation();
             const open = !this.taskHistoryOpen;
-            if (open && this.currentMode !== 'review') this.setMode('review');
             this._setTaskHistoryOpen(open);
             this.modePicker?.classList.remove('mode-picker-visible');
         });
@@ -2236,9 +2584,16 @@ export class AgentSidebar {
             if (this.agentComposerControls?.contains(event.target)) return;
             this._closeAgentComposerPopovers();
         });
+        document.addEventListener('pointerdown', event => {
+            if (this.agentHeader?.contains(event.target)) return;
+            this._closeAgentHeaderPopovers();
+        });
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape' && this.taskHistoryOpen) this._setTaskHistoryOpen(false);
-            if (event.key === 'Escape') this._closeAgentComposerPopovers();
+            if (event.key === 'Escape') {
+                this._closeAgentComposerPopovers();
+                this._closeAgentHeaderPopovers();
+            }
         });
         this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
         ['image', 'video'].forEach(kind => {
@@ -2301,7 +2656,10 @@ export class AgentSidebar {
         this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
 
         // 右上角齿轮与圆球菜单都可进入设置模式。
-        document.getElementById('agentSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
+        document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
+            this._closeAgentHeaderPopovers();
+            this.setMode('settings');
+        });
 
         // 模板点击
         document.querySelectorAll('.agent-template-chip').forEach(chip => {
@@ -2401,6 +2759,7 @@ export class AgentSidebar {
         const nextMode = ['agent', 'settings', 'review'].includes(mode) ? mode : 'review';
         const body = document.body;
         this._closeAgentComposerPopovers();
+        this._closeAgentHeaderPopovers();
         this._setTaskHistoryOpen(false);
         this.options.endMediaReferencePick?.({ clearHighlights: true });
         this.currentMode = nextMode;
@@ -3603,7 +3962,6 @@ export class AgentSidebar {
         const disconnectedCount = visibleTasks.filter(task => task.status === 'disconnected').length;
         const badgeCount = this.generationTasks.filter(task => ['running', 'disconnected'].includes(task.status)).length;
         if (this.taskHistoryBadge) {
-            this.taskHistoryBadge.hidden = badgeCount === 0;
             this.taskHistoryBadge.textContent = String(badgeCount);
         }
         if (this.taskHistorySummary) {
@@ -4444,6 +4802,7 @@ export class AgentSidebar {
     }
 
     close() {
+        this._closeAgentHeaderPopovers();
         document.body.classList.remove('agent-open');
         this._syncHudState();
     }

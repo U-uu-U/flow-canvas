@@ -1120,6 +1120,21 @@ body.platform-win32 .canvas-project-chip {
     color: #111214;
 }
 
+.canvas-tool-btn.canvas-task-history-btn {
+    border-radius: 50%;
+    background: #f1f1ef;
+    color: #121315;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+}
+
+.canvas-tool-btn.canvas-task-history-btn:hover,
+.canvas-tool-btn.canvas-task-history-btn.active {
+    background: #ffffff;
+    color: #050607;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18), 0 4px 14px rgba(0, 0, 0, 0.34);
+}
+
 .canvas-tool-separator {
     width: 26px;
     height: 1px;
@@ -2093,6 +2108,10 @@ body.platform-win32.settings-mode .agent-sidebar {
 
 body.platform-win32.agent-open .agent-sidebar-wrapper {
     z-index: 13001;
+}
+
+body.agent-open .titlebar {
+    z-index: 13002;
 }
 
 body.platform-win32 .agent-settings-btn {
@@ -6893,20 +6912,6 @@ select.plan-cell-input {
     animation: connection-node-menu-in 120ms ease-out both;
 }
 
-.creation-mode-option.task-history {
-    position: relative;
-}
-
-.creation-mode-option.task-history .agent-task-history-badge {
-    min-width: 17px;
-    height: 17px;
-    margin-left: auto;
-    padding: 0 5px;
-    border-radius: 9px;
-    background: #b56f31;
-    font-size: 8px;
-}
-
 .generation-type-menu-heading {
     padding: 7px 9px 6px;
     color: #8f939a;
@@ -9910,47 +9915,14 @@ body.settings-mode .agent-sidebar {
     background-color: #1b1c1f;
 }
 
-/* Generation task history shares the creation sidebar without changing the active mode. */
-.agent-task-history-btn {
-    display: none;
-    min-width: 0;
-    height: 30px;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 9px;
-    border: 1px solid #34373d;
-    border-radius: 6px;
-    background: #25272b;
-    color: #aeb2ba;
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-}
-
-body.image-mode .agent-task-history-btn,
-body.video-mode .agent-task-history-btn {
-    display: inline-flex;
-}
-
-.agent-task-history-btn:hover,
-.agent-task-history-btn.active {
-    border-color: #56606e;
-    background: #30343a;
-    color: #f1f3f5;
-}
-
 .agent-task-history-badge {
-    display: inline-flex;
-    min-width: 16px;
-    height: 16px;
-    align-items: center;
-    justify-content: center;
-    padding: 0 4px;
-    border-radius: 8px;
-    background: #c37731;
-    color: #fff;
-    font-size: 9px;
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
+    color: inherit;
+    font-size: 12px;
+    font-weight: 700;
     line-height: 1;
 }
 
@@ -10453,23 +10425,6 @@ body.video-mode .agent-task-history-btn {
     }
 }
 
-@media (max-width: 520px) {
-    .agent-task-history-btn span {
-        display: none;
-    }
-
-    .agent-task-history-btn {
-        width: 30px;
-        justify-content: center;
-        padding: 0;
-    }
-
-    .agent-task-history-badge {
-        position: absolute;
-        margin: -24px 0 0 24px;
-    }
-}
-
 /* Task history is a canvas-level popover, independent from creation sidebars. */
 .task-history-dock {
     position: fixed;
@@ -10478,48 +10433,12 @@ body.video-mode .agent-task-history-btn {
     z-index: 12020;
 }
 
-.task-history-dock .agent-task-history-btn {
-    position: fixed;
-    right: 82px;
-    bottom: 26px;
-    display: grid;
-    width: 40px;
-    min-width: 40px;
-    height: 40px;
-    place-items: center;
-    margin: 0;
-    padding: 0;
-    border: 1px solid #3b3e44;
-    border-radius: 50%;
-    background: #24262a;
-    color: #9a9ea6;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
-}
-
-.task-history-dock .agent-task-history-btn:hover,
-.task-history-dock .agent-task-history-btn.active {
-    border-color: #62666e;
-    background: #303238;
-    color: #eef0f2;
-}
-
-.task-history-dock .agent-task-history-badge {
-    position: absolute;
-    top: -4px;
-    right: -5px;
-    min-width: 17px;
-    height: 17px;
-    margin: 0;
-    border: 2px solid #1b1c1f;
-    border-radius: 9px;
-    background: #b56f31;
-    font-size: 8px;
-}
-
 .task-history-dock .agent-task-history {
     position: fixed;
-    right: 20px;
-    bottom: 82px;
+    top: 50%;
+    left: calc(var(--sidebar-w) + 58px);
+    right: auto;
+    bottom: auto;
     display: flex;
     width: min(400px, calc(100vw - 24px));
     max-height: min(620px, calc(100vh - 104px));
@@ -10530,6 +10449,11 @@ body.video-mode .agent-task-history-btn {
     background: rgba(28, 30, 34, 0.985);
     box-shadow: 0 22px 60px rgba(0, 0, 0, 0.5);
     backdrop-filter: blur(18px);
+    transform: translateY(-50%);
+}
+
+body.sidebar-closed .task-history-dock .agent-task-history {
+    left: 58px;
 }
 
 .agent-task-history-head {
@@ -10619,17 +10543,9 @@ body.video-mode .agent-task-history-btn {
 }
 
 @media (max-width: 520px) {
-    .task-history-dock .agent-task-history-btn {
-        right: 76px;
-        bottom: 25px;
-        width: 38px;
-        min-width: 38px;
-        height: 38px;
-    }
-
     .task-history-dock .agent-task-history {
-        right: 12px;
-        bottom: 76px;
+        left: 52px;
+        width: calc(100vw - 64px);
     }
 }
 
@@ -11821,5 +11737,491 @@ body.asset-library-open .canvas-project-chip {
         bottom: 8px;
         height: auto;
         min-height: 0;
+    }
+}
+
+/* Agent task header: task navigation, conversation files, and close-only control. */
+.agent-task-header-controls {
+    display: none;
+}
+
+body.agent-mode .agent-header {
+    position: relative;
+    min-width: 0;
+    height: 48px;
+    min-height: 48px;
+    box-sizing: border-box;
+    padding: 6px 9px;
+    border-top: 1px solid #292929;
+    border-bottom: 1px solid #292929;
+    overflow: visible;
+    z-index: 30;
+}
+
+body.agent-mode .agent-header-right {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    gap: 5px;
+}
+
+.titlebar .agent-settings-btn {
+    display: none;
+}
+
+body.creation-mode.agent-open .titlebar .agent-settings-btn {
+    position: absolute;
+    top: 2px;
+    z-index: 2;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    padding: 7px;
+    color: #a6a6a6;
+    border-radius: 6px;
+    pointer-events: auto;
+    -webkit-app-region: no-drag;
+}
+
+body.agent-mode.agent-open .titlebar .agent-settings-btn {
+    right: calc(min(420px, 100vw) - 44px);
+}
+
+body.settings-mode.agent-open .titlebar .agent-settings-btn,
+body.image-mode.agent-open .titlebar .agent-settings-btn,
+body.video-mode.agent-open .titlebar .agent-settings-btn {
+    right: calc(min(480px, 100vw) - 44px);
+}
+
+body.creation-mode.agent-open .titlebar .agent-settings-btn > .flow-icon {
+    width: 20px;
+    height: 20px;
+}
+
+body.agent-mode .agent-task-header-controls {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: center;
+    gap: 3px;
+}
+
+.agent-task-header-divider {
+    width: 1px;
+    height: 20px;
+    margin: 0 3px 0 1px;
+    flex: 0 0 1px;
+    background: #333333;
+}
+
+.agent-task-header-spacer {
+    min-width: 2px;
+    flex: 1;
+}
+
+.agent-header-control-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.agent-header-icon-btn,
+.agent-conversation-title-btn,
+.agent-files-btn {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #969696;
+    font: inherit;
+    cursor: pointer;
+}
+
+.agent-header-icon-btn {
+    width: 30px;
+    flex: 0 0 30px;
+}
+
+.agent-header-icon-btn .flow-icon {
+    width: 17px;
+    height: 17px;
+}
+
+.agent-header-icon-btn:hover,
+.agent-header-icon-btn[aria-expanded="true"],
+.agent-conversation-title-btn:hover,
+.agent-conversation-title-btn[aria-expanded="true"],
+.agent-files-btn:hover,
+.agent-files-btn[aria-expanded="true"] {
+    color: #e5e5e5;
+    background: #292929;
+}
+
+.agent-conversation-title-btn {
+    max-width: 132px;
+    min-width: 0;
+    justify-content: flex-start;
+    gap: 7px;
+    padding: 0 7px;
+    color: #d5d5d5;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.agent-conversation-title-btn .flow-icon {
+    flex: 0 0 15px;
+    color: #8d8d8d;
+}
+
+.agent-conversation-title-btn span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-files-btn {
+    position: relative;
+    gap: 5px;
+    padding: 0 7px;
+    color: #969696;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.agent-files-btn b {
+    min-width: 15px;
+    height: 15px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0 3px;
+    border-radius: 7px;
+    background: #353535;
+    color: #cfcfcf;
+    font-size: 8px;
+    font-weight: 600;
+}
+
+.agent-files-btn b[hidden] {
+    display: none;
+}
+
+.agent-sidebar-close-btn .flow-icon {
+    transform: rotate(180deg);
+}
+
+.agent-header-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    z-index: 80;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid #3a3a3a;
+    border-radius: 7px;
+    background: #202020;
+    color: #dedede;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.48);
+}
+
+.agent-header-popover[hidden] {
+    display: none;
+}
+
+.agent-conversation-popover {
+    left: -2px;
+    width: 310px;
+}
+
+.agent-files-popover {
+    right: -34px;
+    width: 320px;
+}
+
+.agent-header-popover > header {
+    min-height: 51px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 9px 8px 12px;
+    border-bottom: 1px solid #303030;
+}
+
+.agent-header-popover > header > div {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.agent-header-popover > header strong {
+    color: #eeeeee;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.agent-header-popover > header span {
+    overflow: hidden;
+    color: #858585;
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-new-conversation-btn {
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 9px;
+    border: 1px solid #3b3b3b;
+    border-radius: 5px;
+    background: #292929;
+    color: #cecece;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.agent-new-conversation-btn:hover {
+    border-color: #515151;
+    background: #323232;
+    color: #ffffff;
+}
+
+.agent-conversation-list,
+.agent-files-list {
+    max-height: min(360px, calc(100vh - 130px));
+    padding: 5px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #505050 transparent;
+}
+
+.agent-conversation-list::-webkit-scrollbar,
+.agent-files-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.agent-conversation-list::-webkit-scrollbar-thumb,
+.agent-files-list::-webkit-scrollbar-thumb {
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: #505050;
+    background-clip: padding-box;
+}
+
+.agent-conversation-item {
+    width: 100%;
+    min-height: 48px;
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) 18px;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #999999;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.agent-conversation-item:hover,
+.agent-conversation-item.active {
+    background: #2a2a2a;
+    color: #dedede;
+}
+
+.agent-conversation-item > span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.agent-conversation-item strong,
+.agent-conversation-item small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-conversation-item strong {
+    color: #dddddd;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.agent-conversation-item small {
+    color: #777777;
+    font-size: 9px;
+}
+
+.agent-conversation-check {
+    opacity: 0;
+    color: #cfcfcf;
+}
+
+.agent-conversation-item.active .agent-conversation-check {
+    opacity: 1;
+}
+
+.agent-conversation-actions-popover {
+    left: -154px;
+    width: 220px;
+    padding: 10px;
+}
+
+.agent-conversation-actions-popover label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: #8f8f8f;
+    font-size: 9px;
+}
+
+.agent-conversation-actions-popover input {
+    width: 100%;
+    height: 33px;
+    box-sizing: border-box;
+    padding: 0 9px;
+    border: 1px solid #3c3c3c;
+    border-radius: 5px;
+    outline: 0;
+    background: #181818;
+    color: #eeeeee;
+    font: inherit;
+    font-size: 11px;
+}
+
+.agent-conversation-actions-popover input:focus {
+    border-color: #606060;
+}
+
+.agent-conversation-actions-popover > div {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 9px;
+}
+
+.agent-conversation-actions-popover button {
+    height: 30px;
+    border: 1px solid #3d3d3d;
+    border-radius: 5px;
+    background: #292929;
+    color: #d5d5d5;
+    font: inherit;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.agent-conversation-actions-popover button:hover {
+    border-color: #555555;
+    background: #333333;
+}
+
+.agent-conversation-actions-popover button.danger:hover {
+    border-color: #6b3e43;
+    background: #3b282b;
+    color: #e3a1a8;
+}
+
+.agent-file-item {
+    min-height: 48px;
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: center;
+    gap: 9px;
+    padding: 7px 8px;
+    border-radius: 5px;
+}
+
+.agent-file-item:hover {
+    background: #292929;
+}
+
+.agent-file-item > span:first-child {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border: 1px solid #383838;
+    border-radius: 5px;
+    background: #272727;
+    color: #a9a9a9;
+}
+
+.agent-file-item > span:last-child {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.agent-file-item strong,
+.agent-file-item small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-file-item strong {
+    color: #dddddd;
+    font-size: 10px;
+    font-weight: 500;
+}
+
+.agent-file-item small {
+    color: #787878;
+    font-size: 9px;
+}
+
+.agent-files-empty {
+    padding: 30px 16px;
+    color: #777777;
+    font-size: 10px;
+    line-height: 1.55;
+    text-align: center;
+}
+
+@media (max-width: 460px) {
+    .agent-files-btn span,
+    .agent-conversation-title-btn .flow-icon,
+    .agent-task-header-divider {
+        display: none;
+    }
+
+    .agent-conversation-title-btn {
+        max-width: 94px;
+        padding: 0 5px;
+    }
+
+    .agent-files-btn {
+        width: 30px;
+        padding: 0;
+    }
+
+    .agent-files-btn b {
+        position: absolute;
+        top: 1px;
+        right: -1px;
+    }
+
+    .agent-conversation-popover {
+        left: -38px;
+        width: min(310px, calc(100vw - 20px));
+    }
+
+    .agent-files-popover {
+        right: -34px;
+        width: min(320px, calc(100vw - 20px));
     }
 }

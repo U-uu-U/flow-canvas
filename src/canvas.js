@@ -10638,7 +10638,12 @@ export class CanvasManager {
             configOverrides
         });
         this._syncGenerationComposerStatus(nodeId);
-        return result;
+        if (!result?.ok) return result;
+        const completedData = this.items.get(nodeId)?.data;
+        const filePaths = completedData?.kind === 'media'
+            ? [completedData.filePath].filter(Boolean)
+            : (Array.isArray(completedData?.resultFilePaths) ? completedData.resultFilePaths.filter(Boolean) : []);
+        return { ...result, filePaths };
     }
 
     async runFromNode(nodeId, options = {}) {

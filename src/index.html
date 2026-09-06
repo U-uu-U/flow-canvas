@@ -13,6 +13,9 @@
     <div class="titlebar" id="titlebar">
         <div class="titlebar-drag" aria-hidden="true"></div>
         <div class="titlebar-status" id="titlebarStatus"></div>
+        <button class="agent-settings-btn" id="agentSettingsBtn" type="button" title="设置" aria-label="设置">
+            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
+        </button>
     </div>
 
     <!-- 主布局 -->
@@ -162,6 +165,11 @@
                 </button>
                 <button class="canvas-tool-btn" id="canvasToolPlan" type="button" title="新建规划表" aria-label="新建规划表">
                     <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                </button>
+                <span class="canvas-tool-separator" aria-hidden="true"></span>
+                <button class="canvas-tool-btn canvas-task-history-btn" id="agentTaskHistoryBtn" type="button"
+                    title="打开任务记录" aria-label="打开任务记录" aria-controls="agentTaskHistory" aria-expanded="false">
+                    <b class="agent-task-history-badge" id="agentTaskHistoryBadge">0</b>
                 </button>
             </div>
             <!-- 素材库独立于文件夹组，只从左侧浮动工具栏打开。 -->
@@ -324,9 +332,60 @@
                     </div>
                     <div class="agent-header-right">
                         <span class="agent-header-status"><i aria-hidden="true"></i>就绪</span>
-                        <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
-                        </button>
+                        <div class="agent-task-header-controls">
+                            <span class="agent-task-header-divider" aria-hidden="true"></span>
+                            <div class="agent-header-control-wrap">
+                                <button class="agent-header-icon-btn" id="agentConversationMenuBtn" type="button"
+                                    title="切换任务对话" aria-label="切换任务对话" aria-expanded="false"
+                                    aria-controls="agentConversationPopover">
+                                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
+                                </button>
+                                <section class="agent-header-popover agent-conversation-popover" id="agentConversationPopover"
+                                    aria-label="任务对话" hidden>
+                                    <header>
+                                        <div>
+                                            <strong>任务对话</strong>
+                                            <span id="agentConversationSummary">1 个任务</span>
+                                        </div>
+                                        <button class="agent-new-conversation-btn" id="agentNewConversationBtn" type="button">
+                                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                            <span>新任务</span>
+                                        </button>
+                                    </header>
+                                    <div class="agent-conversation-list" id="agentConversationList"></div>
+                                </section>
+                            </div>
+                            <button class="agent-conversation-title-btn" id="agentConversationTitleBtn" type="button"
+                                title="切换任务对话" aria-label="当前任务对话，点击切换" aria-expanded="false"
+                                aria-controls="agentConversationPopover">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
+                                <span id="agentConversationTitle">新任务</span>
+                            </button>
+                            <span class="agent-task-header-spacer"></span>
+                            <div class="agent-header-control-wrap agent-file-control-wrap">
+                                <button class="agent-files-btn" id="agentFilesBtn" type="button"
+                                    title="查看全部文件" aria-label="查看全部文件" aria-expanded="false"
+                                    aria-controls="agentFilesPopover">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg>
+                                    <span>全部文件</span>
+                                    <b id="agentFilesCount" hidden>0</b>
+                                </button>
+                                <section class="agent-header-popover agent-files-popover" id="agentFilesPopover"
+                                    aria-label="全部文件" hidden>
+                                    <header>
+                                        <div>
+                                            <strong>全部文件</strong>
+                                            <span id="agentFilesSummary">当前对话还没有输入或产出文件</span>
+                                        </div>
+                                    </header>
+                                    <div class="agent-files-list" id="agentFilesList"></div>
+                                </section>
+                            </div>
+                            <button class="agent-header-icon-btn agent-sidebar-close-btn" id="agentSidebarCloseBtn"
+                                type="button" title="关闭侧边栏" aria-label="关闭侧边栏">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -366,7 +425,7 @@
                                 </button>
                                 <button class="agent-composer-menu-item agent-clear-btn" id="agentClearBtn" type="button">
                                     <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
-                                    <span><strong>清空对话</strong><small>仅清除当前项目的 Agent 记录</small></span>
+                                    <span><strong>清空对话</strong><small>仅清除当前任务对话的 Agent 记录</small></span>
                                 </button>
                             </div>
                         </div>
@@ -956,12 +1015,6 @@
 
         <!-- 图片和视频创作都在画布节点中完成；这里只保留全局工具。 -->
         <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
-            <button class="creation-mode-option task-history" id="agentTaskHistoryBtn" type="button"
-                title="打开任务记录" aria-label="打开任务记录" aria-controls="agentTaskHistory" aria-expanded="false">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
-                <span>任务记录</span>
-                <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
-            </button>
             <button class="creation-mode-option settings" id="creationModeSettingsBtn" type="button">
                 <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
                 设置模式
