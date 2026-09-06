@@ -198,8 +198,14 @@ GET  /v1/video/generations/{task_id}
 | `flow_canvas.item.*` | 读取和维护画板素材 |
 | `flow_canvas.image.generate` | 生成图片并写入当前画板 |
 | `flow_canvas.video.generate` | 提交视频任务并将结果写入画板 |
+| `flow_canvas.board.get_snapshot` | 按选择、上下游、视口或整个项目读取带 revision 的画板快照 |
+| `flow_canvas.board.transaction.preview` | 原子校验整笔节点、连线和排列事务，不修改画板 |
+| `flow_canvas.board.transaction.apply` | 按 `baseRevision` 提交事务，并返回幂等结果和 `undoToken` |
+| `flow_canvas.board.transaction.undo` | 使用 `undoToken` 整笔撤销一次 Agent 画板事务 |
 
 默认本地桥接地址是 `http://127.0.0.1:18765`。可通过 `FLOW_CANVAS_MCP_PORT` 修改端口，或使用 `FLOW_CANVAS_BRIDGE_URL` 指向已经运行的桥接服务。
+
+Harness 修改画板时应固定遵循 `get_snapshot → preview → apply`。每笔事务使用快照中的 `revision` 作为 `baseRevision`，并提供稳定的 `idempotencyKey`；如果返回 `REVISION_CONFLICT`，重新读取快照后再规划，不要覆盖用户刚完成的操作。`apply` 和 `undo` 在 Flow Canvas 内部串行执行，刷新或画板尚未加载完成时会返回可重试的 renderer readiness 错误。
 
 ## 浏览器同步扩展
 
@@ -260,7 +266,7 @@ flowchart LR
 | --- | --- |
 | `src/` | Vite 前端、Konva 画布、素材侧栏及图片/视频工作区 |
 | `electron-main/` | Electron 主进程、文件监听、缩略图、剪贴板、任务恢复与下载 |
-| `shared/` | Electron 与 MCP 共用的规划表数据服务 |
+| `shared/` | Electron、renderer 与 MCP 共用的数据服务、schema 和画板工具契约 |
 | `mcp/` | stdio MCP 服务入口和工具定义 |
 | `browser-extension/flow-canvas-sync/` | 可选 Chrome 任务同步扩展 |
 

@@ -1,7 +1,4 @@
 export const IMAGE_GENERATION_PREFERENCE_KEYS = Object.freeze([
-    'prompt',
-    'promptMergeMode',
-    'negativePrompt',
     'resolutionTier',
     'ratio',
     'width',
@@ -36,6 +33,13 @@ export const IMAGE_GENERATION_PREFERENCE_KEYS = Object.freeze([
     'midjourneyVisibility'
 ]);
 
+export const IMAGE_NODE_PROMPT_KEYS = Object.freeze([
+    'prompt',
+    'promptMergeMode',
+    'negativePrompt',
+    'promptTemplate'
+]);
+
 export const IMAGE_GENERATION_PREFERENCES_VERSION = 1;
 
 function copyConfig(config = {}) {
@@ -45,6 +49,39 @@ function copyConfig(config = {}) {
         }
         return result;
     }, {});
+}
+
+function copyNodePromptConfig(config = {}) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return {};
+    return IMAGE_NODE_PROMPT_KEYS.reduce((result, key) => {
+        if (!Object.prototype.hasOwnProperty.call(config, key) || config[key] === undefined) return result;
+        result[key] = key === 'promptTemplate' && config[key] && typeof config[key] === 'object'
+            ? { ...config[key] }
+            : config[key];
+        return result;
+    }, {});
+}
+
+export function resolveImageNodePromptConfig(source = {}) {
+    const generationConfig = source?.generation?.config;
+    return {
+        ...copyNodePromptConfig(generationConfig),
+        ...copyNodePromptConfig(source?.generationPromptDraft)
+    };
+}
+
+export function mergeImageNodePromptConfig(defaultConfig = {}, source = {}) {
+    return {
+        ...(defaultConfig && typeof defaultConfig === 'object' ? defaultConfig : {}),
+        ...resolveImageNodePromptConfig(source)
+    };
+}
+
+export function createImageNodePromptDraft(config = {}, updatedAt = Date.now()) {
+    return {
+        ...copyNodePromptConfig(config),
+        updatedAt: Math.max(0, Number(updatedAt) || Date.now())
+    };
 }
 
 export function imageGenerationPreferenceKey(binding = {}) {

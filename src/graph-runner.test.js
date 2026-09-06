@@ -166,6 +166,39 @@ test('runFrom: 同一节点链防重复，互不相干的链可并发', async ()
     delete NT.__test_slow;
 });
 
+test('cancel: 中断运行节点并丢弃迟到结果', async () => {
+    let release;
+    NT.__test_cancelable = {
+        type: '__test_cancelable', title: '可中断', icon: 'stop', color: '#777', width: 100,
+        inputs: [], outputs: [{ name: 'out', dataType: 'string' }], config: [],
+        execute: () => new Promise(resolve => { release = resolve; })
+    };
+    const items = [op('cancel-me', '__test_cancelable')];
+    const landed = [];
+    const ctx = {
+        ...makeCtx(items),
+        onResult: (_item, output) => landed.push(output),
+        cancelGenerationTasks: async nodeId => {
+            assert.equal(nodeId, 'cancel-me');
+            release({ out: 'late result' });
+        }
+    };
+    const runner = new R.GraphRunner(ctx);
+    const pending = runner.runFrom('cancel-me');
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(await runner.cancel('cancel-me'), true);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.canceled, true);
+    assert.equal(items[0].runStatus, R.STATUS.CANCELED);
+    assert.equal(runner.getResult('cancel-me'), null);
+    assert.deepEqual(landed, []);
+    assert.equal(await runner.cancel('cancel-me'), false);
+
+    delete NT.__test_cancelable;
+});
+
 test('runFrom: 共享上游的两条链不能同时执行', async () => {
     let release;
     NT.__test_shared_slow = {
@@ -222,6 +255,32 @@ test('config 缺省值由节点类型的 default 补齐', async () => {
     const runner = new R.GraphRunner(makeCtx(items, edges));
     await runner.runFrom('m');
     assert.equal(runner.getResult('m').text, 'x\ny');
+});
+
+test('runFrom: 已有生成产物作为上游时直接复用，不重复调用生成模型', async () => {
+    NT.__test_image_sink = {
+        type: '__test_image_sink', title: '图片接收', icon: 'image', color: '#0f0', width: 100,
+        inputs: [{ name: 'image', dataType: 'image' }],
+        outputs: [{ name: 'out', dataType: 'image' }],
+        config: [],
+        async execute(inputs) { return { out: inputs.image }; }
+    };
+    const source = {
+        ...op('generated', 'image', { prompt: '不应再次执行' }),
+        resultEntries: [{ filePath: 'C:/outputs/generated.png', url: '', item: null }]
+    };
+    const sink = op('sink', '__test_image_sink');
+    const edges = [conn('generated', 'image', 'sink', 'image')];
+    const runner = new R.GraphRunner(makeCtx([source, sink], edges));
+
+    const result = await runner.runFrom('sink');
+
+    assert.equal(result.ok, true);
+    assert.equal(runner.getResult('generated').image,
+        'local-res://' + encodeURIComponent('C:/outputs/generated.png'));
+    assert.equal(runner.getResult('sink').out,
+        'local-res://' + encodeURIComponent('C:/outputs/generated.png'));
+    delete NT.__test_image_sink;
 });
 
 test('runFrom: 单次配置覆盖不会改写节点持久化配置', async () => {

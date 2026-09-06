@@ -5,6 +5,7 @@
 // ============================================================
 
 import { NODE_TYPES } from './node-types.js';
+import { getGeneratorResultEntries } from './generator-result-stack.js';
 
 const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'tif', 'gif'];
 const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'mkv', 'wmv', 'flv', 'webm'];
@@ -345,6 +346,21 @@ export function mediaOutput(item) {
     const port = outputs[0];
     if (!port || !item.filePath) return {};
     return { [port.name]: 'local-res://' + encodeURIComponent(item.filePath) };
+}
+
+/**
+ * 已完成的生成节点作为其他节点的上游时，等同于当前首个媒体产物。
+ * 只有显式运行该生成节点本身时才应再次调用模型。
+ */
+export function generatorResultOutput(item) {
+    if (item?.kind !== 'op' || !['image', 'video'].includes(item.nodeType)) return {};
+    const result = getGeneratorResultEntries(item)[0];
+    const value = result?.filePath
+        ? 'local-res://' + encodeURIComponent(result.filePath)
+        : String(result?.url || '').trim();
+    if (!value) return {};
+    const output = (NODE_TYPES[item.nodeType]?.outputs || [])[0];
+    return output?.name ? { [output.name]: value } : {};
 }
 
 /**

@@ -3,7 +3,13 @@ import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
 import { PlanService } from './plan-service.js';
-import { UndoStack } from './undo-stack.js';
+import { snapshotState, UndoStack } from './undo-stack.js';
+import {
+    applyBoardTransaction,
+    createBoardSnapshot,
+    previewBoardTransaction,
+    undoBoardTransaction
+} from './board-transaction.js';
 
 let storeData = null;
 let canvasManager = null;
@@ -11,16 +17,21 @@ let sidebarManager = null;
 let contextMenu = null;
 let agentSidebar = null;
 let planService = null;
+let unsubscribeBoardToolRequests = null;
 const HISTORY_LIMIT = 100;
 const historyStack = new UndoStack(HISTORY_LIMIT);
+const transactionUndoRecords = new Map();
+const TRANSACTION_UNDO_LIMIT = 100;
 let isRestoringHistory = false;
 let historyCommitTimer = null;
+let lastBoardSemanticFingerprint = '';
 let switchGroupRunId = 0;
 const assetClassificationQueue = [];
 const queuedAssetClassifications = new Set();
 let assetClassificationRunning = false;
 
 document.body.classList.add(`platform-${window.flowCanvas?.platform || 'web'}`);
+window.flowCanvas?.mcp?.setBoardToolsReady?.(false);
 if (window.flowCanvas?.platform === 'darwin') {
     document.querySelectorAll('.context-menu-shortcut').forEach(element => {
         element.textContent = element.textContent.replace(/^Ctrl\+/, 'Command+');
@@ -72,7 +83,11 @@ async function bootstrap() {
                 agentSidebar?._prepareImageReferencesForGeneration?.(refs) || [],
             createGenerationTask: (details) => agentSidebar?.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => agentSidebar?.updateGenerationTask?.(taskId, patch) || null,
-            recordGenerationError: (taskId, error) => agentSidebar?.recordGenerationError?.(taskId, error) || null
+            recordGenerationError: (taskId, error) => agentSidebar?.recordGenerationError?.(taskId, error) || null,
+            cancelGenerationTasks: (nodeId) => agentSidebar?.cancelGenerationTasksForNode?.(nodeId) || false,
+            cancelGenerationTask: (taskId) => agentSidebar?.cancelGenerationTask?.(taskId) || false,
+            retryGenerationTask: (taskId, options) => agentSidebar?.retryGenerationTask?.(taskId, options) || null,
+            persistCompletedGenerationNode: (nodeData) => persistCompletedGenerationNode(nodeData)
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
             getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
@@ -92,14 +107,22 @@ async function bootstrap() {
             chooseAssetLibraryFolder: () => sidebarManager?.chooseAssetLibraryFolder?.({ makeDefault: true }) || null,
             setDefaultAssetLibraryFolder: (folderPath) => sidebarManager?.setAssetLibraryDefaultFolder?.(folderPath) ?? false,
             subscribeAssetLibrarySettings: (handler) => sidebarManager?.on?.('assetLibrarySettingsChanged', handler),
-            onGenerationTasksChanged: (tasks) => sidebarManager?.setGenerationTaskStates?.(tasks),
+            onGenerationTasksChanged: (tasks) => {
+                sidebarManager?.setGenerationTaskStates?.(tasks);
+                canvasManager?.setGenerationTaskStates?.(tasks);
+            },
             beginImageGeneration: (settings) => canvasManager?.addImageGenerationPlaceholder?.(settings) || null,
             endImageGeneration: (placeholderId, itemId) => canvasManager?.removeImageGenerationPlaceholder?.(placeholderId, itemId),
             beginVideoGeneration: (settings) => canvasManager?.addVideoGenerationPlaceholder?.(settings) || null,
             endVideoGeneration: (placeholderId, itemId) => canvasManager?.removeVideoGenerationPlaceholder?.(placeholderId, itemId),
+            completeGenerationTaskOnNode: (details) => canvasManager?.completeGenerationTaskOnNode?.(details) || false,
             getAgentNodeContext: (nodeId) => canvasManager?.getAgentGenerationContext?.(nodeId) || null,
             executeImageNodeFromAgent: (details) => canvasManager?.runImageNodeWithAgentPlan?.(details) || null,
-            applyPlanSuggestion: (rows) => applyAgentPlanRows(rows)
+            applyPlanSuggestion: (rows) => applyAgentPlanRows(rows),
+            getBoardSnapshot: (options) => getAgentBoardSnapshot(options),
+            previewBoardTransaction: (transaction) => previewAgentBoardTransaction(transaction),
+            applyBoardTransaction: (transaction) => applyAgentBoardTransaction(transaction),
+            undoBoardTransaction: (undoToken) => undoAgentBoardTransaction(undoToken)
         }));
 
         // 3. 关联事件
@@ -467,11 +490,48 @@ async function bootstrap() {
         updateBodyState();
         resetHistory('initial');
         startBoardUsageMonitor();
+        registerBoardToolBridge();
 
     } catch (err) {
+        window.flowCanvas?.mcp?.setBoardToolsReady?.(false);
         console.error('[Main] 启动失败:', err);
         showStartupError(err);
     }
+}
+
+function registerBoardToolBridge() {
+    unsubscribeBoardToolRequests?.();
+    unsubscribeBoardToolRequests = null;
+    const bridge = window.flowCanvas?.mcp;
+    if (!agentSidebar?.boardToolRegistry || !bridge?.onBoardToolRequest || !bridge?.respondBoardTool) {
+        bridge?.setBoardToolsReady?.(false);
+        return false;
+    }
+
+    unsubscribeBoardToolRequests = bridge.onBoardToolRequest((payload = {}) => {
+        const requestId = String(payload.requestId || '').trim();
+        if (!requestId) return;
+        Promise.resolve()
+            .then(() => agentSidebar.boardToolRegistry.execute(payload.toolName, payload.input || {}))
+            .then(result => {
+                bridge.respondBoardTool({ requestId, success: true, result });
+            })
+            .catch(error => {
+                bridge.respondBoardTool({
+                    requestId,
+                    success: false,
+                    error: {
+                        code: String(error?.code || 'BOARD_TOOL_FAILED'),
+                        message: String(error?.message || error || 'Board tool failed'),
+                        details: error?.details && typeof error.details === 'object'
+                            ? cloneData(error.details)
+                            : null
+                    }
+                });
+            });
+    });
+    bridge.setBoardToolsReady?.(true);
+    return true;
 }
 
 function enqueueAssetClassifications(filePaths = []) {
@@ -626,9 +686,162 @@ function cloneData(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
+async function persistCompletedGenerationNode(nodeData) {
+    const nodeId = String(nodeData?.id || '').trim();
+    if (!nodeId || !storeData || !canvasManager) return false;
+
+    const item = (storeData.items || []).find(candidate => candidate?.id === nodeId);
+    if (!item) return false;
+
+    const snapshot = cloneData(nodeData);
+    Object.keys(item).forEach(key => { delete item[key]; });
+    Object.assign(item, snapshot);
+    return await Promise.resolve(saveStoreNow());
+}
+
 function getCurrentViewport() {
     if (canvasManager) return canvasManager.getViewport();
     return cloneData(storeData?.viewport || { x: 0, y: 0, scale: 1 });
+}
+
+function getActiveStoreGroup() {
+    return (storeData?.folderGroups || []).find(group => group.id === storeData?.activeGroupId) || null;
+}
+
+function getBoardRevision() {
+    const group = getActiveStoreGroup();
+    const revision = Number(group?.boardRevision ?? storeData?.boardRevision);
+    return Number.isInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+function setBoardRevision(revision) {
+    if (!storeData) return 0;
+    const normalized = Number.isInteger(Number(revision)) && Number(revision) >= 0 ? Number(revision) : 0;
+    storeData.boardRevision = normalized;
+    const group = getActiveStoreGroup();
+    if (group) group.boardRevision = normalized;
+    return normalized;
+}
+
+function incrementBoardRevision() {
+    return setBoardRevision(getBoardRevision() + 1);
+}
+
+function getAppliedTransactionKeys() {
+    const group = getActiveStoreGroup();
+    const source = group?.appliedTransactionKeys ?? storeData?.appliedTransactionKeys;
+    return [...new Set((Array.isArray(source) ? source : []).map(String).filter(Boolean))].slice(-200);
+}
+
+function setAppliedTransactionKeys(keys) {
+    if (!storeData) return [];
+    const normalized = [...new Set((Array.isArray(keys) ? keys : []).map(String).filter(Boolean))].slice(-200);
+    storeData.appliedTransactionKeys = normalized;
+    const group = getActiveStoreGroup();
+    if (group) group.appliedTransactionKeys = [...normalized];
+    return normalized;
+}
+
+function getViewportWorldBounds() {
+    const viewport = getCurrentViewport();
+    const scale = Math.max(0.01, Number(viewport.scale) || 1);
+    const width = Number(canvasManager?.stage?.width?.()) || 0;
+    const height = Number(canvasManager?.stage?.height?.()) || 0;
+    return {
+        x: -(Number(viewport.x) || 0) / scale,
+        y: -(Number(viewport.y) || 0) / scale,
+        width: width / scale,
+        height: height / scale
+    };
+}
+
+function getAgentBoardSnapshot(options = {}) {
+    if (!storeData) return null;
+    if (historyCommitTimer && !isRestoringHistory) commitHistory('before-agent-snapshot');
+    const selectedItemIds = [...(canvasManager?.selectedItems || [])];
+    return createBoardSnapshot({
+        projectId: storeData.activeGroupId || null,
+        revision: getBoardRevision(),
+        items: storeData.items || [],
+        connections: canvasManager?.graphView?.serialize?.() || storeData.connections || [],
+        plans: planService?.listPlans?.() || [],
+        viewport: getCurrentViewport(),
+        selectedItemIds,
+        appliedTransactionKeys: getAppliedTransactionKeys()
+    }, {
+        ...options,
+        scope: options.scope || 'selection',
+        selectedItemIds: options.selectedItemIds || selectedItemIds,
+        viewportBounds: options.viewportBounds || getViewportWorldBounds()
+    });
+}
+
+function previewAgentBoardTransaction(transaction) {
+    const snapshot = getAgentBoardSnapshot({ scope: 'project' });
+    if (!snapshot) throw new Error('画板尚未初始化');
+    return previewBoardTransaction(snapshot, transaction);
+}
+
+function applyAgentBoardTransaction(transaction) {
+    const current = getAgentBoardSnapshot({ scope: 'project' });
+    if (!current) throw new Error('画板尚未初始化');
+    const result = applyBoardTransaction(current, transaction);
+    if (result.duplicate) return publicTransactionResult(result);
+
+    commitHistory('before-agent-transaction');
+    setBoardRevision(result.nextRevision);
+    setAppliedTransactionKeys(result.snapshot.appliedTransactionKeys);
+    restoreHistorySnapshot(result.snapshot, { boardRevision: result.nextRevision });
+    historyStack.commitState(snapshotBoardState());
+    rememberTransactionUndo(result.undoRecord);
+    document.dispatchEvent(new CustomEvent('board-transaction-applied', {
+        detail: publicTransactionResult(result)
+    }));
+    showHistoryStatus('Agent 已更新画板');
+    return publicTransactionResult(result);
+}
+
+function undoAgentBoardTransaction(undoToken) {
+    const token = String(undoToken || '').trim();
+    const record = transactionUndoRecords.get(token);
+    if (!record) throw new Error('撤销令牌不存在或已过期');
+    const current = getAgentBoardSnapshot({ scope: 'project' });
+    const result = undoBoardTransaction(current, record);
+    setBoardRevision(result.nextRevision);
+    setAppliedTransactionKeys(result.snapshot.appliedTransactionKeys);
+    restoreHistorySnapshot(result.snapshot, { boardRevision: result.nextRevision });
+    historyStack.commitState(snapshotBoardState());
+    transactionUndoRecords.delete(token);
+    showHistoryStatus('已撤销 Agent 画板操作');
+    return {
+        ok: true,
+        transactionId: result.transactionId,
+        previousRevision: result.previousRevision,
+        nextRevision: result.nextRevision
+    };
+}
+
+function rememberTransactionUndo(record) {
+    if (!record?.token) return;
+    transactionUndoRecords.set(record.token, record);
+    while (transactionUndoRecords.size > TRANSACTION_UNDO_LIMIT) {
+        transactionUndoRecords.delete(transactionUndoRecords.keys().next().value);
+    }
+}
+
+function publicTransactionResult(result) {
+    return {
+        ok: result.ok,
+        duplicate: result.duplicate,
+        transactionId: result.transaction?.id || result.transactionId || null,
+        currentRevision: result.currentRevision,
+        nextRevision: result.nextRevision,
+        operations: result.operations || [],
+        summary: result.summary || null,
+        warnings: result.warnings || [],
+        tempIds: result.tempIds || {},
+        undoToken: result.undoToken || null
+    };
 }
 
 function applyAgentPlanRows(rows) {
@@ -672,12 +885,19 @@ function snapshotBoardState() {
     };
 }
 
+function boardSemanticFingerprint(snapshot) {
+    const clean = snapshotState(snapshot || {});
+    delete clean.viewport;
+    return JSON.stringify(clean);
+}
+
 function resetHistory(reason = 'reset') {
     clearTimeout(historyCommitTimer);
     const snapshot = snapshotBoardState();
     if (!snapshot) return;
 
     historyStack.resetState(snapshot);
+    lastBoardSemanticFingerprint = boardSemanticFingerprint(snapshot);
     console.log('[History] reset:', reason);
 }
 
@@ -690,8 +910,12 @@ function commitHistory(reason = 'change') {
     const snapshot = snapshotBoardState();
     if (!snapshot) return;
 
-    if (!historyStack.commitState(snapshot)) return;
+    const fingerprint = boardSemanticFingerprint(snapshot);
+    if (!historyStack.commitState(snapshot)) return false;
+    if (fingerprint !== lastBoardSemanticFingerprint) incrementBoardRevision();
+    lastBoardSemanticFingerprint = fingerprint;
     console.log('[History] commit:', reason, 'undo:', historyStack.past.length);
+    return true;
 }
 
 function scheduleHistoryCommit(reason = 'change') {
@@ -703,7 +927,7 @@ function scheduleHistoryCommit(reason = 'change') {
     }, 250);
 }
 
-function restoreHistorySnapshot(snapshot) {
+function restoreHistorySnapshot(snapshot, options = {}) {
     if (!snapshot || !storeData || !canvasManager) return;
 
     isRestoringHistory = true;
@@ -725,12 +949,14 @@ function restoreHistorySnapshot(snapshot) {
     planService?.migrateStoreData?.();
 
     storeData.connections = cloneData(snapshot.connections || []);
+    if (options.boardRevision != null) setBoardRevision(options.boardRevision);
 
     canvasManager.clearAll();
     canvasManager.storeData = storeData;
     canvasManager.setViewport(restoredViewport);
     canvasManager.renderInitialItems();
     canvasManager.graphView?.load(storeData.connections);
+    lastBoardSemanticFingerprint = boardSemanticFingerprint(snapshot);
 
     sidebarManager?.updateStats?.(storeData.items.length);
     saveStoreNow();
@@ -742,12 +968,14 @@ function undoHistory() {
     if (isRestoringHistory) return;
 
     commitHistory('before-undo');
+    const current = snapshotBoardState();
     const target = historyStack.undoState();
     if (!target) {
         showHistoryStatus('没有可撤销的操作');
         return;
     }
-    restoreHistorySnapshot(target);
+    const semanticChange = boardSemanticFingerprint(current) !== boardSemanticFingerprint(target);
+    restoreHistorySnapshot(target, { boardRevision: getBoardRevision() + (semanticChange ? 1 : 0) });
     showHistoryStatus('已撤销');
 }
 
@@ -755,12 +983,14 @@ function redoHistory() {
     if (isRestoringHistory) return;
 
     commitHistory('before-redo');
+    const current = snapshotBoardState();
     const target = historyStack.redoState();
     if (!target) {
         showHistoryStatus('没有可前进的操作');
         return;
     }
-    restoreHistorySnapshot(target);
+    const semanticChange = boardSemanticFingerprint(current) !== boardSemanticFingerprint(target);
+    restoreHistorySnapshot(target, { boardRevision: getBoardRevision() + (semanticChange ? 1 : 0) });
     showHistoryStatus('已前进');
 }
 
@@ -1301,9 +1531,13 @@ function saveStoreNow(useSync = false) {
         activeGroup.savedViewport = cloneData(storeData.viewport);
         activeGroup.plans = cloneData(planService?.listPlans?.() || activeGroup.plans || []);
         activeGroup.connections = cloneData(canvasManager.graphView?.serialize?.() || []);
+        activeGroup.boardRevision = getBoardRevision();
+        activeGroup.appliedTransactionKeys = cloneData(getAppliedTransactionKeys());
     }
 
     storeData.connections = cloneData(canvasManager.graphView?.serialize?.() || []);
+    storeData.boardRevision = getBoardRevision();
+    storeData.appliedTransactionKeys = cloneData(getAppliedTransactionKeys());
 
     if (useSync && window.flowCanvas?.store?.saveSync) {
         const result = window.flowCanvas.store.saveSync(storeData);
@@ -1331,5 +1565,8 @@ function updateBodyState() {
 bootstrap();
 
 window.addEventListener('beforeunload', () => {
+    window.flowCanvas?.mcp?.setBoardToolsReady?.(false);
+    unsubscribeBoardToolRequests?.();
+    unsubscribeBoardToolRequests = null;
     saveStoreNow(true);
 });

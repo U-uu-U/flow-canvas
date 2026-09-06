@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "flow-canvas.board-transaction.v1",
+  "title": "Flow Canvas Board Transaction",
+  "type": "object",
+  "required": ["id", "baseRevision", "operations"],
+  "properties": {
+    "schema": { "const": "flow-canvas.board-transaction.v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "projectId": { "type": ["string", "null"] },
+    "baseRevision": { "type": "integer", "minimum": 0 },
+    "idempotencyKey": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "enum": [
+            "node.create",
+            "node.update",
+            "node.delete",
+            "node.duplicate",
+            "connection.create",
+            "connection.delete",
+            "layout.arrange"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

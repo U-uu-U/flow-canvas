@@ -2,6 +2,188 @@ function isMiniMaxH3Model(model) {
     return /minimax[^a-z0-9]*h3/i.test(String(model || ''));
 }
 
+function isSeedance25Model(model) {
+    return /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(String(model || ''));
+}
+
+function resolveSeedance25AspectRatio(selectedRatio, width, height) {
+    const selected = String(selectedRatio || '').trim();
+    if (selected && selected !== 'adaptive') return selected;
+
+    const numericWidth = Number(width);
+    const numericHeight = Number(height);
+    if (!(numericWidth > 0) || !(numericHeight > 0)) return '16:9';
+
+    const actual = numericWidth / numericHeight;
+    const ratios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
+    return ratios.reduce((closest, candidate) => {
+        const [candidateWidth, candidateHeight] = candidate.split(':').map(Number);
+        const [closestWidth, closestHeight] = closest.split(':').map(Number);
+        const candidateDistance = Math.abs(Math.log(actual / (candidateWidth / candidateHeight)));
+        const closestDistance = Math.abs(Math.log(actual / (closestWidth / closestHeight)));
+        return candidateDistance < closestDistance ? candidate : closest;
+    }, ratios[0]);
+}
+
+function videoPayloadObject(payload, key) {
+    const value = payload?.[key];
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function getVideoTaskId(payload) {
+    const data = videoPayloadObject(payload, 'data');
+    const result = videoPayloadObject(payload, 'result');
+    const value = payload?.task_id || payload?.id
+        || data?.task_id || data?.id
+        || result?.task_id || result?.id;
+    return value == null ? '' : String(value).trim();
+}
+
+function getVideoTaskStatus(payload) {
+    const data = videoPayloadObject(payload, 'data');
+    const result = videoPayloadObject(payload, 'result');
+    const output = videoPayloadObject(payload, 'output');
+    return String(payload?.status || data?.status || result?.status || output?.status || '').trim();
+}
+
+function getVideoTaskProgress(payload) {
+    const data = videoPayloadObject(payload, 'data');
+    const result = videoPayloadObject(payload, 'result');
+    const output = videoPayloadObject(payload, 'output');
+    return payload?.progress ?? data?.progress ?? result?.progress ?? output?.progress ?? null;
+}
+
+function getVideoResultUrl(payload) {
+    const data = videoPayloadObject(payload, 'data');
+    const result = videoPayloadObject(payload, 'result');
+    const output = videoPayloadObject(payload, 'output');
+    const video = videoPayloadObject(payload, 'video');
+    const content = videoPayloadObject(payload, 'content');
+    const dataItems = Array.isArray(payload?.data) ? payload.data : [];
+    const firstData = dataItems[0] || null;
+    const firstContent = Array.isArray(payload?.content) ? payload.content[0] : null;
+    const statusUrls = new Set([
+        payload?.status_url, data?.status_url, result?.status_url, output?.status_url
+    ].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
+    const arrayDataCandidates = dataItems.flatMap(item => {
+        if (typeof item === 'string') return [item];
+        if (!item || typeof item !== 'object') return [];
+        return [
+            item.video_url, item.result_url, item.output_url,
+            item.download_url, item.url
+        ];
+    });
+    const candidates = [
+        typeof firstData === 'string' ? firstData : null,
+        firstData?.video_url, firstData?.result_url, firstData?.output_url,
+        firstData?.download_url, firstData?.url,
+        ...arrayDataCandidates,
+        typeof firstContent === 'string' ? firstContent : null,
+        firstContent?.video_url, firstContent?.url,
+        content?.video_url, content?.url,
+        payload?.video_url, payload?.result_url, payload?.output_url, payload?.download_url, payload?.url,
+        video?.video_url, video?.download_url, video?.url,
+        data?.video_url, data?.result_url, data?.output_url, data?.download_url, data?.url,
+        result?.video_url, result?.result_url, result?.output_url, result?.download_url, result?.url,
+        output?.video_url, output?.result_url, output?.output_url, output?.download_url, output?.url,
+        payload?.metadata?.url
+    ];
+    const taskId = getVideoTaskId(payload);
+    return candidates.find(value => {
+        if (typeof value !== 'string' || !value.trim()) return false;
+        const normalized = value.trim();
+        if (statusUrls.has(normalized)) return false;
+        if (!taskId) return true;
+        try {
+            const pathname = new URL(normalized).pathname.replace(/\/+$/, '');
+            return !pathname.endsWith(`/${encodeURIComponent(taskId)}`)
+                && !pathname.endsWith(`/${taskId}`);
+        } catch (_) {
+            return true;
+        }
+    }) || '';
+}
+
+function getVideoPayloadError(payload = {}) {
+    const data = videoPayloadObject(payload, 'data');
+    const result = videoPayloadObject(payload, 'result');
+    const error = payload?.error ?? data?.error ?? result?.error;
+    const message = typeof error === 'string'
+        ? error
+        : error?.message || payload?.message || payload?.msg || data?.message || result?.message || '';
+    const status = getVideoTaskStatus(payload).toLowerCase();
+    if (['failed', 'error', 'cancelled', 'canceled', 'rejected'].includes(status)) {
+        return String(message || '服务端未提供失败原因').trim();
+    }
+
+    // Some OpenAI-compatible video relays report upstream failures as HTTP 200
+    // with only an error object and no top-level status/code.
+    if (error && message) return String(message).trim();
+
+    const code = String(payload?.code ?? data?.code ?? result?.code ?? '').trim().toLowerCase();
+    if (message && code && !['0', '1', '200', 'success', 'ok'].includes(code)) {
+        return String(message).trim();
+    }
+    return '';
+}
+
+function buildSeedance25RequestBody({
+    model,
+    prompt,
+    duration,
+    aspectRatio,
+    referenceImages = []
+    } = {}) {
+    const promptValue = String(prompt || '').trim();
+    if (!promptValue) throw new Error('Seedance 2.5 提示词不能为空');
+
+    const durationValue = duration === undefined || duration === null || duration === ''
+        ? 30
+        : Number(duration);
+    if (durationValue !== 30) {
+        throw new Error('Seedance 2.5 当前仅支持固定 30 秒视频');
+    }
+
+    const images = Array.isArray(referenceImages)
+        ? referenceImages
+            .map(image => typeof image === 'string' ? image : image?.url)
+            .map(image => String(image || '').trim())
+            .filter(Boolean)
+        : [];
+    if (images.length > 10) throw new Error('Seedance 2.5 最多支持 10 张参考图片');
+
+    const ratioValue = aspectRatio == null ? '' : String(aspectRatio).trim();
+    const allowedRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
+    if (ratioValue && !allowedRatios.includes(ratioValue)) {
+        throw new Error(`Seedance 2.5 不支持画幅比例 ${ratioValue}`);
+    }
+
+    const body = {
+        model: String(model || '').trim(),
+        prompt: promptValue,
+        resolution: '720p',
+        seconds: durationValue
+    };
+    if (ratioValue) body.ratio = ratioValue;
+    if (images.length > 0) body.image_urls = images;
+    return body;
+}
+
+function videoModelFilePrefix(model) {
+    const value = String(model || '').trim();
+    if (isMiniMaxH3Model(value)) return 'minimax_h3';
+    if (isSeedance25Model(value)) return 'seedance_2_5';
+    if (/seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i.test(value)) {
+        return 'seedance_2_0';
+    }
+    const normalized = value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 48);
+    return normalized || 'video';
+}
+
 function isMiniMaxH3NativeEndpoint(endpoint) {
     try {
         const url = new URL(String(endpoint || '').trim());
@@ -44,7 +226,45 @@ function buildOpenAiVideoEndpoint(endpoint) {
     }
 }
 
+function buildUnifiedVideoEndpoint(endpoint) {
+    const raw = String(endpoint || '').trim();
+    if (!raw) return '';
+    try {
+        const url = new URL(raw);
+        let pathName = url.pathname.replace(/\/+$/, '');
+        if (!pathName || pathName === '/') {
+            pathName = '/v1/videos';
+        } else if (/\/v1$/i.test(pathName)) {
+            pathName += '/videos';
+        } else if (/\/video\/generations$/i.test(pathName)) {
+            pathName = pathName.replace(/\/video\/generations$/i, '/videos');
+        } else if (/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i.test(pathName)) {
+            pathName = pathName.replace(/\/(?:chat\/completions|responses|completions|models|images\/(?:generations|edits))$/i, '/videos');
+        } else if (!/\/videos$/i.test(pathName)) {
+            pathName += '/videos';
+        }
+        url.pathname = pathName;
+        url.search = '';
+        url.hash = '';
+        return url.toString();
+    } catch (_) {
+        return raw;
+    }
+}
+
 function buildVideoGenerationEndpoint(endpoint, model) {
+    if (isSeedance25Model(model)) {
+        try {
+            const url = new URL(String(endpoint || '').trim());
+            const isDirectUpstream = url.hostname.toLowerCase() === 'video.zhubo.asia'
+                || /\/v1\/videos\/?$/i.test(url.pathname);
+            return isDirectUpstream
+                ? buildUnifiedVideoEndpoint(endpoint)
+                : buildOpenAiVideoEndpoint(endpoint);
+        } catch (_) {
+            return buildOpenAiVideoEndpoint(endpoint);
+        }
+    }
     if (!isMiniMaxH3Model(model)) return buildOpenAiVideoEndpoint(endpoint);
     if (isMiniMaxH3NativeEndpoint(endpoint) || isMiniMaxH3PerSecondEndpoint(endpoint)) {
         return String(endpoint).trim();
@@ -244,10 +464,19 @@ module.exports = {
     buildMiniMaxH3RequestBody,
     buildMiniMaxH3TaskEndpoint,
     buildOpenAiVideoEndpoint,
+    buildSeedance25RequestBody,
     buildVideoGenerationEndpoint,
+    getVideoPayloadError,
+    getVideoResultUrl,
+    getVideoTaskId,
+    getVideoTaskProgress,
+    getVideoTaskStatus,
     isMiniMaxH3Model,
     isMiniMaxH3NativeEndpoint,
     isMiniMaxH3PerSecondEndpoint,
     isMiniMaxH3UnavailableResponse,
-    normalizeMiniMaxH3RequestModel
+    isSeedance25Model,
+    normalizeMiniMaxH3RequestModel,
+    resolveSeedance25AspectRatio,
+    videoModelFilePrefix
 };

@@ -13,6 +13,9 @@
     <div class="titlebar" id="titlebar">
         <div class="titlebar-drag" aria-hidden="true"></div>
         <div class="titlebar-status" id="titlebarStatus"></div>
+        <button class="agent-settings-btn" id="agentSettingsBtn" type="button" title="设置" aria-label="设置">
+            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
+        </button>
     </div>
 
     <!-- 主布局 -->
@@ -20,7 +23,8 @@
         <!-- 左侧边栏容器 -->
         <div class="sidebar-wrapper" id="sidebarWrapper">
             <aside class="sidebar" id="sidebar">
-                <button class="sidebar-collapse-btn" id="collapseSidebarBtn" title="收起栏目">
+                <button class="sidebar-collapse-btn" id="collapseSidebarBtn" type="button" title="收起左侧栏"
+                    aria-label="收起左侧栏" aria-controls="sidebar" aria-expanded="true">
                     <span class="sidebar-collapse-triangle" aria-hidden="true"></span>
                 </button>
                 <div class="sidebar-content">
@@ -162,13 +166,21 @@
                 <button class="canvas-tool-btn" id="canvasToolPlan" type="button" title="新建规划表" aria-label="新建规划表">
                     <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
                 </button>
+                <span class="canvas-tool-separator" aria-hidden="true"></span>
+                <button class="canvas-tool-btn canvas-task-history-btn" id="agentTaskHistoryBtn" type="button"
+                    title="打开任务记录" aria-label="打开任务记录" aria-controls="agentTaskHistory" aria-expanded="false">
+                    <b class="agent-task-history-badge" id="agentTaskHistoryBadge">0</b>
+                </button>
             </div>
             <!-- 素材库独立于文件夹组，只从左侧浮动工具栏打开。 -->
             <section class="canvas-asset-library asset-library-panel" id="canvasAssetLibrary" aria-label="素材库" hidden>
                 <div class="asset-library-head">
                     <div class="asset-library-title">
                         <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg>
-                        <span>素材库</span>
+                        <span class="asset-library-title-copy">
+                            <strong>素材库</strong>
+                            <small id="assetLibraryRouteLabel">默认入库 · Flow Canvas</small>
+                        </span>
                     </div>
                     <div class="asset-library-head-actions">
                         <button class="asset-library-icon-btn" id="assetLibraryAddFolderBtn" type="button" title="关联素材目录" aria-label="关联素材目录">
@@ -193,7 +205,7 @@
                             <option value="">全部来源</option>
                         </select>
                     </label>
-                    <button class="asset-library-icon-btn" id="assetLibraryDefaultFolderBtn" type="button" title="设为网页采集默认目录" aria-label="设为网页采集默认目录" disabled>
+                    <button class="asset-library-icon-btn" id="assetLibraryDefaultFolderBtn" type="button" title="设为默认入库目录" aria-label="设为默认入库目录" disabled>
                         <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-favorite"></use></svg>
                     </button>
                     <button class="asset-library-icon-btn asset-library-remove-source" id="assetLibraryRemoveFolderBtn" type="button" title="取消关联素材目录" aria-label="取消关联素材目录" disabled>
@@ -320,9 +332,60 @@
                     </div>
                     <div class="agent-header-right">
                         <span class="agent-header-status"><i aria-hidden="true"></i>就绪</span>
-                        <button class="agent-settings-btn" id="agentSettingsBtn" title="设置">
-                            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
-                        </button>
+                        <div class="agent-task-header-controls">
+                            <span class="agent-task-header-divider" aria-hidden="true"></span>
+                            <div class="agent-header-control-wrap">
+                                <button class="agent-header-icon-btn" id="agentConversationMenuBtn" type="button"
+                                    title="切换任务对话" aria-label="切换任务对话" aria-expanded="false"
+                                    aria-controls="agentConversationPopover">
+                                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
+                                </button>
+                                <section class="agent-header-popover agent-conversation-popover" id="agentConversationPopover"
+                                    aria-label="任务对话" hidden>
+                                    <header>
+                                        <div>
+                                            <strong>任务对话</strong>
+                                            <span id="agentConversationSummary">1 个任务</span>
+                                        </div>
+                                        <button class="agent-new-conversation-btn" id="agentNewConversationBtn" type="button">
+                                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                            <span>新任务</span>
+                                        </button>
+                                    </header>
+                                    <div class="agent-conversation-list" id="agentConversationList"></div>
+                                </section>
+                            </div>
+                            <button class="agent-conversation-title-btn" id="agentConversationTitleBtn" type="button"
+                                title="切换任务对话" aria-label="当前任务对话，点击切换" aria-expanded="false"
+                                aria-controls="agentConversationPopover">
+                                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
+                                <span id="agentConversationTitle">新任务</span>
+                            </button>
+                            <span class="agent-task-header-spacer"></span>
+                            <div class="agent-header-control-wrap agent-file-control-wrap">
+                                <button class="agent-files-btn" id="agentFilesBtn" type="button"
+                                    title="查看全部文件" aria-label="查看全部文件" aria-expanded="false"
+                                    aria-controls="agentFilesPopover">
+                                    <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-library"></use></svg>
+                                    <span>全部文件</span>
+                                    <b id="agentFilesCount" hidden>0</b>
+                                </button>
+                                <section class="agent-header-popover agent-files-popover" id="agentFilesPopover"
+                                    aria-label="全部文件" hidden>
+                                    <header>
+                                        <div>
+                                            <strong>全部文件</strong>
+                                            <span id="agentFilesSummary">当前对话还没有输入或产出文件</span>
+                                        </div>
+                                    </header>
+                                    <div class="agent-files-list" id="agentFilesList"></div>
+                                </section>
+                            </div>
+                            <button class="agent-header-icon-btn agent-sidebar-close-btn" id="agentSidebarCloseBtn"
+                                type="button" title="关闭侧边栏" aria-label="关闭侧边栏">
+                                <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -362,7 +425,7 @@
                                 </button>
                                 <button class="agent-composer-menu-item agent-clear-btn" id="agentClearBtn" type="button">
                                     <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-trash"></use></svg>
-                                    <span><strong>清空对话</strong><small>仅清除当前项目的 Agent 记录</small></span>
+                                    <span><strong>清空对话</strong><small>仅清除当前任务对话的 Agent 记录</small></span>
                                 </button>
                             </div>
                         </div>
@@ -406,7 +469,13 @@
                             <section class="agent-composer-popover agent-skill-popover" id="agentSkillPopover"
                                 aria-label="Skill 选择" hidden>
                                 <header class="agent-composer-popover-head skill-head">
-                                    <strong>Skill</strong>
+                                    <div class="agent-skill-head-title">
+                                        <strong>Skill</strong>
+                                        <button id="agentSkillAddBtn" type="button" title="新增自定义 Skill"
+                                            aria-label="新增自定义 Skill" aria-expanded="false" aria-controls="agentSkillForm">
+                                            <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                                        </button>
+                                    </div>
                                     <label class="agent-skill-search">
                                         <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-search"></use></svg>
                                         <input id="agentSkillSearchInput" type="search" placeholder="搜索 Skill" autocomplete="off">
@@ -418,6 +487,36 @@
                                     <button type="button" role="tab" data-agent-skill-category="creative" aria-selected="false">创作</button>
                                     <button type="button" role="tab" data-agent-skill-category="review" aria-selected="false">检查</button>
                                 </div>
+                                <form class="agent-skill-form" id="agentSkillForm" hidden>
+                                    <div class="agent-skill-form-row">
+                                        <label>
+                                            <span>名称</span>
+                                            <input id="agentSkillFormName" type="text" maxlength="40" placeholder="例如：分镜连续性" required>
+                                        </label>
+                                        <label>
+                                            <span>分类</span>
+                                            <select id="agentSkillFormCategory">
+                                                <option value="planning">规划</option>
+                                                <option value="creative" selected>创作</option>
+                                                <option value="review">检查</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <label>
+                                        <span>说明</span>
+                                        <input id="agentSkillFormDescription" type="text" maxlength="100" placeholder="列表中显示的简短说明">
+                                    </label>
+                                    <label>
+                                        <span>Skill 指令</span>
+                                        <textarea id="agentSkillFormInstruction" maxlength="2000" rows="5"
+                                            placeholder="说明 Agent 应遵循的流程、输出要求和限制" required></textarea>
+                                    </label>
+                                    <p class="agent-skill-form-status" id="agentSkillFormStatus" aria-live="polite"></p>
+                                    <div class="agent-skill-form-actions">
+                                        <button id="agentSkillFormCancel" type="button">取消</button>
+                                        <button class="primary" type="submit">新增并启用</button>
+                                    </div>
+                                </form>
                                 <div class="agent-composer-list agent-skill-list" id="agentSkillList"></div>
                                 <footer class="agent-composer-popover-footer">
                                     <button type="button" id="agentSkillClearBtn">清除选择</button>
@@ -916,12 +1015,6 @@
 
         <!-- 图片和视频创作都在画布节点中完成；这里只保留全局工具。 -->
         <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
-            <button class="creation-mode-option task-history" id="agentTaskHistoryBtn" type="button"
-                title="打开任务记录" aria-label="打开任务记录" aria-controls="agentTaskHistory" aria-expanded="false">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-history"></use></svg>
-                <span>任务记录</span>
-                <b class="agent-task-history-badge" id="agentTaskHistoryBadge" hidden>0</b>
-            </button>
             <button class="creation-mode-option settings" id="creationModeSettingsBtn" type="button">
                 <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
                 设置模式

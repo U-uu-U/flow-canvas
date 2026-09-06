@@ -81,6 +81,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
 
     asset: {
         getLibraryContext: () => ipcRenderer.invoke('asset:getLibraryContext'),
+        archiveFile: (filePath) => ipcRenderer.invoke('asset:archiveFile', filePath),
         readMetadata: (filePaths) => ipcRenderer.invoke('asset:readMetadata', filePaths),
         updateMetadata: (filePath, patch) => ipcRenderer.invoke('asset:updateMetadata', filePath, patch),
     },
@@ -96,6 +97,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 原生文件拖出到外部应用（支持单文件或多文件数组）
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
+        cancelGeneration: (clientTaskId) => ipcRenderer.invoke('mcp:generation:cancel', clientTaskId),
         compressImageReferences: (body) => ipcRenderer.invoke('mcp:image:compress-references', body),
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
@@ -103,6 +105,13 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         onVideoProgress: (callback) => {
             ipcRenderer.on('generation:video-progress', (_, payload) => callback(payload));
         },
+        onBoardToolRequest: (callback) => {
+            const listener = (_, payload) => callback(payload);
+            ipcRenderer.on('mcp:board-tool-request', listener);
+            return () => ipcRenderer.removeListener('mcp:board-tool-request', listener);
+        },
+        respondBoardTool: (payload) => ipcRenderer.send('mcp:board-tool-response', payload),
+        setBoardToolsReady: (ready) => ipcRenderer.send('mcp:board-tools-ready', ready === true),
     },
 
     browserSync: {

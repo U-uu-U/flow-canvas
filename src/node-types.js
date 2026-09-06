@@ -39,6 +39,14 @@ const imageIntentPlannerCache = new Map();
 const IMAGE_INTENT_CACHE_TTL_MS = 30000;
 const IMAGE_INTENT_CACHE_LIMIT = 50;
 
+function throwIfGenerationCanceled(ctx, result = null) {
+    if (ctx?.isCancelled?.() !== true && result?.canceled !== true) return;
+    const error = new Error('生成任务已中断');
+    error.name = 'AbortError';
+    error.code = 'GENERATION_CANCELED';
+    throw error;
+}
+
 /** local-res:// URL → 文件路径。上游媒体端口传的都是这个协议。 */
 function toFilePath(url) {
     const prefix = 'local-res://';
@@ -474,6 +482,7 @@ NODE_TYPES['image'] = {
         const sourceReferences = await prepareGenerationReferences(refs, ctx?.prepareImageReferences);
 
         const resultGroups = await mapWithConcurrency(prompts, midjourneyModel ? 1 : config.concurrency, async prompt => {
+            throwIfGenerationCanceled(ctx);
             const effectivePrompt = [
                 prompt,
                 config.style ? `视觉风格：${config.style}` : '',
@@ -487,6 +496,7 @@ NODE_TYPES['image'] = {
                 imageProvider: provider
             });
             const intentOutcome = intent?.mode === 'compiled' ? await intent.resolve() : null;
+            throwIfGenerationCanceled(ctx);
             const providerPrompt = intentOutcome?.fallback?.used === false && intentOutcome.compiledRequest?.prompt
                 ? intentOutcome.compiledRequest.prompt
                 : effectivePrompt;
@@ -552,6 +562,7 @@ NODE_TYPES['image'] = {
                     sourceReferences,
                     addToCanvas: false
                 });
+                throwIfGenerationCanceled(ctx, result);
             } catch (error) {
                 if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
                 intent?.finish({
@@ -614,7 +625,25 @@ NODE_TYPES['image'] = {
                 _midjourney: result?.midjourney || null,
                 _candidateIndex: result?.images?.[index]?.candidateIndex || null,
                 _preserveGeneratorStack: midjourneyModel && imageUrls.length > 1,
-                _forceSquarePreview: midjourneyModel && imageUrls.length > 1
+                _forceSquarePreview: midjourneyModel && imageUrls.length > 1,
+                _generation: {
+                    nodeType: 'image',
+                    prompt: requestPrompt,
+                    model: imageModel || '',
+                    providerId: provider?.id || null,
+                    sourceProviderId: provider?.sourceProviderId || provider?.id || null,
+                    config: {
+                        ...config,
+                        prompt: requestPrompt,
+                        model: imageModel || config.model || ''
+                    },
+                    references: sourceReferences.map(reference => ({
+                        itemId: reference.itemId || null,
+                        filePath: reference.filePath || ''
+                    })),
+                    taskId: result?.taskId || null,
+                    generatedAt: Date.now()
+                }
             }));
         });
 
@@ -677,42 +706,69 @@ NODE_TYPES['video'] = {
         const firstFrameContext = (ctx?.inputContext || []).find(entry =>
             entry?.source?.filePath && entry.source.filePath === frames[0]?.filePath
         );
-        const h3Model = /minimax[^a-z0-9]*h3/i.test(String(provider.model || config.model || ''));
-        const useAdaptiveH3Ratio = h3Model
+        const videoModel = String(provider.model || config.model || '');
+        const h3Model = /minimax[^a-z0-9]*h3/i.test(videoModel);
+        const seedance25Model = /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(videoModel);
+        const useAdaptiveReferenceRatio = (h3Model || seedance25Model)
             && (config.ratio === 'adaptive' || config.ratioMode !== 'manual');
-        const ratio = useAdaptiveH3Ratio
+        const supportedRatios = seedance25Model
+            ? ['16:9', '9:16', '1:1', '4:3', '3:4']
+            : ['16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'];
+        const ratio = useAdaptiveReferenceRatio
             ? inferClosestAspectRatio(
                 firstFrameContext?.source?.width,
                 firstFrameContext?.source?.height,
-                ['16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
+                supportedRatios,
                 '16:9'
             )
             : (config.ratio || undefined);
-        const sourceReferences = await prepareGenerationReferences(frames, ctx?.prepareImageReferences);
         const videoReferences = toFileList(sources.filter(value => localResourceType(value) === 'video'));
         const audioReferences = toFileList(sources.filter(value => localResourceType(value) === 'file'));
 
-        const results = await mapWithConcurrency(prompts, config.concurrency, async prompt => {
-            const generationTask = ctx?.createGenerationTask?.({
-                kind: 'video',
-                provider,
-                prompt,
-                params: {
-                    resolution: config.resolution || null,
-                    ratio: ratio || null,
-                    duration: Number(config.duration) || 5,
-                    cameraFixed: Boolean(config.cameraFixed),
-                    generateAudio: Boolean(config.generateAudio),
-                    webSearch: Boolean(config.webSearch),
-                    watermark: Boolean(config.watermark),
-                    compressReferenceImages: false,
-                    nodeId: ctx?.item?.id || null,
-                    videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
-                    audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
-                },
-                sourcePaths: sourceReferences.map(reference => reference.filePath).filter(Boolean)
+        const generationTasks = prompts.map(prompt => ctx?.createGenerationTask?.({
+            kind: 'video',
+            provider,
+            prompt,
+            params: {
+                resolution: config.resolution || null,
+                ratio: ratio || null,
+                duration: Number(config.duration) || 5,
+                cameraFixed: Boolean(config.cameraFixed),
+                generateAudio: Boolean(config.generateAudio),
+                webSearch: Boolean(config.webSearch),
+                watermark: Boolean(config.watermark),
+                compressReferenceImages: false,
+                nodeId: ctx?.item?.id || null,
+                syncStage: 'prepare',
+                videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
+                audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
+            },
+            sourcePaths: frames.map(reference => reference.filePath).filter(Boolean)
+        }));
+
+        let sourceReferences;
+        try {
+            sourceReferences = await prepareGenerationReferences(frames, ctx?.prepareImageReferences);
+        } catch (error) {
+            generationTasks.forEach(task => {
+                const clientTaskId = typeof task === 'string' ? task : task?.id;
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
             });
+            throw error;
+        }
+
+        const results = await mapWithConcurrency(prompts, config.concurrency, async (prompt, index) => {
+            throwIfGenerationCanceled(ctx);
+            const generationTask = generationTasks[index];
             const clientTaskId = typeof generationTask === 'string' ? generationTask : generationTask?.id;
+            if (clientTaskId) {
+                ctx?.updateGenerationTask?.(clientTaskId, {
+                    params: {
+                        syncStage: 'submit'
+                    },
+                    sourcePaths: sourceReferences.map(reference => reference.filePath).filter(Boolean)
+                });
+            }
             let result;
             try {
                 result = await window.flowCanvas.mcp.generateVideo({
@@ -732,6 +788,7 @@ NODE_TYPES['video'] = {
                     audioReferences,
                     addToCanvas: false
                 });
+                throwIfGenerationCanceled(ctx, result);
                 if (result?.success === false) throw new Error(result.error || '视频生成请求失败');
             } catch (error) {
                 if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, error);
@@ -772,7 +829,26 @@ NODE_TYPES['video'] = {
                 video: videoUrl,
                 _resultFilePath: filePath,
                 _resultItem: result?.item || null,
-                _resultUrl: result?.url || null
+                _resultUrl: result?.url || null,
+                _generation: {
+                    nodeType: 'video',
+                    prompt,
+                    model: provider?.model || config.model || '',
+                    providerId: provider?.id || null,
+                    sourceProviderId: provider?.sourceProviderId || provider?.id || null,
+                    config: {
+                        ...config,
+                        prompt,
+                        ratio: ratio || config.ratio || '',
+                        model: provider?.model || config.model || ''
+                    },
+                    references: sourceReferences.map(reference => ({
+                        itemId: reference.itemId || null,
+                        filePath: reference.filePath || ''
+                    })),
+                    taskId: result?.taskId || null,
+                    generatedAt: Date.now()
+                }
             };
         });
 

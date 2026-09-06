@@ -14,11 +14,19 @@ export const DEFAULT_PLAN_COLUMNS = [
 ];
 
 export const DEFAULT_PLAN_STATUSES = ['未开始', '进行中', '待确认', '已完成'];
+export const MCP_BOARD_TOOLS_VERSION = 2;
+export const BOARD_TRANSACTION_MCP_TOOLS = [
+    'flow_canvas.board.get_snapshot',
+    'flow_canvas.board.transaction.preview',
+    'flow_canvas.board.transaction.apply',
+    'flow_canvas.board.transaction.undo'
+];
 
 export const DEFAULT_MCP_CONFIG = {
     enabled: true,
     host: '127.0.0.1',
     port: 18765,
+    boardToolsVersion: MCP_BOARD_TOOLS_VERSION,
     allowedTools: [
         'flow_canvas.health',
         'flow_canvas.config.get',
@@ -34,6 +42,8 @@ export const DEFAULT_MCP_CONFIG = {
         'flow_canvas.plan.delete',
         'flow_canvas.plan.export',
         'flow_canvas.image.generate',
+        'flow_canvas.video.generate',
+        ...BOARD_TRANSACTION_MCP_TOOLS,
         'flow_canvas.item.list',
         'flow_canvas.item.get',
         'flow_canvas.item.add',
@@ -41,6 +51,24 @@ export const DEFAULT_MCP_CONFIG = {
         'flow_canvas.item.delete'
     ]
 };
+
+export function normalizeMcpConfig(config = {}) {
+    const source = config && typeof config === 'object' ? config : {};
+    const configuredTools = Array.isArray(source.allowedTools)
+        ? source.allowedTools.map(String).filter(Boolean)
+        : [...DEFAULT_MCP_CONFIG.allowedTools];
+    const currentBoardToolsVersion = Number(source.boardToolsVersion);
+    const shouldMigrateBoardTools = !Number.isInteger(currentBoardToolsVersion)
+        || currentBoardToolsVersion < MCP_BOARD_TOOLS_VERSION;
+    return {
+        ...DEFAULT_MCP_CONFIG,
+        ...source,
+        boardToolsVersion: MCP_BOARD_TOOLS_VERSION,
+        allowedTools: shouldMigrateBoardTools
+            ? [...new Set([...configuredTools, ...BOARD_TRANSACTION_MCP_TOOLS])]
+            : [...new Set(configuredTools)]
+    };
+}
 
 export class PlanService {
     constructor(storeData) {
@@ -54,13 +82,7 @@ export class PlanService {
             this.storeData.folderGroups = [];
         }
 
-        this.storeData.mcp = {
-            ...DEFAULT_MCP_CONFIG,
-            ...(this.storeData.mcp || {}),
-            allowedTools: Array.isArray(this.storeData.mcp?.allowedTools)
-                ? this.storeData.mcp.allowedTools
-                : [...DEFAULT_MCP_CONFIG.allowedTools]
-        };
+        this.storeData.mcp = normalizeMcpConfig(this.storeData.mcp);
         const configuredPort = Number(this.storeData.mcp.port);
         if (!Number.isInteger(configuredPort) || configuredPort < 1024 || configuredPort > 65535 || configuredPort === 8765) {
             this.storeData.mcp.port = DEFAULT_MCP_CONFIG.port;
