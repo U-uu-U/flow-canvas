@@ -1057,17 +1057,39 @@ body.folder-move-pending .folder-group-item.active .folder-item.move-target-hove
 
 .canvas-tool-btn.canvas-task-history-btn {
     border-radius: 50%;
-    background: #f1f1ef;
-    color: #121315;
+    background: transparent;
+    color: #25272b;
     font-variant-numeric: tabular-nums;
-    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+}
+
+.canvas-task-history-btn .agent-task-history-badge {
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    border-radius: 50%;
+    background: linear-gradient(180deg, #f2f3f4, #d9dce0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.24), inset 0 1px 0 #fff;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    transition: background 140ms ease, box-shadow 140ms ease;
 }
 
 .canvas-tool-btn.canvas-task-history-btn:hover,
 .canvas-tool-btn.canvas-task-history-btn.active {
-    background: #ffffff;
-    color: #050607;
-    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.18), 0 4px 14px rgba(0, 0, 0, 0.34);
+    background: rgba(255, 255, 255, 0.06);
+    color: #17191c;
+}
+
+.canvas-task-history-btn:hover .agent-task-history-badge,
+.canvas-task-history-btn.active .agent-task-history-badge {
+    background: linear-gradient(180deg, #fff, #e7e9ec);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.26), 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+.canvas-task-history-btn:focus-visible {
+    outline: 1px solid #aeb4be;
+    outline-offset: 2px;
 }
 
 .canvas-tool-separator {
