@@ -19,6 +19,8 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
             projectIds: change.projectIds, data: store.load() }));
     } });
     const generation = new AgentGeneration({ board, bridge, loadConfig: () => apiConfigStore.load().config || {}, fallbackDir: getSaveDir() });
+    const { installGenerationRecoveryBoard } = await import('./generation-recovery-board.mjs');
+    installGenerationRecoveryBoard(bridge, board);
     let decoder = null;
     let frameQueue = Promise.resolve();
     const media = new AgentMedia({ board, directory: path.join(dataDir, 'agent-media'), extraRoots: () => {

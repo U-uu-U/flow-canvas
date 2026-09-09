@@ -33,6 +33,7 @@ import {
     parseAgentImageCompilationResponse
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
+import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
 import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
 import {
     AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
@@ -2839,6 +2840,22 @@ export class AgentSidebar {
         this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
         this._bindImagePromptResize();
         this._bindVideoPromptResize();
+            const stopRecovery = event.target.closest('[data-stop-recovery]');
+            if (stopRecovery) {
+                void this._cancelGenerationTask(stopRecovery.dataset.stopRecovery);
+                return;
+            }
+            const recoverButton = event.target.closest('[data-recover-task]');
+            if (recoverButton) {
+                void this._recoverGenerationTask(recoverButton.dataset.recoverTask, recoverButton.dataset.editTaskId === 'true');
+                return;
+            }
+            const copyIdButton = event.target.closest('[data-copy-remote-task]');
+            if (copyIdButton) {
+                const task = this.generationTasks.find(item => item.id === copyIdButton.dataset.copyRemoteTask);
+                void window.flowCanvas?.clipboard?.writeText?.(task?.taskId || '');
+                return;
+            }
         document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
         this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
         this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
@@ -2849,6 +2866,7 @@ export class AgentSidebar {
         // 右上角齿轮与圆球菜单都可进入设置模式。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
             this._closeAgentHeaderPopovers();
+                || event.target.closest?.('.generation-recovery-dialog')
             this.setMode('settings');
         });
 
@@ -3920,10 +3938,12 @@ export class AgentSidebar {
         const stage = String(event.status || event.stage || '').toLowerCase();
         const filePath = String(event.filePath || '').trim() || null;
         const nextStatus = filePath || ['imported', 'downloaded'].includes(stage)
+        if (this.recoveringGenerationTasks?.has(task.id) && !event.recovered) return;
             ? 'success'
             : ['failed', 'error'].includes(stage)
                 ? 'failed'
                 : 'running';
+            filePaths: event.filePaths || task.filePaths || [],
         const syncError = nextStatus === 'failed'
             ? (event.error || '云端任务失败')
             : null;
@@ -4031,8 +4051,7 @@ export class AgentSidebar {
         const normalizedNodeId = String(nodeId || '').trim();
         if (!normalizedNodeId) return null;
         return this.generationTasks.find(task =>
-            task?.status === 'disconnected'
-            && task?.kind === 'video'
+            ['disconnected', 'failed', 'canceled'].includes(task?.status)
             && Boolean(task?.taskId)
             && String(task?.params?.nodeId || '') === normalizedNodeId
         ) || null;
@@ -4095,6 +4114,7 @@ export class AgentSidebar {
 
     async cancelGenerationTasksForNode(nodeId) {
         const taskIds = this.generationTasks
+        if (this.recoveringGenerationTasks?.has(taskId)) return this.generationTasks.find(task => task.id === taskId);
             .filter(task => task.status === 'running' && task.params?.nodeId === nodeId)
             .map(task => task.id);
         await Promise.all(taskIds.map(taskId => this._cancelGenerationTask(taskId)));
@@ -4111,7 +4131,10 @@ export class AgentSidebar {
             this.taskHistoryBtn.title = nextOpen ? '关闭任务记录' : '打开任务记录';
             this.taskHistoryBtn.setAttribute('aria-label', this.taskHistoryBtn.title);
         }
-        if (nextOpen) this._renderGenerationTasks();
+        if (nextOpen) {
+            this._renderGenerationTasks();
+            void this._syncRecoverableGenerations();
+        }
     }
 
     _escapeTaskText(value) {
@@ -4215,11 +4238,12 @@ export class AgentSidebar {
             const sourceCount = (Array.isArray(task.sourcePaths) ? task.sourcePaths.length : 0)
                 + (task.params?.videoSourcePaths?.length || 0)
                 + (task.params?.audioSourcePaths?.length || 0);
-            const canRetry = status === 'failed' || status === 'disconnected';
-            const retryLabel = status === 'disconnected' ? '重新连接' : '重试';
+            const recovering = this.recoveringGenerationTasks?.has(task.id);
+            const canRetry = !task.taskId && !task.filePath && (status === 'failed' || status === 'disconnected');
+            const retryLabel = '重新提交';
             const errorCopy = status === 'disconnected'
-                ? '与生成服务断开，任务参数已保留。'
-                : task.error;
+                ? task.error || '与生成服务断开，任务 ID 和参数已保留。'
+                : task.error || (recovering ? task.params?.recoveryError : null);
             return `
                 <article class="agent-task-item status-${status}">
                     <div class="agent-task-item-topline">
@@ -4240,10 +4264,17 @@ export class AgentSidebar {
                         ${sourceCount ? `<span>${sourceCount} 个参考素材</span>` : ''}
                     </div>
                     ${task.filePath ? `<p class="agent-task-file" title="${this._escapeTaskText(task.filePath)}">${this._escapeTaskText(task.filePath)}</p>` : ''}
-                    ${errorCopy ? `<p class="agent-task-error">${this._escapeTaskText(errorCopy)}</p>` : ''}
+                    ${errorCopy ? `<p class="agent-task-error" title="${this._escapeTaskText(errorCopy)}">${this._escapeTaskText(errorCopy)}</p>` : ''}
+                    <div class="agent-task-recovery">
+                        <code title="${this._escapeTaskText(task.taskId || '')}">${this._escapeTaskText(task.taskId || '未记录上游任务 ID')}</code>
+                        ${task.taskId ? `<button type="button" data-copy-remote-task="${this._escapeTaskText(task.id)}" title="复制任务 ID" aria-label="复制任务 ID"><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-copy"></use></svg></button>` : ''}
+                        <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" data-edit-task-id="true" title="补填任务 ID" aria-label="补填任务 ID" ${recovering ? 'disabled' : ''}><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-connections"></use></svg></button>
+                        <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" ${recovering ? 'disabled' : ''}>${recovering ? '正在拉取' : '拉取产物'}</button>
+                        ${recovering ? `<button type="button" data-stop-recovery="${this._escapeTaskText(task.id)}">停止</button>` : ''}
+                    </div>
                     ${canRetry ? `
                         <div class="agent-task-retry-row">
-                            <span>${status === 'disconnected' ? (task.taskId ? '使用任务 ID 恢复，不会重复提交' : '缺少任务 ID，只能重新提交') : `第 ${task.attempts || 1} 次请求未完成`}</span>
+                            <span>没有任务 ID，重新提交会创建新任务</span>
                             <button type="button" data-retry-task="${this._escapeTaskText(task.id)}">
                                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"></path>
@@ -4331,8 +4362,80 @@ export class AgentSidebar {
             error: null,
             attempts: (task.attempts || 1) + 1,
             params: {
+    async _syncRecoverableGenerations() {
+        if (!window.flowCanvas?.mcp?.listRecoverableGenerations || this.syncingRecoverableGenerations) return;
+        this.syncingRecoverableGenerations = true;
+        try {
+            const records = await window.flowCanvas.mcp.listRecoverableGenerations();
+            for (const record of records) {
+                let task = this.generationTasks.find(item => item.id === record.clientTaskId);
+                if (!task) {
+                    if (!record.taskId && !record.filePath) continue;
+                    task = { id: record.clientTaskId, kind: record.kind, projectId: record.projectId,
+                        providerId: record.providerId, providerName: record.model, model: record.model,
+                        prompt: record.prompt, sourcePaths: record.sourcePaths || [], params: record.params || {}, attempts: 1,
+                        createdAt: record.createdAt || record.updatedAt, updatedAt: record.updatedAt,
+                        status: 'disconnected' };
+                    this.generationTasks.unshift(task);
+                }
+                if (this.recoveringGenerationTasks?.has(task.id)) continue;
+                task.taskId = record.taskId || task.taskId;
+                task.filePath = record.filePath || task.filePath;
+                task.filePaths = record.filePaths?.length ? record.filePaths : task.filePaths;
+                task.params = { ...task.params, nodeId: task.params?.nodeId || record.nodeId,
+                    targetDir: record.targetDir || task.params?.targetDir };
+            }
+            this._saveGenerationTasks();
+            this._renderGenerationTasks();
+        } catch (error) { console.warn('[Agent] 恢复记录同步失败', error); }
+        finally { this.syncingRecoverableGenerations = false; }
+    }
+
+    async _recoverGenerationTask(taskId, editId = false) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (!task) return;
+        this.recoveringGenerationTasks ||= new Set();
+        if (this.recoveringGenerationTasks.has(taskId)) return;
+        let remoteTaskId = task.taskId;
+        if (editId || (!remoteTaskId && !task.filePath)) {
+            remoteTaskId = await requestRecoveryTaskId(task);
+            if (!remoteTaskId) return;
+        }
+        if (this.recoveringGenerationTasks.has(taskId)) return;
+        const sourceProviderId = String(task.providerId || '').split('::model:')[0];
+        const currentProvider = this.providers.find(item => item.id === sourceProviderId);
+        this.recoveringGenerationTasks.add(taskId);
+        this._updateGenerationTask(taskId, { status: 'running', error: null, taskId: remoteTaskId,
+            ...(remoteTaskId !== task.taskId ? { filePath: null, filePaths: [] } : {}),
+            params: { syncStage: 'recovering' } });
+        try {
+            if (!window.flowCanvas?.mcp?.recoverGeneration) throw new Error('请重启 Flow Canvas 以启用新版任务恢复接口');
+            const result = await window.flowCanvas.mcp.recoverGeneration({
+                clientTaskId: task.id, taskId: remoteTaskId, kind: task.kind,
+                projectId: task.projectId || this.options.getActiveProjectId?.(), nodeId: task.params?.nodeId,
+                prompt: task.prompt, params: task.params, sourcePaths: task.sourcePaths,
+                targetDir: task.params?.targetDir,
+                providerConfig: { ...currentProvider, sourceProviderId, model: task.model || currentProvider?.model }
+            });
+            if (result?.success === false) {
+                this._updateGenerationTask(taskId, { status: result.canceled ? 'canceled' : 'disconnected', error: result.error });
+                return;
+            }
+            this._updateGenerationTask(taskId, { status: 'success', error: null,
+                projectId: result.projectId || task.projectId,
+                taskId: result.taskId || remoteTaskId, filePath: result.filePath, filePaths: result.filePaths || [result.filePath],
+                params: { nodeId: result.nodeId || task.params?.nodeId, syncStage: 'completed' } });
+        } catch (error) {
+            this._updateGenerationTask(taskId, { status: 'disconnected', error: error.message });
+        } finally {
+            this.recoveringGenerationTasks.delete(taskId);
+            this._renderGenerationTasks();
+        }
+    }
+
                 syncStage: shouldResumeVideo ? 'recovering' : 'submit'
             },
+        if (task?.taskId || task?.filePath) return this._recoverGenerationTask(taskId);
             ...(task.kind === 'image' ? {
                 sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
             } : {})
@@ -4889,6 +4992,7 @@ export class AgentSidebar {
         const size = this.imageSizeSelect?.value || undefined;
         const quality = this.imageQualitySelect?.value || 'high';
         const gptImage2 = isGptImage2Model(provider.model);
+                recoveryError: event.lastError || null,
         const responseFormat = gptImage2 ? (this.imageResponseFormatSelect?.value || 'url') : 'url';
         const historyDisabled = gptImage2 ? this.imageHistoryDisabled?.checked !== false : true;
         const stream = gptImage2 ? Boolean(this.imageStream?.checked) : false;

@@ -148,6 +148,8 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
         cancelGeneration: (clientTaskId) => ipcRenderer.invoke('mcp:generation:cancel', clientTaskId),
         compressImageReferences: (body) => ipcRenderer.invoke('mcp:image:compress-references', body),
+        recoverGeneration: (body) => ipcRenderer.invoke('mcp:generation:recover', body),
+        listRecoverableGenerations: () => ipcRenderer.invoke('mcp:generation:recovery-list'),
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),
         resumeVideo: (body) => ipcRenderer.invoke('mcp:video:resume', body),

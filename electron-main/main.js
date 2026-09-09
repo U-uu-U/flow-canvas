@@ -409,6 +409,7 @@ async function initServices() {
 
     flowCanvasBridge = new FlowCanvasBridge({
         store,
+        recoveryDirectory: path.join(app.getPath('userData'), 'data', 'generation-recovery'),
         getDefaultSaveFolder: getBoardDefaultSaveFolder,
         getFallbackSaveDir: getSaveDir,
         getMainWindow: () => mainWindow,
@@ -3085,6 +3086,22 @@ app.on('before-quit', event => {
 app.on('window-all-closed', () => {
     if (watcher) watcher.closeAll();
     if (flowCanvasBridge) flowCanvasBridge.stop();
+ipcMain.handle('mcp:generation:recover', async (event, body) => {
+    if (event.sender !== mainWindow?.webContents) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge) throw new Error('任务恢复服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.recoverGenerationFromRenderer(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code,
+            canceled: error.code === 'GENERATION_CANCELED' || error.name === 'AbortError' };
+    }
+});
+
+ipcMain.handle('mcp:generation:recovery-list', event => {
+    if (event.sender !== mainWindow?.webContents) return [];
+    return flowCanvasBridge?.recoveryStore.list() || [];
+});
+
     if (process.platform !== 'darwin') app.quit();
 });
 

@@ -193,6 +193,7 @@ export class AgentGeneration {
             provider: step.kind === 'video' ? 'openai-video' : 'openai', providerConfig: provider,
             noSubmissionRetry: true, requestId: step.id,
             clientTaskId: step.id, prompt: step.prompt, targetDir, addToCanvas: false,
+            projectId: run.projectId, nodeId: outputId,
             sourceReferences: references.filter(r => r.kind === 'image').map(r => ({ filePath: r.filePath })),
             videoReferences: references.filter(r => r.kind === 'video').map(r => ({ filePath: r.filePath })),
             audioReferences: references.filter(r => r.kind === 'audio').map(r => ({ filePath: r.filePath })),
