@@ -959,6 +959,7 @@ export class SidebarManager {
         };
 
         document.addEventListener('open-folder-groups', () => setSidebarClosed(false));
+        document.addEventListener('toggle-folder-groups', toggleSidebar);
         document.addEventListener('close-asset-library', () => this.toggleAssetLibrary(false));
         document.addEventListener('show-asset-classification-menu', event => {
             const { filePath, clientX, clientY } = event.detail || {};

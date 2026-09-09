@@ -888,28 +888,19 @@ export class CanvasManager {
 
     _setupCanvasToolRail() {
         const projectChip = document.getElementById('canvasProjectChip');
-        const addButton = document.getElementById('canvasToolAdd');
         const searchButton = document.getElementById('canvasToolSearch');
         const planButton = document.getElementById('canvasToolPlan');
         this.canvasNodeSearch = document.getElementById('canvasNodeSearch');
         this.canvasNodeSearchInput = document.getElementById('canvasNodeSearchInput');
         this.canvasNodeSearchResults = document.getElementById('canvasNodeSearchResults');
 
-        projectChip?.addEventListener('click', () => {
-            document.dispatchEvent(new CustomEvent('open-folder-groups'));
-        });
-        planButton?.addEventListener('click', () => document.getElementById('newPlanBtn')?.click());
-
-        addButton?.addEventListener('click', event => {
+        projectChip?.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            const rect = addButton.getBoundingClientRect();
-            this._showInsertNodeMenu({
-                clientX: rect.right + 8,
-                clientY: rect.top,
-                insertAt: this._getViewportCenter()
-            });
+            this._toggleCanvasNodeSearch(false);
+            document.dispatchEvent(new CustomEvent('toggle-folder-groups'));
         });
+        planButton?.addEventListener('click', () => document.getElementById('newPlanBtn')?.click());
 
         searchButton?.addEventListener('click', event => {
             event.preventDefault();
@@ -938,15 +929,24 @@ export class CanvasManager {
                 attributes: true,
                 attributeFilter: ['class']
             });
+            this._canvasProjectObserver.observe(document.body, {
+                attributes: true,
+                attributeFilter: ['class']
+            });
         }
         this._syncCanvasProjectName();
     }
 
     _syncCanvasProjectName() {
-        const label = document.getElementById('canvasProjectName');
-        if (!label) return;
+        const button = document.getElementById('canvasProjectChip');
+        if (!button) return;
         const activeName = document.querySelector('.folder-group-item.active .group-name')?.textContent?.trim();
-        label.textContent = activeName || 'Flow Canvas';
+        const expanded = !document.body.classList.contains('sidebar-closed');
+        const label = `${expanded ? '收起' : '打开'}文件夹组${activeName ? `：${activeName}` : ''}`;
+        button.title = label;
+        button.setAttribute('aria-label', label);
+        button.setAttribute('aria-expanded', String(expanded));
+        button.classList.toggle('active', expanded);
     }
 
     _toggleCanvasNodeSearch(force) {

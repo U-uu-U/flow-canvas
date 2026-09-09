@@ -1016,57 +1016,6 @@ body.folder-move-pending .folder-group-item.active .folder-item.move-target-hove
     transition: opacity 0.15s ease;
 }
 
-.canvas-project-chip {
-    position: absolute;
-    top: 16px;
-    left: 16px;
-    z-index: 9;
-    display: flex;
-    width: 214px;
-    height: 42px;
-    align-items: center;
-    gap: 9px;
-    padding: 0 12px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    background: rgba(24, 25, 27, 0.94);
-    color: #bfc2c7;
-    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
-    backdrop-filter: blur(14px);
-    cursor: pointer;
-}
-
-.canvas-project-chip:hover {
-    border-color: rgba(255, 255, 255, 0.17);
-    background: rgba(31, 32, 35, 0.96);
-    color: #e2e3e5;
-}
-
-body.platform-win32 .canvas-project-chip {
-    top: 4px;
-    z-index: 13001;
-    height: 30px;
-    border-radius: 6px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
-    -webkit-app-region: no-drag;
-}
-
-.canvas-project-chip > span {
-    min-width: 0;
-    flex: 1;
-    overflow: hidden;
-    font-size: 12px;
-    font-weight: 500;
-    text-align: left;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.canvas-project-chevron {
-    opacity: 0.6;
-    transform: rotate(180deg);
-}
-
 .canvas-tool-rail {
     position: absolute;
     top: 50%;
@@ -1104,20 +1053,6 @@ body.platform-win32 .canvas-project-chip {
 .canvas-tool-btn.active {
     background: rgba(255, 255, 255, 0.07);
     color: #d7d9dc;
-}
-
-.canvas-tool-btn.canvas-tool-add {
-    width: 38px;
-    height: 38px;
-    margin-bottom: 1px;
-    border-radius: 50%;
-    background: #eeeeef;
-    color: #252629;
-}
-
-.canvas-tool-btn.canvas-tool-add:hover {
-    background: #ffffff;
-    color: #111214;
 }
 
 .canvas-tool-btn.canvas-task-history-btn {
@@ -1260,10 +1195,6 @@ body.platform-win32 .canvas-project-chip {
     color: #70747b;
     font-size: 12px;
     text-align: center;
-}
-
-body:not(.sidebar-closed) .canvas-project-chip {
-    display: none;
 }
 
 .canvas-view-dock {
@@ -11685,10 +11616,6 @@ body.sidebar-closed .task-history-dock .agent-task-history {
 
 .canvas-asset-library[hidden] {
     display: none;
-}
-
-body.asset-library-open .canvas-project-chip {
-    visibility: hidden;
 }
 
 .canvas-asset-library .asset-library-head {

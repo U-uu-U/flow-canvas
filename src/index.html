@@ -145,15 +145,10 @@
         <!-- 画布区域 -->
         <main class="canvas-area">
             <div class="canvas-grid-overlay" id="canvasGrid"></div>
-            <button class="canvas-project-chip" id="canvasProjectChip" type="button" title="打开文件夹组"
-                aria-label="打开文件夹组" aria-controls="sidebar">
-                <svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
-                <span id="canvasProjectName">Flow Canvas</span>
-                <svg class="flow-icon flow-icon-xs canvas-project-chevron" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-collapse"></use></svg>
-            </button>
             <div class="canvas-tool-rail" id="canvasToolRail" role="toolbar" aria-label="画布工具">
-                <button class="canvas-tool-btn canvas-tool-add" id="canvasToolAdd" type="button" title="添加节点" aria-label="添加节点">
-                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-add"></use></svg>
+                <button class="canvas-tool-btn" id="canvasProjectChip" type="button" title="文件夹组"
+                    aria-label="文件夹组" aria-controls="sidebar" aria-expanded="false">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg>
                 </button>
                 <span class="canvas-tool-separator" aria-hidden="true"></span>
                 <button class="canvas-tool-btn" id="canvasToolSearch" type="button" title="搜索画布" aria-label="搜索画布">
