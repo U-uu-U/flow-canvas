@@ -12158,6 +12158,105 @@ body.agent-mode .agent-task-header-controls {
     text-align: center;
 }
 
+.agent-runtime-card {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin: 8px 0;
+    padding: 12px;
+    border: 1px solid #3e4245;
+    border-radius: 6px;
+    background: #252729;
+    color: #e1e3e4;
+    font-size: 12px;
+    line-height: 1.55;
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
+}
+
+.agent-runtime-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+}
+
+.agent-runtime-header strong { font-size: 12px; }
+.agent-runtime-status { color: #9dcbb6; font-size: 11px; }
+.agent-runtime-card[data-status="awaiting_confirmation"] .agent-runtime-status { color: #e4c979; }
+.agent-runtime-card[data-status="failed"] .agent-runtime-status,
+.agent-runtime-card[data-status="partial_failed"] .agent-runtime-status { color: #efaaaa; }
+.agent-runtime-summary { margin: 8px 0; }
+.agent-runtime-steps { margin: 8px 0; padding-left: 20px; }
+.agent-runtime-steps li { padding: 3px 0; }
+.agent-runtime-steps small { display: block; color: #aaaeb2; font-size: 11px; }
+.agent-runtime-output { white-space: pre-wrap; margin-top: 8px; }
+.agent-runtime-progress { color: #b0b5b9; margin: 8px 0; font-size: 11px; }
+.agent-runtime-error { color: #efaaaa; margin: 8px 0; white-space: pre-wrap; }
+.agent-runtime-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.agent-runtime-actions:empty { display: none; }
+.agent-runtime-actions button,
+.agent-runtime-feedback button {
+    min-height: 30px;
+    max-width: 100%;
+    border: 1px solid #51585c;
+    border-radius: 4px;
+    background: #33383b;
+    color: #e1e3e4;
+    padding: 4px 9px;
+    font: inherit;
+    cursor: pointer;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.agent-runtime-actions button:hover,
+.agent-runtime-feedback button:hover { background: #42494d; }
+.agent-runtime-actions button:disabled,
+.agent-runtime-feedback button:disabled { opacity: .5; cursor: default; }
+.agent-runtime-feedback { margin-top: 10px; }
+.agent-runtime-feedback textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    margin-bottom: 6px;
+    border: 1px solid #51585c;
+    border-radius: 4px;
+    background: #1e2123;
+    color: #e1e3e4;
+    padding: 8px;
+    font: inherit;
+}
+.agent-runtime-card :focus-visible { outline: 2px solid #9dcbb6; outline-offset: 2px; }
+.agent-runtime-card [hidden] { display: none; }
+.agent-runtime-notice { color: #b0b5b9; font-size: 12px; margin: 8px 0; }
+.agent-runtime-proposed { margin: 8px 0; }
+.agent-runtime-proposed summary { cursor: pointer; color: #b0b5b9; }
+.agent-runtime-proposed pre {
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 11px;
+    margin: 6px 0;
+}
+.agent-runtime-review { white-space: pre-wrap; margin: 8px 0; color: #b9d1c5; }
+.agent-runtime-step-prompt { white-space: pre-wrap; margin: 8px 0; max-height: 180px; overflow: auto; }
+.agent-runtime-sources { padding-left: 20px; margin: 6px 0; max-height: 120px; overflow: auto; }
+.agent-runtime-locate { display: inline-grid; place-items: center; width: 32px; height: 30px; padding: 4px; }
+
+@media (max-width: 520px) {
+    body.agent-mode.agent-open .agent-sidebar-wrapper {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 100%;
+        max-width: 420px;
+    }
+    body.agent-mode.agent-open .agent-sidebar { width: 100%; }
+}
+
 @media (max-width: 460px) {
     .agent-files-btn span,
     .agent-conversation-title-btn .flow-icon,

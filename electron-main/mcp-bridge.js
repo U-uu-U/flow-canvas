@@ -321,6 +321,7 @@ class FlowCanvasBridge {
     }
 
     _requestBoardTool(toolName, input = {}) {
+        if (this.agentBoardExecutor) return Promise.resolve(this.agentBoardExecutor(toolName, input));
         if (!this.boardToolsReady) {
             return Promise.reject(createBridgeError(
                 'RENDERER_NOT_READY',
@@ -409,6 +410,14 @@ class FlowCanvasBridge {
     }
 
     _matchRoute(method, pathname) {
+        if (method === 'POST' && pathname.startsWith('/agent/tools/')) {
+            const toolName = decodeURIComponent(pathname.slice('/agent/tools/'.length));
+            if (!KNOWN_TOOL_NAMES.has(toolName)) return null;
+            return { toolName, params: {}, handler: async (_, body) => {
+                if (!this.agentExecutor) throw new Error('Agent runtime unavailable');
+                return { result: await this.agentExecutor(toolName, body) };
+            } };
+        }
         const routes = [
             ['GET', /^\/health$/, ROUTE_TO_TOOL['GET /health'], () => this._health()],
             ['GET', /^\/config$/, ROUTE_TO_TOOL['GET /config'], () => this._getConfig()],
@@ -1052,6 +1061,29 @@ class FlowCanvasBridge {
         );
     }
 
+    async resumeImageFromRenderer(body) {
+        return this._runCancelableGeneration(body.clientTaskId, async signal => {
+            const config = body.providerConfig || {};
+            if (!body.taskId || !config.apiKey || !config.endpoint) throw new Error('图片恢复参数不完整');
+            const endpoint = buildOpenAiImageEndpoint(config.endpoint, 'generations');
+            const completed = await pollOpenAiImageTask(endpoint, config.apiKey, body.taskId,
+                { id: body.taskId, status: 'pending' }, { model: config.model, signal,
+                    nativeMidjourney: shouldUseNativeMidjourneyRoute(config.model, config.endpoint) });
+            const entries = getGeneratedImageDataList(completed.payload);
+            if (!entries.length && completed.image) entries.push(completed.image);
+            const saved = (await Promise.all(entries.map(entry => saveGeneratedImage(entry, endpoint,
+                body.targetDir, body.prompt, config.apiKey, signal)))).filter(Boolean);
+            if (!saved.length) throw new Error('图片任务没有返回可保存的结果');
+            let outputs = saved;
+            if (isMidjourneyImagineModel(config.model) && saved.length === 1 && saved[0].mediaType === 'image') {
+                const split = await splitMidjourneyGrid(saved[0]);
+                if (split.length === 4) outputs = split;
+            }
+            return { filePath: outputs[0].filePath, filePaths: outputs.map(output => output.filePath),
+                mediaType: outputs[0].mediaType, taskId: body.taskId };
+        });
+    }
+
     async _resumeVideoFromRenderer(body, signal) {
         throwIfGenerationCanceled(signal);
         const taskId = String(body?.taskId || '').trim();
@@ -1115,7 +1147,7 @@ class FlowCanvasBridge {
                     providerConfig: { ...providerConfig, model }
                 }, prompt, [], { taskId: resolvedTaskId })
             });
-        this._saveAndNotify(data, 'mcp:video-recovered');
+        if (item) this._saveAndNotify(data, 'mcp:video-recovered');
         return {
             item,
             filePath,
@@ -1830,7 +1862,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         let responseErrorText = '';
         let requestAttempt = 0;
         let compatibilityFallbackUsed = false;
-        const retryDelays = [2000, 5000];
+        const retryDelays = options.noSubmissionRetry === true ? [] : [2000, 5000];
         for (; requestAttempt <= retryDelays.length; requestAttempt += 1) {
             throwIfGenerationCanceled(options.signal);
             const requestAbort = createLinkedAbortController(options.signal, 300000);
@@ -1869,6 +1901,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             responseErrorText = await res.text();
             if (
                 midjourneyModel
+                && options.noSubmissionRetry !== true
                 && !compatibilityFallbackUsed
                 && isAllVendorsFailedImageResponse(res.status, responseErrorText)
             ) {

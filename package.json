@@ -1,19 +1,21 @@
 {
     "name": "flow-canvas",
-    "version": "1.4.3",
+    "version": "1.5.0-beta.1",
     "description": "本地素材管理、无限画布与 AI 图片/视频创作桌面应用",
     "main": "electron-main/main.js",
     "scripts": {
         "dev": "vite",
-        "test": "node --test electron-main/api-config-store.test.js electron-main/generation-trace-store.test.js electron-main/mcp-bridge-board-tools.test.js electron-main/openai-image-request.test.js electron-main/reference-cache.test.js mcp/flow-canvas-mcp.test.cjs shared/plan-service-core.test.cjs src/agent-attachments.test.js src/agent-conversations.test.js src/agent-image-generation.test.js src/agent-skills.test.js src/api-config-recovery.test.js src/board-tool-registry.test.js src/board-transaction.test.js src/generation-record.test.js src/generator-placeholder-layout.test.js src/generator-result-stack.test.js src/graph-model.test.js src/graph-runner.test.js src/graph-view.test.js src/image-crop-layout.test.js src/image-generation-preferences.test.js src/image-intent-pipeline.test.js src/image-node-settings.test.js src/node-types.test.js src/prompt-pack-registry.test.js src/provider-capabilities.test.js src/selection-toolbar-layout.test.js src/shortcut-settings.test.js src/undo-stack.test.js src/video-control-layout.test.js src/viewport-zoom.test.js",
+        "test": "node scripts/run-tests.cjs",
         "sync:prompt-pack": "node scripts/sync-awesome-prompt-pack.mjs",
         "build": "vite build",
         "mcp": "node mcp/flow-canvas-mcp.mjs",
         "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",
         "electron:build": "vite build && electron-builder",
-        "electron:build:mac": "vite build && electron-builder --mac"
+        "electron:build:mac": "vite build && electron-builder --mac",
+        "test:agent:smoke": "node scripts/agent-smoke.cjs"
     },
     "dependencies": {
+        "ajv": "^6.15.0",
         "chokidar": "^3.6.0",
         "gsap": "^3.15.0",
         "konva": "^9.3.6",
@@ -37,6 +39,7 @@
             "dist/**/*",
             "electron-main/**/*",
             "shared/**/*",
+            "src/{package.json,board-transaction.js,graph-model.js,node-types.js,generator-result-stack.js,image-node-settings.js,image-intent-pipeline.js,provider-capabilities.js}",
             "mcp/**/*",
             "package.json"
         ],

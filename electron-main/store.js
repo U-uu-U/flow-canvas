@@ -74,7 +74,9 @@ class Store {
                 return false;
             }
             this._backupExistingFile(existing);
-            fs.writeFileSync(this.filePath, JSON.stringify(merged, null, 2), 'utf-8');
+            const temporary = `${this.filePath}.tmp`;
+            fs.writeFileSync(temporary, JSON.stringify(merged, null, 2), 'utf-8');
+            fs.renameSync(temporary, this.filePath);
             return true;
         } catch (err) {
             console.error('[Store] 保存失败:', err.message);

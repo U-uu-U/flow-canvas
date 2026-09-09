@@ -33,6 +33,11 @@ import {
     parseAgentImageCompilationResponse
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
+import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import {
+    AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
+    settleRuntimeConversation
+} from './agent-runtime-view.js';
 import { createBoardToolRegistry } from './board-tool-registry.js';
 import {
     AGENT_SKILL_CATEGORY_IDS,
@@ -64,146 +69,9 @@ function normalizeRavenHashEndpoint(endpoint) {
     return value;
 }
 
-const VIDEO_MODEL_PROFILES = [
-    {
-        matchModel: /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i,
-        label: 'Seedance 2.5',
-        routeLabel: '备用路线',
-        price: { amount: 6, currency: 'CNY', unit: 'request' },
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: [30],
-        durationControl: 'fixed',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 9, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        matchModel: /^seedance_v2\.5$/i,
-        label: 'HM-Seedance 2.5',
-        price: { amount: 1.5, currency: 'CNY', unit: 'request' },
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: Array.from({ length: 27 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 10, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        match: /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i,
-        label: 'Seedance 2.5',
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: Array.from({ length: 27 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 10, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        match: /seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i,
-        label: 'Seedance 2.0',
-        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
-        resolutions: ['480p', '720p', '1080p', '4K'],
-        durations: Array.from({ length: 15 }, (_, index) => index + 1),
-        durationControl: 'slider',
-        supportsWebSearch: true,
-        defaultRatio: '16:9',
-        defaultResolution: '1080p',
-        defaultDuration: 5
-    },
-    {
-        match: /seedance[^a-z0-9]*(?:1[._-]?5|1[._-]?0[-_]?pro)/i,
-        label: 'Seedance 1.5',
-        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
-        resolutions: ['480p', '720p', '1080p'],
-        durations: [-1, 5, 10, 12],
-        durationControl: 'select',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 5
-    },
-    {
-        match: /minimax[^a-z0-9]*h3/i,
-        label: 'MiniMax H3',
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
-        resolutions: ['2k', '4k', '1080p', '768p', '480p'],
-        durations: Array.from({ length: 12 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 9, video: 3, audio: 3 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '2k',
-        defaultDuration: 4
-    },
-    {
-        match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
-        label: 'DashScope',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
-        resolutions: ['720P', '1080P'],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: '720P',
-        defaultDuration: 5
-    },
-    {
-        match: /kling|可灵/i,
-        label: 'Kling',
-        ratios: ['16:9', '9:16', '1:1'],
-        resolutions: [],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: null,
-        defaultDuration: 5
-    },
-    {
-        match: /tencent|vidu|腾讯/i,
-        label: 'Tencent / Vidu',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'],
-        resolutions: [],
-        durations: [5, 10],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: null,
-        defaultDuration: 5
-    }
-];
 
 function formatVideoModelPrice(price) {
-    if (price?.currency !== 'CNY' || price?.unit !== 'request') return '';
+    if (price?.kind !== 'sale' || !price.source || price.currency !== 'CNY' || price.unit !== 'request') return '';
     const amount = Number(price.amount);
     if (!Number.isFinite(amount) || amount < 0) return '';
     return `¥${Number.isInteger(amount) ? amount : amount.toFixed(2)}/次`;
@@ -217,20 +85,6 @@ function formatVideoModelProfile(profile, includeLabel = true) {
     ].filter(Boolean).join(' · ');
 }
 
-const DEFAULT_VIDEO_MODEL_PROFILE = {
-    label: '未收录模型',
-    ratios: [],
-    resolutions: [],
-    durations: [],
-    durationControl: null,
-    supportsWebSearch: false,
-    supportsCameraFixed: false,
-    supportsGeneratedAudio: false,
-    supportsWatermark: false,
-    defaultRatio: null,
-    defaultResolution: null,
-    defaultDuration: null
-};
 
 const DEFAULT_IMAGE_SIZES = [
     { value: '', label: '自动（匹配比例，优先最大）' },
@@ -362,6 +216,11 @@ export class AgentSidebar {
         this.pendingAgentAttachments = [];
         this.pendingAgentSource = null;
         this.isAgentSending = false;
+        this.runtimeClient = null;
+        this.runtimeStarting = new Set();
+        this.runtimeCards = new Map();
+        this.runtimeStartErrors = new Map();
+        this.activeRuntimeProjectId = this.options.getActiveProjectId?.() ?? null;
         this.agentModelKind = 'text';
         this.agentSkillCategory = 'all';
         this.customAgentSkills = this._loadCustomAgentSkills();
@@ -575,6 +434,11 @@ export class AgentSidebar {
         this.apiConfigReady = this._restoreDurableApiConfig();
         this._restoreAgentConversation(this.activeProjectCacheKey);
         this._restorePendingAgentAttachments();
+        this._connectAgentRuntime();
+        this.runtimePageHide = () => this.runtimeClient?.dispose();
+        this.runtimePageShow = () => this._connectAgentRuntime();
+        window.addEventListener('pagehide', this.runtimePageHide);
+        window.addEventListener('pageshow', this.runtimePageShow);
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
         window.flowCanvas?.browserSync?.onTaskCompleted?.((event) => this._handleTaskCompleted(event));
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
@@ -652,6 +516,7 @@ export class AgentSidebar {
                 && message.content.trim())
             .slice(-AGENT_CONVERSATION_MESSAGE_LIMIT)
             .map(message => ({
+                ...message,
                 role: message.role,
                 content: message.content.slice(0, 12000)
             }));
@@ -662,10 +527,19 @@ export class AgentSidebar {
     }
 
     _normalizeAgentConversationProject(state) {
-        return normalizeAgentConversationProject(state, {
+        const originals = Array.isArray(state?.conversations) ? state.conversations : [];
+        const normalized = normalizeAgentConversationProject(state, {
             createId: () => this._createAgentConversationId(),
             normalizeMessages: messages => this._normalizeAgentMessages(messages)
         });
+        return {
+            ...state,
+            ...normalized,
+            conversations: normalized.conversations.map(conversation => ({
+                ...originals.find(entry => entry.id === conversation.id),
+                ...conversation
+            }))
+        };
     }
 
     _saveAgentConversationProject(key, project, store = this._loadAgentConversationStore()) {
@@ -734,6 +608,7 @@ export class AgentSidebar {
         this._saveAgentConversationProject(key, project, store);
         this._renderAgentMessages();
         this._renderAgentConversationHeader(project);
+        this._watchAgentRuntime();
     }
 
     _renderAgentConversationHeader(projectState = null) {
@@ -815,6 +690,7 @@ export class AgentSidebar {
         this._renderAgentConversationHeader(project);
         this._closeAgentHeaderPopovers();
         this.inputEl?.focus();
+        this._watchAgentRuntime();
     }
 
     _switchAgentConversation(conversationId) {
@@ -1162,14 +1038,18 @@ export class AgentSidebar {
     _renderAgentMessages() {
         if (!this.messagesEl) return;
         this.messagesEl.innerHTML = '';
+        this.runtimeCards?.clear();
         if (this.messages.length === 0) {
             this._renderAgentWelcome();
+            this._renderAgentRuntimeCards();
             return;
         }
         this.messages.forEach(message => {
             const element = this._appendAgentMessageElement(message.role, message.content);
-            if (message.role === 'assistant') this._attachAgentPlanAction(element, message.content);
+            if (message.runtimeRunId) element.dataset.runtimeMessageId = message.runtimeRunId;
+            if (message.role === 'assistant' && !message.runtimeRunId) this._attachAgentPlanAction(element, message.content);
         });
+        this._renderAgentRuntimeCards();
         this._scrollAgentMessages();
     }
 
@@ -1227,6 +1107,18 @@ export class AgentSidebar {
     }
 
     _clearAgentConversation() {
+        const store = this._loadAgentConversationStore();
+        const conversation = store[this.activeProjectCacheKey]?.conversations?.find(entry => entry.id === this.activeConversationId);
+        if (conversation) {
+            conversation.runtimeReceipts ||= {};
+            for (const run of this.runtimeClient?.runs.values() || []) {
+                if (this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)) {
+                    conversation.runtimeReceipts[run.id] = { ignored: true };
+                }
+            }
+            for (const receipt of Object.values(conversation.runtimeReceipts)) receipt.ignored = true;
+            this._saveAgentConversationProject(this.activeProjectCacheKey, store[this.activeProjectCacheKey], store);
+        }
         this.messages = [];
         this.conversationFiles = [];
         this._saveAgentConversation(this.activeProjectCacheKey, this.messages, {
@@ -1607,6 +1499,209 @@ export class AgentSidebar {
         return this._activeAgentSkills().map(skill => `${skill.name}：${skill.instruction}`);
     }
 
+    _connectAgentRuntime() {
+        const api = window.flowCanvas?.agent;
+        if (!api?.start) return;
+        if (!this.runtimeClient || this.runtimeClient.closed) {
+            const previousRuns = this.runtimeClient?.runs;
+            this.runtimeClient = new AgentRuntimeClient(api, {
+                onChange: run => this._onAgentRuntimeChange(run),
+                onSync: scope => {
+                    if (this.runtimeSyncError && this._isActiveConversation(this._projectCacheKey(scope.projectId), scope.conversationId)) {
+                        this.runtimeSyncError = '';
+                        this._renderAgentRuntimeCards();
+                    }
+                },
+                onError: (error, scope) => {
+                    console.warn('[AgentRuntime] Sync failed:', error);
+                    if (!scope || this._isActiveConversation(this._projectCacheKey(scope.projectId), scope.conversationId)) {
+                        this.runtimeSyncError = '运行状态同步失败，正在重试';
+                        this._renderAgentRuntimeCards();
+                    }
+                }
+            });
+            if (previousRuns) this.runtimeClient.runs = previousRuns;
+            this.runtimeClient.connect();
+        }
+        this._watchAgentRuntime();
+    }
+
+    _watchAgentRuntime() {
+        this.runtimeSyncError = '';
+        this._syncAgentRuntimeSendState();
+        this._renderAgentRuntimeCards();
+        if (this.runtimeClient && !this.runtimeClient.closed) {
+            void this.runtimeClient.watch({
+                projectId: this.activeRuntimeProjectId,
+                conversationId: this.activeConversationId
+            });
+        }
+    }
+
+    _syncAgentRuntimeSendState() {
+        if (window.flowCanvas?.agent?.start && this.sendBtn) {
+            const activeRuns = [...(this.runtimeClient?.runs.values() || [])].some(run =>
+                this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+                && !isRuntimeTerminal(run.status));
+            this.sendBtn.disabled = this.runtimeStarting.has(this._activeConversationCacheKey()) || activeRuns;
+        }
+    }
+
+    _onAgentRuntimeChange(run) {
+        if (!run) return;
+        const key = this._projectCacheKey(run.projectId);
+        const store = this._loadAgentConversationStore();
+        const project = store[key];
+        const index = project?.conversations?.findIndex(entry => entry.id === run.conversationId) ?? -1;
+        let changed = false;
+        if (index >= 0) {
+            const previous = project.conversations[index];
+            let next = settleRuntimeConversation(previous, run);
+            if (isRuntimeTerminal(run.status) && !previous.runtimeReceipts?.[run.id]?.ignored) {
+                const files = mergeAgentConversationFiles(previous.files, runtimeOutputFiles(run), 'output');
+                if (JSON.stringify(files) !== JSON.stringify(previous.files || [])) next = { ...next, files };
+            }
+            if (next !== previous) {
+                next.messages = this._normalizeAgentMessages(next.messages);
+                next.updatedAt = Date.now();
+                project.conversations[index] = next;
+                changed = this._saveAgentConversationProject(key, project, store);
+                if (changed && this._isActiveConversation(key, run.conversationId)) {
+                    this.messages = next.messages;
+                    this.conversationFiles = next.files;
+                    this._renderAgentConversationHeader();
+                }
+            }
+        }
+        if (this._isActiveConversation(key, run.conversationId)) {
+            this.runtimeSyncError = '';
+            if (changed) this._renderAgentMessages();
+            else this._renderAgentRuntimeCards();
+            this._syncAgentRuntimeSendState();
+        }
+    }
+
+    _renderAgentRuntimeCards() {
+        if (!this.messagesEl || !this.runtimeCards) return;
+        const conversation = this._loadAgentConversationStore()[this.activeProjectCacheKey]?.conversations
+            ?.find(entry => entry.id === this.activeConversationId);
+        for (const run of this.runtimeClient?.runs.values() || []) {
+            if (!this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+                || conversation?.runtimeReceipts?.[run.id]?.ignored) continue;
+            let card = this.runtimeCards.get(run.id);
+            if (!card) {
+                card = createRuntimeCard({
+                    onAction: (runId, action, instruction) => this.runtimeClient.act(runId, action, instruction),
+                    onLocate: window.flowCanvas?.shell?.showInExplorer
+                        ? file => window.flowCanvas.shell.showInExplorer(file.filePath)
+                        : null
+                });
+                this.runtimeCards.set(run.id, card);
+                this.messagesEl.querySelector('.agent-welcome')?.remove();
+                const anchor = [...this.messagesEl.querySelectorAll('[data-runtime-message-id]')]
+                    .find(node => node.dataset.runtimeMessageId === run.id);
+                if (anchor) anchor.after(card.root);
+                else this.messagesEl.append(card.root);
+            }
+            card.update(run, {
+                busy: this.runtimeClient.actions.has(run.id),
+                confirmed: this.runtimeClient.confirmedVersions.get(run.id) === run.plan?.version && run.plan?.version != null,
+                saved: this.messages.some(message => message.role === 'assistant' && message.runtimeRunId === run.id)
+            });
+        }
+        let notice = this.messagesEl.querySelector('.agent-runtime-notice');
+        const noticeText = this.runtimeStartErrors.get(this._activeConversationCacheKey())
+            || this.runtimeSyncError
+            || (this.runtimeStarting.has(this._activeConversationCacheKey()) ? '正在提交任务' : '');
+        if (noticeText) {
+            if (!notice) {
+                notice = document.createElement('p');
+                notice.className = 'agent-runtime-notice';
+                notice.setAttribute('role', 'status');
+                this.messagesEl.append(notice);
+            }
+            notice.textContent = noticeText;
+        } else notice?.remove();
+    }
+
+    async _startAgentRuntime({ text, attachments = [], source = null, clearInput = false }) {
+        this._connectAgentRuntime();
+        const projectKey = this.activeProjectCacheKey;
+        const projectId = this.activeRuntimeProjectId;
+        const conversationId = this.activeConversationId;
+        const cacheKey = this._activeConversationCacheKey(projectKey, conversationId);
+        const running = [...this.runtimeClient.runs.values()].some(run =>
+            this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+            && !isRuntimeTerminal(run.status));
+        if (this.runtimeStarting.has(cacheKey) || running) return { ok: false, reason: '当前对话已有运行中的任务' };
+        const provider = this._getTextProvider();
+        if (!provider?.endpoint || !provider?.apiKey || !provider?.model) {
+            const reason = '请先配置并选择文字 API。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+        // Capture identity and request synchronously; the parent owns flushing and source binding.
+        const requestMessages = this._normalizeAgentMessages([...this.messages, { role: 'user', content: text }]);
+        const selection = this.options.getSelectedCanvasEntries?.() ?? this.lastCanvasSelection ?? [];
+        const request = {
+            projectId, conversationId, provider: { ...provider },
+            messages: requestMessages.map(({ role, content }) => ({ role, content })),
+            selectedItemIds: [...new Set(selection.map(entry => entry?.id).filter(id => typeof id === 'string' && id))],
+            attachments: structuredClone(attachments),
+            ...(source ? { source: structuredClone(source) } : {}),
+            mode: this.globalConfig.agentExecutionMode === 'ask' ? 'ask' : 'auto',
+            skillInstructions: this._agentImageSkillInstructions()
+        };
+        this._saveAgentConversation(projectKey, requestMessages, {
+            conversationId, files: this._captureAgentConversationFiles(attachments, 'input')
+        });
+        this.runtimeStarting.add(cacheKey);
+        this.runtimeStartErrors.delete(cacheKey);
+        this._renderAgentMessages();
+        this._syncAgentRuntimeSendState();
+        if (clearInput && this.inputEl) {
+            this.inputEl.value = '';
+            this.inputEl.style.height = 'auto';
+        }
+        this.setMode('agent');
+        try {
+            if (await this.options.flushBoard?.() === false) {
+                throw new Error('本地画板保存冲突，任务未启动。请先解决保存冲突后重试。');
+            }
+            const snapshot = await window.flowCanvas.agent.start(request);
+            if (!snapshot?.id || snapshot.projectId !== projectId || snapshot.conversationId !== conversationId) {
+                throw new Error('Runtime 返回的任务身份无效');
+            }
+            const store = this._loadAgentConversationStore();
+            const project = store[projectKey];
+            const conversation = project?.conversations?.find(entry => entry.id === conversationId);
+            // Events can arrive before start resolves. Never replace the newer conversation.
+            if (conversation) {
+                const message = conversation.messages[requestMessages.length - 1];
+                if (message?.role === 'user' && message.content === text) message.runtimeRunId = snapshot.id;
+                this._saveAgentConversationProject(projectKey, project, store);
+                if (this._isActiveConversation(projectKey, conversationId)) {
+                    this.messages = this._normalizeAgentMessages(conversation.messages);
+                }
+            }
+            this.runtimeClient.accept(snapshot);
+            void this.runtimeClient.refresh(snapshot.id);
+            this._consumePendingAgentAttachments(cacheKey, attachments, this._normalizePendingAgentSource(source));
+            if (this._isActiveConversation(projectKey, conversationId)) this._renderAgentMessages();
+            return { ok: true, runId: snapshot.id, run: snapshot };
+        } catch (error) {
+            const reason = `任务提交失败：${error?.message || error}`;
+            this.runtimeStartErrors.set(cacheKey, reason);
+            // No legacy retry: a failed IPC response may still have started a paid run.
+            void this.runtimeClient.watch({ projectId, conversationId });
+            return { ok: false, reason };
+        } finally {
+            this.runtimeStarting.delete(cacheKey);
+            this._syncAgentRuntimeSendState();
+            this._renderAgentRuntimeCards();
+        }
+    }
+
     async generateImageFromNode(details = {}, instruction = '', { fromSidebar = false } = {}) {
         const canRefreshContext = details?.nodeId && typeof this.options.getAgentNodeContext === 'function';
         const latest = canRefreshContext ? this.options.getAgentNodeContext(details.nodeId) : null;
@@ -1624,6 +1719,18 @@ export class AgentSidebar {
             const reason = '当前 Agent 上下文没有可执行的图片生成节点。';
             this._appendAgentError(reason);
             return { ok: false, reason };
+        }
+        if (window.flowCanvas?.agent?.start) {
+            this.pendingAgentAttachments = attachments;
+            this.pendingAgentSource = source;
+            this._savePendingAgentAttachments();
+            this._renderPendingAgentAttachments();
+            return this._startAgentRuntime({
+                text: String(instruction || '').trim() || source.effectivePrompt || source.prompt || '生成图片',
+                attachments,
+                source: { ...context, ...source, details: context },
+                clearInput: fromSidebar
+            });
         }
         if (this.isAgentSending) {
             return { ok: false, reason: 'Agent 正在整理上一条请求' };
@@ -1762,6 +1869,14 @@ export class AgentSidebar {
             return this.generateImageFromNode(latest, this.inputEl?.value || '', { fromSidebar: true });
         }
         const text = String(prompt ?? this.inputEl?.value ?? '').trim();
+        if (text && window.flowCanvas?.agent?.start) {
+            return this._startAgentRuntime({
+                text,
+                attachments: this._normalizePendingAgentAttachments(this.pendingAgentAttachments),
+                source: this.pendingAgentSource,
+                clearInput: true
+            });
+        }
         if (!text || this.isAgentSending) return;
         const projectKey = this.activeProjectCacheKey;
         const conversationId = this.activeConversationId;
@@ -1999,6 +2114,7 @@ export class AgentSidebar {
         }
         this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
         this.activeProjectCacheKey = nextKey;
+        this.activeRuntimeProjectId = projectId ?? null;
         this._restoreAgentConversation(nextKey);
         this._restorePendingAgentAttachments();
 
@@ -3415,12 +3531,7 @@ export class AgentSidebar {
     }
 
     _getVideoModelProfile(provider) {
-        if (!provider?.model) return null;
-        const model = String(provider.model).trim();
-        const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
-        return VIDEO_MODEL_PROFILES.find(profile => profile.matchModel?.test(model))
-            || VIDEO_MODEL_PROFILES.find(profile => profile.match?.test(marker))
-            || DEFAULT_VIDEO_MODEL_PROFILE;
+        return getVideoModelProfile(provider);
     }
 
     _getVideoReferenceLimits(profile) {

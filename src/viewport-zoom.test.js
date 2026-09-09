@@ -1,5 +1,5 @@
-const test = require('node:test');
-const assert = require('node:assert');
+import test from 'node:test';
+import assert from 'node:assert';
 
 let normalizeWheelDelta;
 let getCanvasTextFontSize;

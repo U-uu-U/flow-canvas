@@ -25,8 +25,19 @@ jobs:
         run: npm ci --include=optional
       - name: Build renderer
         run: npm run build
+      - name: Test shared runtime and project isolation
+        run: npm test
       - name: Package macOS app
         run: npx electron-builder --mac --universal --publish never
+      - name: Install smoke-test tooling
+        run: |
+          npm install --no-save --package-lock=false playwright
+          command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: Exercise packaged runtime and video decoding
+        env:
+          FLOW_CANVAS_SMOKE_ASAR: ${{ github.workspace }}/release/mac-universal/Flow Canvas.app/Contents/Resources/app.asar
+          FLOW_CANVAS_SMOKE_VIDEO: "1"
+        run: node scripts/agent-smoke.cjs
       - uses: actions/upload-artifact@v4
         with:
           name: flow-canvas-macos-universal

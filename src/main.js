@@ -90,6 +90,7 @@ async function bootstrap() {
             persistCompletedGenerationNode: (nodeData) => persistCompletedGenerationNode(nodeData)
         }));
         agentSidebar = initOptionalModule('agent-sidebar', () => new AgentSidebar({
+            flushBoard: () => saveStoreNow(),
             getSelectedFilePaths: () => canvasManager?.getSelectedFilePaths?.() || [],
             getSelectedCanvasEntries: () => canvasManager?.getSelectedCanvasEntries?.() || [],
             getPlanningContext: () => planService?.getAgentContext?.(canvasManager?.getSelectedFilePaths?.() || []) || null,
@@ -482,6 +483,11 @@ async function bootstrap() {
                 handleExternalStoreUpdate(payload);
             });
         }
+        window.flowCanvas.agent?.onSaveConflict?.(result => {
+            if (isRestoringHistory) return;
+            handleExternalStoreUpdate({ event: 'agent:save-conflict', data: result.data, skipFlush: true });
+            showHistoryStatus('画板已同步到较新版本；未保存的编辑已保留在本地冲突备份中');
+        });
 
         // 初始状态更新
         agentSidebar?.switchProjectContext?.(storeData.activeGroupId || null, { saveCurrent: false });
@@ -610,6 +616,16 @@ function showStartupError(err, area = 'startup') {
 
 function handleExternalStoreUpdate(payload) {
     if (!payload?.data || !canvasManager || !sidebarManager) return;
+
+    if (saveTimer && !payload.skipFlush) saveStoreNow(true);
+    if (window.flowCanvas.store.loadSync) payload = { ...payload, data: window.flowCanvas.store.loadSync() };
+    if (payload.projectIds?.length && !payload.projectIds.includes(storeData.activeGroupId)
+        && payload.data.activeGroupId === storeData.activeGroupId) {
+        storeData.folderGroups = payload.data.folderGroups.map(group => group.id === storeData.activeGroupId
+            ? sidebarManager.getActiveGroup() : group);
+        sidebarManager.renderGroups();
+        return;
+    }
 
     isRestoringHistory = true;
     clearTimeout(historyCommitTimer);

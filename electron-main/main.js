@@ -36,6 +36,7 @@ let thumbnailer = null;
 let flowCanvasBridge = null;
 let browserSyncService = null;
 let apiConfigStore = null;
+let agentServices = null;
 let mediaPreviewWasFullScreen = null;
 
 const isDev = !app.isPackaged;
@@ -379,7 +380,7 @@ function restoreMainWindowFromOrb() {
 }
 
 // ── 初始化服务 ──────────────────────────────────────────
-function initServices() {
+async function initServices() {
     store = new Store();
     apiConfigStore = new ApiConfigStore(app.getPath('userData'), {
         protect: value => safeStorage.isEncryptionAvailable()
@@ -437,6 +438,9 @@ function initServices() {
             }
         }
     });
+    const { createAgentServices } = require('./agent-services.cjs');
+    agentServices = await createAgentServices({ store, bridge: flowCanvasBridge, apiConfigStore,
+        dataDir: path.join(app.getPath('userData'), 'data'), getSaveDir, getMainWindow: () => mainWindow, BrowserWindow, net });
     flowCanvasBridge.start(mcpConfig);
 
     const activeGroup = (boardData.folderGroups || []).find(group => group.id === boardData.activeGroupId);
@@ -1247,10 +1251,23 @@ function isCurrentMainWindowSender(event) {
 
 // 数据存储
 ipcMain.handle('store:load', () => store.load());
-ipcMain.handle('store:save', (_, data) => store.save(data));
-ipcMain.on('store:saveSync', (event, data) => {
-    event.returnValue = store.save(data);
+ipcMain.on('store:loadSync', event => { event.returnValue = store.load(); });
+ipcMain.handle('store:save', async (_, data) => {
+    if (!agentServices) return store.save(data?.data || data);
+    await agentServices.board.whenIdle();
+    return agentServices.saveRenderer(data);
 });
+ipcMain.on('store:saveSync', (event, data) => {
+    event.returnValue = agentServices ? agentServices.saveRenderer(data) : store.save(data?.data || data);
+});
+
+for (const action of ['start', 'get', 'list', 'confirm', 'revise', 'cancel', 'resume', 'retry']) {
+    ipcMain.handle(`agent:${action}`, (event, request) => {
+        if (!isCurrentMainWindowSender(event)) throw new Error('Agent 请求来源无效');
+        if (!agentServices) throw new Error('Agent 服务尚未初始化');
+        return agentServices.runtime[action](request || {});
+    });
+}
 
 ipcMain.on('mcp:board-tools-ready', (event, ready) => {
     if (!isCurrentMainWindowSender(event)) return;
@@ -3036,16 +3053,17 @@ async function downloadImageFromUrl(url, targetDir, redirectDepth = 0) {
 }
 
 // ── 应用生命周期 ────────────────────────────────────────
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
     // 监听本地文件加载
     protocol.handle('local-res', handleLocalResourceRequest);
 
-    initServices();
+    await initServices();
     createWindow();
 });
 
 app.on('before-quit', () => {
     isQuitting = true;
+    agentServices?.close();
 });
 
 app.on('window-all-closed', () => {

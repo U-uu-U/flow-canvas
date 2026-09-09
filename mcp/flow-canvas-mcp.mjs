@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import { BOARD_TOOL_DEFINITIONS } from '../shared/board-tool-registry.mjs';
+import agentTools from '../shared/agent-tools.cjs';
 
 const DEFAULT_BASE_URL = `http://127.0.0.1:${process.env.FLOW_CANVAS_MCP_PORT || '18765'}`;
 const BASE_URL = (process.env.FLOW_CANVAS_BRIDGE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -16,6 +17,8 @@ const boardTools = BOARD_TOOL_DEFINITIONS.map(({ name, description, inputSchema 
 }));
 
 const tools = [
+    ...agentTools.AGENT_TOOL_DEFINITIONS,
+    ...agentTools.AGENT_RUN_TOOLS.filter(tool => !tool.name.endsWith('.confirm')),
     {
         name: 'flow_canvas.health',
         description: 'Check whether the Flow Canvas local bridge is running and reachable.',
@@ -323,6 +326,9 @@ const tools = [
 ];
 
 const toolHandlers = {
+    ...Object.fromEntries([...agentTools.AGENT_TOOL_DEFINITIONS, ...agentTools.AGENT_RUN_TOOLS]
+        .filter(tool => !tool.name.endsWith('.confirm')).map(tool => [tool.name,
+            async (body = {}) => (await api('POST', `/agent/tools/${encodeURIComponent(tool.name)}`, body)).result])),
     'flow_canvas.health': () => api('GET', '/health'),
     'flow_canvas.config.get': () => api('GET', '/config'),
     'flow_canvas.config.update': (body = {}) => api('PATCH', '/config', body),
