@@ -311,7 +311,7 @@ class AgentRuntime {
                     return false;
                 }
                 if (call.name === 'flow_canvas.memory.propose' || (call.name === 'flow_canvas.board.transaction.apply' && run.mode === 'ask')) {
-                    if (call.name.endsWith('.apply')) await this.board.preview(run.projectId, call.arguments);
+                    if (call.name.endsWith('.apply')) await this.executeTool(run, 'flow_canvas.board.transaction.preview', call.arguments);
                     this._check(run);
                     run.plan = { kind: call.name.endsWith('.apply') ? 'board' : 'memory', version: crypto.randomUUID(),
                         summary: call.arguments.reason || '更新项目简报与确认约束', steps: [], proposed: call.arguments };
@@ -408,7 +408,7 @@ class AgentRuntime {
             result = await this.board.updateProject(run.projectId, project => {
                 project.agentMemory = { ...plan.proposed, confirmedAt: Date.now() };
             });
-        } else if (plan.kind === 'board') result = await this.board.apply(run.projectId, plan.proposed);
+        } else if (plan.kind === 'board') result = await this.executeTool(run, 'flow_canvas.board.transaction.apply', plan.proposed);
         else if (plan.kind === 'creative') result = await this.executeTool(run, plan.tool, plan.proposed);
         else {
             if (!resume) run.steps = plan.steps.map(step => ({ ...step, status: 'queued' }));
