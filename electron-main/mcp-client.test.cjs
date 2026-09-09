@@ -116,7 +116,8 @@ test('official SDK stdio initializes, lists tools, carries env/cwd and executes 
     await manager.test({ id });
     const result = await manager.call(toolId(id, 'scene.inspect'), { label: 'Rhino/Blender' });
     const scene = JSON.parse(result.content[0].text);
-    assert.equal(scene.objectCount, 3); assert.equal(scene.marker, 'fixture-marker'); assert.equal(scene.cwd, directory);
+    assert.equal(scene.objectCount, 3); assert.equal(scene.marker, 'fixture-marker');
+    assert.equal(fs.realpathSync(scene.cwd), fs.realpathSync(directory));
     assert.equal(manager.isReadOnly(toolId(id, 'scene.inspect')), true);
 });
 
