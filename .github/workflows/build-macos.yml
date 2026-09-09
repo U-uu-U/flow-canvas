@@ -16,6 +16,7 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       ELECTRON_MIRROR: "https://github.com/electron/electron/releases/download/"
+      npm_config_electron_mirror: "https://github.com/electron/electron/releases/download/"
       npm_config_registry: "https://registry.npmjs.org"
       npm_config_replace_registry_host: "registry.npmmirror.com"
     steps:
@@ -31,7 +32,7 @@ jobs:
       - name: Test shared runtime and project isolation
         run: npm test
       - name: Package macOS app
-        run: npx electron-builder --mac --universal --publish never
+        run: npx electron-builder --mac --universal --publish never -c.electronDownload.mirror=https://github.com/electron/electron/releases/download/
       - name: Install smoke-test tooling
         run: |
           npm install --no-save --package-lock=false playwright
