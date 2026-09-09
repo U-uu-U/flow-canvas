@@ -17,7 +17,7 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
       ELECTRON_MIRROR: "https://github.com/electron/electron/releases/download/"
       npm_config_registry: "https://registry.npmjs.org"
-      npm_config_replace_registry_host: "always"
+      npm_config_replace_registry_host: "registry.npmmirror.com"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
