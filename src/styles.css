@@ -211,7 +211,7 @@ body.sidebar-closed .sidebar-wrapper {
     width: var(--sidebar-w);
     height: 100%;
     background-color: #1b1c1f;
-    border-right: 1px solid var(--border-color);
+    border-right: 0;
     display: flex;
     flex-direction: column;
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -226,7 +226,7 @@ body.sidebar-closed .sidebar-wrapper {
     transition: opacity 0.2s ease;
     opacity: 1;
     padding-top: 44px;
-    /* 防止和左上角收缩按钮重合 */
+    /* 留出窗口标题栏空间 */
 }
 
 .sidebar-collapse-btn {
