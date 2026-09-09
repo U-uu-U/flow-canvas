@@ -30,6 +30,7 @@ import {
     getGeneratorPlaceholderSize,
     getGeneratorSplitPositions
 } from './generator-placeholder-layout.js';
+import { formatGenerationElapsed, isGenerationRecoveryActive, canRecoverGenerationTask } from './generation-progress.js';
 import {
     appendGeneratorResult,
     clearGeneratorResults,
@@ -2650,6 +2651,22 @@ export class CanvasManager {
         return control;
     }
 
+    _addGenerationElapsedLabel(group, width, height, startedAt) {
+        const label = new Konva.Text({
+            name: 'generationElapsed', width, height,
+            text: formatGenerationElapsed(startedAt),
+            align: 'center', verticalAlign: 'middle',
+            fontFamily: 'Segoe UI, sans-serif', fontSize: Math.min(24, Math.max(10, height * 0.16)),
+            fontStyle: 'bold', fill: '#c6c8ce', listening: false,
+            shadowColor: '#18191b', shadowBlur: 4, shadowOpacity: 0.65
+        });
+        group.add(label);
+        return () => {
+            const value = formatGenerationElapsed(startedAt);
+            if (label.text() !== value) label.text(value);
+        };
+    }
+
     addGenerationPlaceholder(options = {}) {
         const referenceSize = this._getGenerationReferenceSize(options.sourceReferences);
         const { width, height } = resolveGenerationDisplaySize({
@@ -2743,6 +2760,9 @@ export class CanvasManager {
         });
         sweepClip.add(sweep);
         group.add(sweepClip);
+        const updateElapsed = kind === 'video'
+            ? this._addGenerationElapsedLabel(group, width, height, options.startedAt || Date.now())
+            : null;
         this._addGenerationCancelControl(group, {
             x: Math.max(8, width - 58),
             y: 8,
@@ -2756,6 +2776,7 @@ export class CanvasManager {
         const animation = new Konva.Animation((frame) => {
             const progress = ((frame?.time || 0) % 1500) / 1500;
             sweep.x(-sweepWidth + ((width + sweepWidth) * progress));
+            updateElapsed?.();
         }, this.transientLayer);
         this.generationPlaceholders.set(id, { group, animation, placement });
         animation.start();
@@ -4271,8 +4292,6 @@ export class CanvasManager {
                 const raw = items[index];
                 if (raw?.kind === 'op') {
                     if (raw.id && this.items.has(raw.id)) continue;
-                    raw.runStatus = 'idle';
-                    raw.runError = '';
                     this._createOpNode(raw);
                     continue;
                 }
@@ -5748,12 +5767,13 @@ export class CanvasManager {
 
         const status = data.runStatus || 'idle';
         const recoveryTask = this.generationTaskStates.get(data.id) || null;
-        const isRecoverable = ['disconnected', 'failed'].includes(recoveryTask?.status);
-        const isRecovering = recoveryTask?.status === 'running'
-            && recoveryTask?.params?.syncStage === 'recovering';
+        const isRecovering = isGenerationRecoveryActive(recoveryTask);
         const results = ensureGeneratorResultEntries(data);
         const resultCount = results.length;
-        const isBusy = status === STATUS.QUEUED || status === STATUS.RUNNING || isRecovering;
+        const isRecoverable = ['disconnected', 'failed', 'canceled'].includes(recoveryTask?.status)
+            || (recoveryTask?.status === 'success' && !resultCount && canRecoverGenerationTask(recoveryTask));
+        const isBusy = recoveryTask ? recoveryTask.status === 'running'
+            : status === STATUS.QUEUED || status === STATUS.RUNNING;
         const stroke = isRecoverable
             ? 'rgba(221, 166, 90, 0.72)'
             : status === STATUS.ERROR && !isRecovering
@@ -5861,7 +5881,7 @@ export class CanvasManager {
 
         if (results[0]) {
             this._addGeneratorResultPreview(group, group, data, results[0], width, height, 'generatorResultPreview');
-        } else {
+        } else if (!(isBusy && data.nodeType === 'video')) {
             const glyph = NODE_GLYPH_PATHS[data.nodeType] || NODE_GLYPH_PATHS.image;
             group.add(new Konva.Path({
                 data: glyph,
@@ -5901,9 +5921,16 @@ export class CanvasManager {
             });
             clip.add(sweep);
             group.add(clip);
+            if (!(Number(data.runStartedAt) > 0)) {
+                data.runStartedAt = Date.parse(recoveryTask?.createdAt || '') || Date.now();
+            }
+            const updateElapsed = data.nodeType === 'video'
+                ? this._addGenerationElapsedLabel(group, width, height, data.runStartedAt)
+                : null;
             const animation = new Konva.Animation(frame => {
                 const progress = ((frame?.time || 0) % 1500) / 1500;
                 sweep.x(-sweepWidth + (width + sweepWidth) * progress);
+                updateElapsed?.();
             }, this.layer);
             group.setAttr('generatorAnimation', animation);
             animation.start();
@@ -5916,7 +5943,7 @@ export class CanvasManager {
             });
         }
 
-        if (status === STATUS.ERROR && !isRecovering && data.runError) {
+        if (status === STATUS.ERROR && !isRecovering && recoveryTask?.status !== 'success' && data.runError) {
             group.add(new Konva.Rect({
                 x: 8,
                 y: height - 44,
@@ -5940,7 +5967,7 @@ export class CanvasManager {
             }));
         }
 
-        if (isRecoverable) {
+        if (isRecoverable && (recoveryTask.status === 'failed' || canRecoverGenerationTask(recoveryTask))) {
             this._addGenerationRecoveryControl(group, data, recoveryTask, width, height);
         }
 
@@ -5995,10 +6022,9 @@ export class CanvasManager {
             lineJoin: 'round',
             listening: false
         });
-        const isDownloadRecovery = task?.status === 'failed'
-            && task?.params?.syncStage === 'download'
-            && Boolean(task?.taskId);
-        const isRetry = task?.status === 'failed' && !isDownloadRecovery;
+        const isDownloadRecovery = Boolean(task?.filePath)
+            || (task?.params?.syncStage === 'download' && canRecoverGenerationTask(task));
+        const isRetry = !canRecoverGenerationTask(task);
         const label = new Konva.Text({
             x: 38,
             y: 8,
@@ -6024,7 +6050,7 @@ export class CanvasManager {
             background.stroke('rgba(231, 182, 113, 0.9)');
             document.body.style.cursor = 'pointer';
             this._showCanvasStatus(isDownloadRecovery
-                ? '继续下载已完成的视频，不会重复提交'
+                ? '恢复已完成的产物，不会重复提交'
                 : (isRetry
                     ? '使用原参数重新提交，并恢复到当前节点'
                     : '从服务器继续原任务，不会重复提交'));
@@ -6056,12 +6082,8 @@ export class CanvasManager {
             const nodeId = String(task?.params?.nodeId || '').trim();
             if (!nodeId || resolvedNodeIds.has(nodeId)) return;
             resolvedNodeIds.add(nodeId);
-            const canResume = task?.kind === 'video' && Boolean(task?.taskId);
-            const relevant = task?.status === 'failed'
-                || (canResume && (
-                    task?.status === 'disconnected'
-                    || (task?.status === 'running' && task?.params?.syncStage === 'recovering')
-                ));
+            const relevant = ['image', 'video'].includes(task?.kind)
+                && ['failed', 'disconnected', 'canceled', 'running', 'success'].includes(task?.status);
             if (!relevant) return;
             next.set(nodeId, task);
         });
@@ -6417,6 +6439,8 @@ export class CanvasManager {
 
     _disposeGeneratorPreviewMedia(group) {
         if (!group) return;
+        group.getAttr('generatorAnimation')?.stop?.();
+        group.setAttr('generatorAnimation', null);
         group.getAttr('generatorVideoAnimation')?.stop?.();
         group.setAttr('generatorVideoAnimation', null);
         const videos = group.getAttr('generatorPreviewVideos') || [];

@@ -13,6 +13,7 @@ function stripRuntime(item) {
     delete clean.runStatus;
     delete clean.runError;
     delete clean.runResult;
+    delete clean.runStartedAt;
     return clean;
 }
 

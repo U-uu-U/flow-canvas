@@ -170,6 +170,14 @@ export class AgentGeneration {
             this._wireNext(run, step, filePaths);
             return { nodeIds: [existing.id], filePaths, sourceNodeId: step.nodeId, reused: true };
         }
+        if (existing) await this.board.updateProject(run.projectId, current => {
+            this._validate(step, current);
+            const output = current.items.find(node => node.id === outputId);
+            if (!output) throw error('OUTPUT_REMOVED', '生成占位节点已删除');
+            output.runStatus = 'running';
+            output.runError = '';
+            output.runStartedAt ||= Date.now();
+        });
         if (!existing) await this.board.updateProject(run.projectId, current => {
             this._validate(step, current);
             const display = resolveGenerationDisplaySize({ kind: step.kind, referenceSize: first, ratio, size: `${dimensions.width}x${dimensions.height}` });
@@ -177,6 +185,7 @@ export class AgentGeneration {
                 x: step.x + step.width + 64, y: step.y + run.steps.indexOf(step) * (step.height + 48),
                 width: first?.width || display.width || step.width, height: first?.height || display.height || step.height,
                 config: { ...config, prompt: step.prompt, count: 1, model: step.model }, runStatus: 'running',
+                runStartedAt: Date.now(),
                 metadata: { agentRunId: run.id, agentStepId: step.id } });
             const parent = current.items.find(node => node.id === step.nodeId);
             current.connections.push({ id: `history-${step.id}`, kind: 'history',

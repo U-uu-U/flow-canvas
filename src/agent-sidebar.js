@@ -4360,7 +4360,7 @@ export class AgentSidebar {
         this.recoveringGenerationTasks.add(taskId);
         this._updateGenerationTask(taskId, { status: 'running', error: null, taskId: remoteTaskId,
             ...(remoteTaskId !== task.taskId ? { filePath: null, filePaths: [] } : {}),
-            params: { syncStage: 'recovering' } });
+            params: { syncStage: 'recovering', recoveryStartedAt: Date.now() } });
         try {
             if (!window.flowCanvas?.mcp?.recoverGeneration) throw new Error('请重启 Flow Canvas 以启用新版任务恢复接口');
             const result = await window.flowCanvas.mcp.recoverGeneration({

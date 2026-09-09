@@ -1595,6 +1595,8 @@ function saveStoreNow(useSync = false) {
 }
 
 function updateBodyState() {
+    const emptyCanvas = document.getElementById('canvasEmpty');
+    if (emptyCanvas) emptyCanvas.style.display = storeData?.items?.length ? 'none' : '';
     const activeWatchFolders = sidebarManager ? sidebarManager.getActiveWatchFolders() : [];
     if (activeWatchFolders.length > 0) {
         document.body.classList.add('has-folders');

@@ -62,6 +62,10 @@ export class GraphRunner {
     }
 
     _setStatus(item, status, error = '') {
+        if (status === STATUS.QUEUED || (status === STATUS.RUNNING && !(Number(item.runStartedAt) > 0))) {
+            item.runStartedAt = Date.now();
+        }
+        if (status === STATUS.IDLE) delete item.runStartedAt;
         item.runStatus = status;
         item.runError = error;
         this.ctx.onStatus?.(item.id);
@@ -91,7 +95,7 @@ export class GraphRunner {
         // 只锁本次运行真正涉及的节点。互不相干的链可并发，共享上游的链
         // 仍会被拒绝，避免同一节点的状态和结果被两个运行互相覆盖。
         order.forEach(id => this.activeNodes.add(id));
-        const runState = { targetId, order, canceled: false };
+        const runState = { targetId, order, items, canceled: false };
         this.activeRuns.set(targetId, runState);
         const runCache = new Map();
 
@@ -127,25 +131,28 @@ export class GraphRunner {
                     if (runState.canceled) throw cancellationError();
                     runCache.set(id, output);
                     this.resultCache.set(id, output);
-                    this._setStatus(item, STATUS.DONE);
                     // 生成结果自动落地成新节点。没有 onResult 时静默跳过，
                     // 保证 runner 在无宿主画布的测试里仍可独立运行。
                     // await：落地是异步的（要建卡片再连溯源边），不等的话
                     // 下一个节点可能在结果节点存在之前就跑起来。
-                    // 单独 try：落地失败不该把已经跑成功的节点标成 error，
-                    // 产物还在 resultCache 里，下游照样能取。
+                    // Keep downloaded outputs cached even if canvas persistence fails.
                     if (!reusedProduct && item.kind === 'op' && typeof this.ctx.onResult === 'function') {
                         try {
                             const landedOutputs = Array.isArray(output?._batchResults)
                                 ? output._batchResults
                                 : [output];
                             for (const landedOutput of landedOutputs) {
+                                if (runState.canceled) throw cancellationError();
                                 await this.ctx.onResult(item, landedOutput);
                             }
                         } catch (landErr) {
+                            if (runState.canceled || isCancellationError(landErr)) throw landErr;
                             console.warn('[GraphRunner] 结果落地失败', landErr);
+                            throw new Error(`产物已生成，但画布保存失败：${landErr?.message || String(landErr)}。可从任务记录拉取产物`);
                         }
                     }
+                    if (runState.canceled) throw cancellationError();
+                    this._setStatus(item, STATUS.DONE);
                 } catch (err) {
                     const message = err?.message || String(err);
                     if (runState.canceled || isCancellationError(err)) {
@@ -167,6 +174,12 @@ export class GraphRunner {
                 }
             }
         } finally {
+            order.forEach(id => {
+                const item = items.get(id);
+                if ([STATUS.QUEUED, STATUS.RUNNING].includes(item?.runStatus)) {
+                    this._setStatus(item, STATUS.CANCELED, runState.canceled ? '生成任务已中断' : '本次任务已停止，节点未执行');
+                }
+            });
             order.forEach(id => this.activeNodes.delete(id));
             this.activeRuns.delete(targetId);
         }
@@ -220,12 +233,17 @@ export class GraphRunner {
     }
 
     async cancel(targetId) {
-        const runState = this.activeRuns.get(targetId);
+        const runState = this.activeRuns.get(targetId)
+            || [...this.activeRuns.values()].find(run => run.order.includes(targetId));
         if (!runState || runState.canceled) return false;
         runState.canceled = true;
-        const target = this._items().get(targetId);
-        if (target) this._setStatus(target, STATUS.CANCELED, '生成任务已中断');
-        await this.ctx.cancelGenerationTasks?.(targetId);
+        const pendingIds = runState.order.filter(id =>
+            [STATUS.QUEUED, STATUS.RUNNING].includes(runState.items.get(id)?.runStatus));
+        pendingIds.forEach(id => this._setStatus(runState.items.get(id), STATUS.CANCELED, '生成任务已中断'));
+        const canceled = await Promise.allSettled(pendingIds.map(id => Promise.resolve().then(() => this.ctx.cancelGenerationTasks?.(id))));
+        canceled.filter(result => result.status === 'rejected').forEach(result => {
+            console.warn('[GraphRunner] 中断本地等待失败', result.reason);
+        });
         return true;
     }
 
