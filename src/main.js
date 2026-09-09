@@ -599,7 +599,33 @@ function initOptionalModule(name, factory) {
 function showStartupError(err, area = 'startup') {
     const status = document.getElementById('titlebarStatus');
     if (status) {
-        status.textContent = `Flow Canvas ${area} error: ${err?.message || err}`;
+        const message = `Flow Canvas ${area} error: ${err?.message || err}`;
+        const text = document.createElement('span');
+        text.className = 'titlebar-status-message';
+        text.textContent = message;
+        text.title = message;
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'titlebar-status-copy';
+        copy.title = '复制报错';
+        copy.setAttribute('aria-label', '复制报错');
+        copy.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg>';
+        copy.addEventListener('click', async event => {
+            event.stopPropagation();
+            try {
+                if (window.flowCanvas?.clipboard?.writeText) {
+                    const result = await window.flowCanvas.clipboard.writeText(message);
+                    if (result?.success === false) throw new Error(result.error || '复制失败');
+                } else await navigator.clipboard.writeText(message);
+                copy.querySelector('use').setAttribute('href', './icons/flow-icons.svg#icon-check');
+                copy.title = '已复制';
+                copy.setAttribute('aria-label', '报错已复制');
+            } catch {
+                copy.title = '复制失败，请重试';
+                copy.setAttribute('aria-label', '复制失败，请重试');
+            }
+        });
+        status.replaceChildren(text, copy);
         status.classList.add('status-visible', 'status-error', 'status-dismissible');
         status.title = '点击关闭';
         if (!showStartupError.bound) {
