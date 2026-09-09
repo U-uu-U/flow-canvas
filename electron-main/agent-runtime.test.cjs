@@ -17,6 +17,83 @@ const graphCall = (id = 'generate') => tool(id, 'graph.run', { nodeIds: ['image-
 const toolResults = request => request.messages.filter(message => message.role === 'tool')
     .map(message => ({ id: message.tool_call_id, value: JSON.parse(message.content) }));
 
+function externalClient(h, { readOnly = false, execute } = {}) {
+    const calls = [];
+    const name = 'external_mcp_test';
+    h.runtime.mcpClient = {
+        ready: async () => {}, definitions: () => [{ name, description: 'External scene tool', inputSchema: { type: 'object' } }],
+        isExternal: value => value === name, isReadOnly: () => readOnly, binding: () => 'stable-config',
+        call: async (tool, args, context) => {
+            context.onDispatch(); calls.push({ tool, args });
+            return execute ? execute(context) : { content: [{ type: 'text', text: 'Created object' }] };
+        }
+    };
+    return calls;
+}
+
+test('MCP discovered tools join the provider loop and retain original project/conversation', async t => {
+    const h = harness(t, { script: [reply('', [{ id: 'external-call', name: 'external_mcp_test', arguments: {} }]), reply()] });
+    const calls = externalClient(h);
+    const id = h.start(); const result = await h.idle(id);
+    assert.equal(result.status, 'completed'); assert.equal(calls.length, 1);
+    assert.equal(result.projectId, 'a'); assert.equal(result.conversationId, 'conversation-1');
+    assert.ok(h.requests[0].tools.some(tool => tool.function.name === 'external_mcp_test'));
+    assert.equal(toolResults(h.requests[1])[0].value.content[0].text, 'Created object');
+    assert.equal(Object.values(h.disk(id).externalCalls)[0].status, 'completed');
+});
+
+test('ask mode confirms external scene changes once', async t => {
+    const h = harness(t, { script: [reply('', [{ id: 'external-call', name: 'external_mcp_test', arguments: {} }]), reply()] });
+    const calls = externalClient(h);
+    const id = h.start({ mode: 'ask' });
+    const proposal = await h.idle(id);
+    assert.equal(proposal.status, 'awaiting_confirmation'); assert.equal(proposal.plan.kind, 'external'); assert.equal(calls.length, 0);
+    h.confirm(id); const result = await h.idle(id);
+    assert.equal(result.status, 'completed'); assert.equal(calls.length, 1);
+    assert.throws(() => h.runtime.confirm({ runId: id, planVersion: proposal.plan.version }), { code: 'PLAN_CHANGED' });
+});
+
+test('read-only external tool works in ask mode and images enter model context', async t => {
+    const h = harness(t, { script: [reply('', [{ id: 'external-call', name: 'external_mcp_test', arguments: {} }]), reply()] });
+    externalClient(h, { readOnly: true, execute: async () => ({ content: [{ type: 'image', mimeType: 'image/png', data: 'YWJj' }] }) });
+    const result = await h.idle(h.start({ mode: 'ask' }));
+    assert.equal(result.status, 'completed');
+    assert.ok(h.requests[1].messages.some(m => Array.isArray(m.content) && m.content.some(c => c.type === 'image_url')));
+});
+
+test('unknown external mutation halts loop and blocks restart replay', async t => {
+    const h = harness(t, { script: [reply('', [{ id: 'external-call', name: 'external_mcp_test', arguments: {} }])] });
+    const calls = externalClient(h, { execute: async () => { throw Object.assign(new Error('Unknown result'), { code: 'MCP_RESULT_UNKNOWN' }); } });
+    const id = h.start(); const result = await h.idle(id);
+    assert.equal(result.status, 'failed'); assert.equal(calls.length, 1);
+    assert.equal(Object.values(h.disk(id).externalCalls)[0].status, 'unknown');
+    assert.throws(() => h.runtime.resume({ runId: id }), { code: 'MCP_RESULT_UNKNOWN' });
+    const recovered = harness(t, { initialRuns: [h.disk(id)] });
+    externalClient(recovered);
+    assert.throws(() => recovered.runtime.resume({ runId: id }), { code: 'MCP_RESULT_UNKNOWN' });
+});
+
+test('saved MCP result is reused after crash before tool message was saved', async t => {
+    const call = { id: 'external-call', name: 'external_mcp_test', arguments: {} };
+    const saved = recoveryRun({}, { status: 'planning', turns: 8, steps: [], plan: null, mcpBindings: { external_mcp_test: 'stable-config' },
+        pendingCalls: [call], messages: [{ role: 'user', content: 'Create' }, { role: 'assistant', content: '', tool_calls: [
+            { id: call.id, type: 'function', function: { name: call.name, arguments: '{}' } } ] }],
+        externalCalls: { '1:external-call': { status: 'completed', readOnly: false, result: { content: [{ type: 'text', text: 'Already created' }] } } } });
+    const h = harness(t, { initialRuns: [saved], script: [reply()] });
+    const calls = externalClient(h);
+    h.runtime.resume({ runId: saved.id });
+    assert.equal((await h.idle(saved.id)).status, 'completed'); assert.equal(calls.length, 0);
+});
+
+test('changed MCP binding cannot execute a previously approved plan', async t => {
+    const h = harness(t, { script: [reply('', [{ id: 'external-call', name: 'external_mcp_test', arguments: {} }])] });
+    const calls = externalClient(h);
+    const id = h.start({ mode: 'ask' }); await h.idle(id);
+    h.runtime.mcpClient.binding = () => 'different-server';
+    h.confirm(id);
+    assert.equal((await h.idle(id)).status, 'failed'); assert.equal(calls.length, 0);
+});
+
 test('retry excludes completed calls and requires a fresh plan confirmation', async t => {
     const saved = recoveryRun({}, { status: 'partial_failed', steps: [
         { id: 'done', status: 'completed', result: { nodeIds: ['done'] } },

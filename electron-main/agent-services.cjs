@@ -6,7 +6,7 @@ const { AgentRunStore, redact } = require('./agent-run-store.cjs');
 const { AgentMedia } = require('./agent-media.cjs');
 const { callAgentProvider } = require('./agent-provider.cjs');
 
-async function createAgentServices({ store, bridge, apiConfigStore, dataDir, getSaveDir, getMainWindow, BrowserWindow, net }) {
+async function createAgentServices({ store, bridge, apiConfigStore, dataDir, getSaveDir, getMainWindow, BrowserWindow, net, safeStorage }) {
     const { AgentBoardService } = await import('./agent-board-service.mjs');
     const { AgentGeneration } = await import('./agent-generation.mjs');
     const { BOARD_TOOL_DEFINITIONS } = await import('../shared/board-tool-registry.mjs');
@@ -47,7 +47,9 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         frameQueue = work.catch(() => {});
         return work;
     } });
-    const runtime = new AgentRuntime({ runStore: new AgentRunStore(path.join(dataDir, 'agent-runs')), board,
+    const { McpClientManager } = require('./mcp-client.cjs');
+    const mcpClient = new McpClientManager({ directory: dataDir, safeStorage });
+    const runtime = new AgentRuntime({ runStore: new AgentRunStore(path.join(dataDir, 'agent-runs')), board, mcpClient,
         boardDefinitions: BOARD_TOOL_DEFINITIONS,
         resolveProvider: (binding, kind) => generation.resolveProvider(binding, kind),
         callProvider: request => callAgentProvider({ ...request, fetchImpl: (...args) => net.fetch(...args) }),
@@ -69,7 +71,7 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
     const originalSubmitted = bridge.notifyTaskSubmitted;
     const { AgentCreativeService } = await import('./agent-creative-service.mjs');
     runtime.creative = new AgentCreativeService({ board, getRun: id => runtime.runs.get(id) });
-    runtime.getSecrets = () => generation.providers().map(provider => provider.apiKey).filter(Boolean);
+    runtime.getSecrets = () => [...generation.providers().map(provider => provider.apiKey).filter(Boolean), ...mcpClient.secrets()];
     runtime.analyzeMedia = async (inspected, run, signal) => {
         const provider = runtime.providerSessions.get(run.id) || generation.resolveProvider(run.providerRef, 'text');
         const hash = require('node:crypto').createHash('sha256').update(`${inspected.fingerprint}:${provider.model}:v1`).digest('hex');
@@ -122,7 +124,7 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         }
         return result;
     };
-    return { board, runtime, generation, media,
+    return { board, runtime, generation, media, mcpClient,
         saveRenderer(payload) {
             const result = board.mergeRendererSave(payload);
             if (!result.ok) {
@@ -132,7 +134,11 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
             }
             return result;
         },
-        close() { if (decoder && !decoder.isDestroyed()) decoder.destroy(); }
+        async close() {
+            for (const controller of runtime.controllers.values()) controller.abort();
+            if (decoder && !decoder.isDestroyed()) decoder.destroy();
+            await mcpClient.close();
+        }
     };
 }
 module.exports = { createAgentServices };

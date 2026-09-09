@@ -1,0 +1,26 @@
+.mcp-client-settings { margin-top: 24px; padding-top: 18px; border-top: 1px solid rgba(128,128,128,.2); color: inherit; }
+.mcp-client-settings [hidden] { display: none !important; }
+.mcp-client-settings button { color: inherit; background: rgba(128,128,128,.08); border: 1px solid rgba(128,128,128,.18); border-radius: 6px; cursor: pointer; }
+.mcp-client-settings button:hover { background: rgba(128,128,128,.18); }
+.mcp-client-settings button:disabled { opacity: .45; cursor: wait; }
+.mcp-client-settings input[type="checkbox"] { accent-color: #aaa; }
+.mcp-client-settings [data-action="add"], .mcp-client-row-head button { width: 28px; height: 28px; flex: 0 0 28px; display: inline-flex; align-items: center; justify-content: center; }
+.mcp-client-status { font-size: 12px; line-height: 1.5; margin: 8px 0; overflow-wrap: anywhere; }
+.mcp-client-settings .error { color: #dc8585; overflow-wrap: anywhere; }
+.mcp-client-row { border-bottom: 1px solid rgba(128,128,128,.16); padding: 12px 0; font-size: 12px; }
+.mcp-client-row-head { display: flex; align-items: center; gap: 6px; }
+.mcp-client-row-head strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.mcp-client-row small { display: block; opacity: .65; margin: 6px 0; }
+.mcp-client-row summary { cursor: pointer; opacity: .8; }
+.mcp-client-row details { max-height: 240px; overflow: auto; scrollbar-width: thin; scrollbar-color: #666 transparent; }
+.mcp-client-tool { padding: 8px 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.mcp-client-tool span { opacity: .65; }
+.mcp-client-form { display: grid; gap: 12px; padding: 12px 0; }
+.mcp-client-form label { display: grid; gap: 6px; font-size: 12px; }
+.mcp-client-form input, .mcp-client-form textarea, .mcp-client-form select { min-width: 0; width: 100%; box-sizing: border-box; }
+.mcp-client-form textarea { resize: vertical; font-family: monospace; scrollbar-width: thin; }
+.mcp-client-form .mcp-enabled { display: flex; align-items: center; }
+.mcp-client-form input[type="checkbox"] { width: auto; }
+.mcp-client-actions { display: flex; gap: 8px; }
+.mcp-client-actions button { padding: 8px 12px; font-size: 12px; }
+.mcp-secret:not(:focus) { -webkit-text-security: disc; }

@@ -119,7 +119,7 @@ export function runtimePriceText(price) {
 export function runtimeTaskTitle(run) {
     const plan = runtimeDisplayPlan(run);
     const kinds = new Set((plan?.steps || []).map(step => step.kind));
-    let title = { memory: '保存项目记忆', board: '修改画板', generation: '生成素材' }[plan?.kind];
+    let title = { memory: '保存项目记忆', board: '修改画板', generation: '生成素材', external: '操作外部软件' }[plan?.kind];
     if (plan?.kind === 'generation') {
         if (kinds.has('image') && kinds.has('video')) title = '生成图片与视频';
         else if (kinds.has('image')) title = '生成图片';
@@ -392,7 +392,7 @@ export function createRuntimeCard({ onAction, onLocate }) {
             estimate.textContent = runtimeEstimateText(plan);
             estimate.hidden = !estimate.textContent;
             proposed.hidden = !plan?.proposed;
-            proposedLabel.textContent = plan?.kind === 'memory' ? '记忆约束' : '画板变更';
+            proposedLabel.textContent = plan?.kind === 'memory' ? '记忆约束' : plan?.kind === 'external' ? '外部工具参数' : '画板变更';
             const proposedJson = plan?.proposed ? JSON.stringify(plan.proposed, null, 2) : '';
             if (proposedText.textContent !== proposedJson) {
                 proposedText.textContent = proposedJson;

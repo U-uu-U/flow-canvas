@@ -440,7 +440,7 @@ async function initServices() {
     });
     const { createAgentServices } = require('./agent-services.cjs');
     agentServices = await createAgentServices({ store, bridge: flowCanvasBridge, apiConfigStore,
-        dataDir: path.join(app.getPath('userData'), 'data'), getSaveDir, getMainWindow: () => mainWindow, BrowserWindow, net });
+        dataDir: path.join(app.getPath('userData'), 'data'), getSaveDir, getMainWindow: () => mainWindow, BrowserWindow, net, safeStorage });
     flowCanvasBridge.start(mcpConfig);
 
     const activeGroup = (boardData.folderGroups || []).find(group => group.id === boardData.activeGroupId);
@@ -1260,6 +1260,14 @@ ipcMain.handle('store:save', async (_, data) => {
 ipcMain.on('store:saveSync', (event, data) => {
     event.returnValue = agentServices ? agentServices.saveRenderer(data) : store.save(data?.data || data);
 });
+
+for (const action of ['list', 'save', 'remove', 'test']) {
+    ipcMain.handle(`mcp-client:${action}`, (event, request) => {
+        if (!isCurrentMainWindowSender(event)) throw new Error('MCP 请求来源无效');
+        if (!agentServices) throw new Error('Agent 服务尚未初始化');
+        return agentServices.mcpClient[action](request || {});
+    });
+}
 
 for (const action of ['start', 'get', 'list', 'confirm', 'revise', 'cancel', 'resume', 'retry']) {
     ipcMain.handle(`agent:${action}`, (event, request) => {
@@ -3061,9 +3069,17 @@ app.whenReady().then(async () => {
     createWindow();
 });
 
-app.on('before-quit', () => {
+let agentShutdownPromise = null;
+let agentShutdownComplete = false;
+app.on('before-quit', event => {
     isQuitting = true;
-    agentServices?.close();
+    if (agentServices && !agentShutdownComplete) {
+        event.preventDefault();
+        agentShutdownPromise ||= agentServices.close().catch(() => {}).finally(() => {
+            agentShutdownComplete = true;
+            app.quit();
+        });
+    }
 });
 
 app.on('window-all-closed', () => {

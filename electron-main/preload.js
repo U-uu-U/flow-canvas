@@ -35,6 +35,13 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         saveSync: (data) => savedStore(ipcRenderer.sendSync('store:saveSync', storeEnvelope(data))),
     },
 
+    mcpClient: {
+        list: () => ipcRenderer.invoke('mcp-client:list'),
+        save: config => ipcRenderer.invoke('mcp-client:save', config),
+        remove: request => ipcRenderer.invoke('mcp-client:remove', request),
+        test: request => ipcRenderer.invoke('mcp-client:test', request),
+    },
+
     agent: {
         start: request => ipcRenderer.invoke('agent:start', request),
         get: request => ipcRenderer.invoke('agent:get', request),

@@ -1,4 +1,5 @@
 import { CanvasManager } from './canvas.js';
+import './mcp-client-settings.js';
 import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
