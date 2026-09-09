@@ -407,7 +407,7 @@ describe('AgentMedia isolated previews', () => {
         const h = await mediaSetup(t, 'source.mp4');
         const controller = new AbortController();
         const result = await h.media.read('original', { nodeId: 'source', time: 3 }, controller.signal);
-        assert.equal(h.frameCalls[0][0], h.filePath);
+        assert.equal(h.frameCalls[0][0], await fs.realpath(h.filePath));
         assert.equal(h.frameCalls[0][1], 3);
         assert.equal(h.frameCalls[0][2], controller.signal);
         assert.deepEqual(result.frames, [{ time: 1 }, { time: 7 }]);
