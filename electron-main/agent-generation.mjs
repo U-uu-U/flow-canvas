@@ -118,7 +118,7 @@ export class AgentGeneration {
             for (const [index, prompt] of prompts.entries()) steps.push({ id: `step-${crypto.randomUUID()}`, nodeId: id,
                 title: `${node.title || node.nodeType} ${index + 1}/${prompts.length}`, model: provider.model, kind: node.nodeType,
                 count: 1, prompt, originalPrompt: config.prompt || '', config, price, references,
-                providerRef: { id: provider.id, model: provider.model }, nodeFingerprints,
+                providerRef: { id: provider.id, model: provider.model, endpoint: provider.endpoint, type: provider.type }, nodeFingerprints,
                 width: node.width || 320, height: node.height || 320, x: node.x || 0, y: node.y || 0 });
         }
         if (!steps.length || steps.length > 20) throw error('BATCH_LIMIT', '每批次需要 1 到 20 次媒体生成');
@@ -142,6 +142,8 @@ export class AgentGeneration {
         const project = this.board.readProject(run.projectId);
         this._validate(step, project);
         const provider = this.resolveProvider(step.providerRef, step.kind);
+        if ((step.providerRef.endpoint && provider.endpoint !== step.providerRef.endpoint)
+            || (step.providerRef.type && provider.type !== step.providerRef.type)) throw error('PROVIDER_CHANGED', 'API 路线已变更，请重新确认计划');
         const references = step.references.map(ref => {
             const source = project.items.find(n => n.id === ref.nodeId);
             const filePath = ref.filePath || this._pathFor(source);
