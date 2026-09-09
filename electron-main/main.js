@@ -3083,9 +3083,6 @@ app.on('before-quit', event => {
     }
 });
 
-app.on('window-all-closed', () => {
-    if (watcher) watcher.closeAll();
-    if (flowCanvasBridge) flowCanvasBridge.stop();
 ipcMain.handle('mcp:generation:recover', async (event, body) => {
     if (event.sender !== mainWindow?.webContents) return { success: false, error: 'Invalid sender' };
     try {
@@ -3102,6 +3099,9 @@ ipcMain.handle('mcp:generation:recovery-list', event => {
     return flowCanvasBridge?.recoveryStore.list() || [];
 });
 
+app.on('window-all-closed', () => {
+    if (watcher) watcher.closeAll();
+    if (flowCanvasBridge) flowCanvasBridge.stop();
     if (process.platform !== 'darwin') app.quit();
 });
 

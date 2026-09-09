@@ -2758,6 +2758,22 @@ export class AgentSidebar {
             this._renderGenerationTasks();
         });
         this.taskHistoryList?.addEventListener('click', (event) => {
+            const stopRecovery = event.target.closest('[data-stop-recovery]');
+            if (stopRecovery) {
+                void this._cancelGenerationTask(stopRecovery.dataset.stopRecovery);
+                return;
+            }
+            const recoverButton = event.target.closest('[data-recover-task]');
+            if (recoverButton) {
+                void this._recoverGenerationTask(recoverButton.dataset.recoverTask, recoverButton.dataset.editTaskId === 'true');
+                return;
+            }
+            const copyIdButton = event.target.closest('[data-copy-remote-task]');
+            if (copyIdButton) {
+                const task = this.generationTasks.find(item => item.id === copyIdButton.dataset.copyRemoteTask);
+                void window.flowCanvas?.clipboard?.writeText?.(task?.taskId || '');
+                return;
+            }
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
             if (copyPromptButton) {
                 this._copyGenerationTaskPrompt(copyPromptButton.dataset.copyTaskPrompt, copyPromptButton);
@@ -2768,6 +2784,7 @@ export class AgentSidebar {
         });
         document.addEventListener('pointerdown', event => {
             if (!this.taskHistoryOpen
+                || event.target.closest?.('.generation-recovery-dialog')
                 || this.taskHistoryDock?.contains(event.target)
                 || this.taskHistoryBtn?.contains(event.target)) return;
             this._setTaskHistoryOpen(false);
@@ -2840,22 +2857,6 @@ export class AgentSidebar {
         this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
         this._bindImagePromptResize();
         this._bindVideoPromptResize();
-            const stopRecovery = event.target.closest('[data-stop-recovery]');
-            if (stopRecovery) {
-                void this._cancelGenerationTask(stopRecovery.dataset.stopRecovery);
-                return;
-            }
-            const recoverButton = event.target.closest('[data-recover-task]');
-            if (recoverButton) {
-                void this._recoverGenerationTask(recoverButton.dataset.recoverTask, recoverButton.dataset.editTaskId === 'true');
-                return;
-            }
-            const copyIdButton = event.target.closest('[data-copy-remote-task]');
-            if (copyIdButton) {
-                const task = this.generationTasks.find(item => item.id === copyIdButton.dataset.copyRemoteTask);
-                void window.flowCanvas?.clipboard?.writeText?.(task?.taskId || '');
-                return;
-            }
         document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
         this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
         this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
@@ -2866,7 +2867,6 @@ export class AgentSidebar {
         // 右上角齿轮与圆球菜单都可进入设置模式。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
             this._closeAgentHeaderPopovers();
-                || event.target.closest?.('.generation-recovery-dialog')
             this.setMode('settings');
         });
 
@@ -3891,10 +3891,12 @@ export class AgentSidebar {
         const task = this.generationTasks.find(item => item.id === clientTaskId)
             || this.generationTasks.find(item => item.taskId === remoteTaskId);
         if (!task) return;
+        if (this.recoveringGenerationTasks?.has(task.id) && !event.recovered) return;
         this._updateGenerationTask(task.id, {
             status: 'success',
             taskId: remoteTaskId || task.taskId || null,
             filePath: event.filePath || task.filePath || null,
+            filePaths: event.filePaths || task.filePaths || [],
             error: null
         });
     }
@@ -3938,12 +3940,10 @@ export class AgentSidebar {
         const stage = String(event.status || event.stage || '').toLowerCase();
         const filePath = String(event.filePath || '').trim() || null;
         const nextStatus = filePath || ['imported', 'downloaded'].includes(stage)
-        if (this.recoveringGenerationTasks?.has(task.id) && !event.recovered) return;
             ? 'success'
             : ['failed', 'error'].includes(stage)
                 ? 'failed'
                 : 'running';
-            filePaths: event.filePaths || task.filePaths || [],
         const syncError = nextStatus === 'failed'
             ? (event.error || '云端任务失败')
             : null;
@@ -4067,6 +4067,7 @@ export class AgentSidebar {
     }
 
     _recordGenerationError(taskId, error) {
+        if (this.recoveringGenerationTasks?.has(taskId)) return this.generationTasks.find(task => task.id === taskId);
         const current = this.generationTasks.find(task => task.id === taskId);
         if (current?.status === 'canceled') return current;
         const message = error?.message || String(error || '请求失败');
@@ -4114,7 +4115,6 @@ export class AgentSidebar {
 
     async cancelGenerationTasksForNode(nodeId) {
         const taskIds = this.generationTasks
-        if (this.recoveringGenerationTasks?.has(taskId)) return this.generationTasks.find(task => task.id === taskId);
             .filter(task => task.status === 'running' && task.params?.nodeId === nodeId)
             .map(task => task.id);
         await Promise.all(taskIds.map(taskId => this._cancelGenerationTask(taskId)));
@@ -4315,53 +4315,6 @@ export class AgentSidebar {
         }, 1400);
     }
 
-    async _retryGenerationTask(taskId, options = {}) {
-        const task = this.generationTasks.find(item => item.id === taskId);
-        if (!task || !['failed', 'disconnected'].includes(task.status)) return;
-        const originalNodeId = String(task.params?.nodeId || '').trim();
-        const restoreOnOriginalNode = options.restoreOnOriginalNode === true
-            && Boolean(originalNodeId)
-            && typeof this.options.completeGenerationTaskOnNode === 'function';
-        const shouldResumeVideo = task.kind === 'video'
-            && Boolean(task.taskId)
-            && (task.status === 'disconnected' || task.params?.syncStage === 'download')
-            && Boolean(window.flowCanvas?.mcp?.resumeVideo);
-        const sourceProviderId = String(task.providerId || '').split('::model:')[0];
-        const currentProvider = this.providers.find(item => item.id === sourceProviderId);
-        const provider = currentProvider
-            ? {
-                ...currentProvider,
-                id: task.providerId,
-                sourceProviderId,
-                model: task.model || currentProvider.model
-            }
-            : null;
-        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
-            this._updateGenerationTask(task.id, {
-                status: 'failed',
-                error: '原任务使用的 API 配置已移除或不完整，请先在设置中恢复该 API。'
-            });
-            return;
-        }
-
-        let retryImageReferences = task.kind === 'image'
-            ? task.sourcePaths.map(filePath => ({ filePath }))
-            : [];
-        if (retryImageReferences.length > 0) {
-            try {
-                const prepared = await this._prepareImageReferencesForGeneration(retryImageReferences);
-                if (!prepared) return;
-                retryImageReferences = prepared.references;
-            } catch (error) {
-                this._recordGenerationError(task.id, error);
-                return;
-            }
-        }
-        this._updateGenerationTask(task.id, {
-            status: 'running',
-            error: null,
-            attempts: (task.attempts || 1) + 1,
-            params: {
     async _syncRecoverableGenerations() {
         if (!window.flowCanvas?.mcp?.listRecoverableGenerations || this.syncingRecoverableGenerations) return;
         this.syncingRecoverableGenerations = true;
@@ -4433,9 +4386,56 @@ export class AgentSidebar {
         }
     }
 
+    async _retryGenerationTask(taskId, options = {}) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (task?.taskId || task?.filePath) return this._recoverGenerationTask(taskId);
+        if (!task || !['failed', 'disconnected'].includes(task.status)) return;
+        const originalNodeId = String(task.params?.nodeId || '').trim();
+        const restoreOnOriginalNode = options.restoreOnOriginalNode === true
+            && Boolean(originalNodeId)
+            && typeof this.options.completeGenerationTaskOnNode === 'function';
+        const shouldResumeVideo = task.kind === 'video'
+            && Boolean(task.taskId)
+            && (task.status === 'disconnected' || task.params?.syncStage === 'download')
+            && Boolean(window.flowCanvas?.mcp?.resumeVideo);
+        const sourceProviderId = String(task.providerId || '').split('::model:')[0];
+        const currentProvider = this.providers.find(item => item.id === sourceProviderId);
+        const provider = currentProvider
+            ? {
+                ...currentProvider,
+                id: task.providerId,
+                sourceProviderId,
+                model: task.model || currentProvider.model
+            }
+            : null;
+        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
+            this._updateGenerationTask(task.id, {
+                status: 'failed',
+                error: '原任务使用的 API 配置已移除或不完整，请先在设置中恢复该 API。'
+            });
+            return;
+        }
+
+        let retryImageReferences = task.kind === 'image'
+            ? task.sourcePaths.map(filePath => ({ filePath }))
+            : [];
+        if (retryImageReferences.length > 0) {
+            try {
+                const prepared = await this._prepareImageReferencesForGeneration(retryImageReferences);
+                if (!prepared) return;
+                retryImageReferences = prepared.references;
+            } catch (error) {
+                this._recordGenerationError(task.id, error);
+                return;
+            }
+        }
+        this._updateGenerationTask(task.id, {
+            status: 'running',
+            error: null,
+            attempts: (task.attempts || 1) + 1,
+            params: {
                 syncStage: shouldResumeVideo ? 'recovering' : 'submit'
             },
-        if (task?.taskId || task?.filePath) return this._recoverGenerationTask(taskId);
             ...(task.kind === 'image' ? {
                 sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
             } : {})
@@ -4945,6 +4945,7 @@ export class AgentSidebar {
                 ...(task.params || {}),
                 syncStage: stage,
                 progress,
+                recoveryError: event.lastError || null,
                 remoteStatus: event.remoteStatus || null
             }
         });
@@ -4992,7 +4993,6 @@ export class AgentSidebar {
         const size = this.imageSizeSelect?.value || undefined;
         const quality = this.imageQualitySelect?.value || 'high';
         const gptImage2 = isGptImage2Model(provider.model);
-                recoveryError: event.lastError || null,
         const responseFormat = gptImage2 ? (this.imageResponseFormatSelect?.value || 'url') : 'url';
         const historyDisabled = gptImage2 ? this.imageHistoryDisabled?.checked !== false : true;
         const stream = gptImage2 ? Boolean(this.imageStream?.checked) : false;
