@@ -90,6 +90,10 @@ export class AgentGeneration {
             if (!prompts.length) throw error('PROMPT_REQUIRED', '生成节点缺少提示词');
             if (!Number.isInteger(count) || count < 1 || count > 8 || prompts.length > 8) throw error('COUNT_LIMIT', '单节点每批次最多 8 次生成');
             const provider = this.resolveProvider(config, node.nodeType);
+            if (node.nodeType === 'image' && config.quality && !['auto', 'low', 'medium', 'high'].includes(config.quality))
+                throw error('INVALID_QUALITY', '图片质量参数无效');
+            if (Number(config.midjourneyRepeat || 1) > 1)
+                throw error('COUNT_LIMIT', 'Agent 批次请使用生成数量，不使用额外的 Midjourney repeat');
             const profile = node.nodeType === 'video' ? getVideoModelProfile(provider) : null;
             if (profile && !profile.durations?.length) throw error('MODEL_CAPABILITY_UNKNOWN', '尚未收录该视频模型的参数能力，请先配置支持的模型');
             if (profile) {
@@ -185,7 +189,8 @@ export class AgentGeneration {
                     from: { nodeId: sourceId, port: getPorts(source).outputs[0]?.name || 'source' }, to: { nodeId: outputId, port: 'source' } });
             });
         });
-        const body = { provider: step.kind === 'video' ? 'openai-video' : 'openai', providerConfig: provider,
+        const body = { ...config, count: 1, n: 1,
+            provider: step.kind === 'video' ? 'openai-video' : 'openai', providerConfig: provider,
             noSubmissionRetry: true, requestId: step.id,
             clientTaskId: step.id, prompt: step.prompt, targetDir, addToCanvas: false,
             sourceReferences: references.filter(r => r.kind === 'image').map(r => ({ filePath: r.filePath })),
@@ -194,6 +199,17 @@ export class AgentGeneration {
             size: config.size || `${dimensions.width}x${dimensions.height}`, quality: config.quality || 'high',
             responseFormat: config.responseFormat || 'url', ratio, resolution: config.resolution, duration: config.duration,
             generateAudio: !!config.generateAudio, cameraFixed: !!config.cameraFixed, watermark: !!config.watermark, webSearch: !!config.webSearch };
+        if (/^(mj[_-]|midjourney)/i.test(provider.model)) body.midjourney = {
+            ratio: config.ratio, version: config.midjourneyVersion, raw: config.midjourneyRaw === true,
+            stylize: config.midjourneyStylize, chaos: config.midjourneyChaos, weird: config.midjourneyWeird,
+            quality: config.midjourneyQuality, imageWeight: config.midjourneyImageWeight,
+            styleReference: config.midjourneyStyleReference, styleWeight: config.midjourneyStyleWeight,
+            styleVersion: config.midjourneyStyleVersion, omniReference: config.midjourneyOmniReference,
+            omniWeight: config.midjourneyOmniWeight, profile: config.midjourneyProfile, seed: config.midjourneySeed,
+            tile: config.midjourneyTile === true, draft: config.midjourneyDraft === true, repeat: 1,
+            speed: config.midjourneySpeed, visibility: config.midjourneyVisibility,
+            definition: config.resolutionTier === '2K' ? 'hd' : 'sd', negativePrompt: config.negativePrompt
+        };
         if (step.kind === 'video' && adapters.isSeedance25Model(provider.model)) adapters.buildSeedance25RequestBody({ model: provider.model, prompt: step.prompt,
             duration: config.duration, resolution: config.resolution, aspectRatio: ratio, referenceImages: body.sourceReferences.map(r => r.filePath) });
         if (signal?.aborted) throw error('CANCELED', '已停止');
