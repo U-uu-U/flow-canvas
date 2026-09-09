@@ -339,6 +339,10 @@ class AgentRuntime {
         return true;
     }
     async executeTool(run, name, input = {}) {
+        if (['flow_canvas.board.transaction.preview', 'flow_canvas.board.transaction.apply'].includes(name) && !run.external) {
+            const key = String(input.idempotencyKey || input.id || '');
+            input = { ...input, idempotencyKey: key.startsWith(`${run.id}:`) ? key : `${run.id}:${key}` };
+        }
         const creativeMethods = { 'flow_canvas.document.list': 'documentList', 'flow_canvas.document.get': 'documentGet',
             'flow_canvas.document.create': 'documentCreate', 'flow_canvas.document.update': 'documentUpdate',
             'flow_canvas.skill.list': 'workflowList', 'flow_canvas.skill.save': 'workflowSave', 'flow_canvas.skill.instantiate': 'workflowInstantiate' };
