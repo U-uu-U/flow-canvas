@@ -50,11 +50,22 @@ async function poll(read, test, timeout = 30000) {
         const outputs = (body.messages || []).filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
         let message = { role: 'assistant', content: '审阅通过：已检查画面，声音与完整运动未验证。' };
         if (body.tools?.length) {
-            if (!outputs.length) message = { role: 'assistant', content: '先读取画布和模型。', tool_calls: [
+            const savingRun = (body.messages || []).find(m => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('SAVE:'))?.content.slice(5);
+            if (savingRun) {
+                if (!outputs.length) message = { role: 'assistant', content: '', tool_calls: [tool('save-workflow', 'flow_canvas.skill.save', { runId: savingRun, name: '验收流程' })] };
+                else if (!outputs.some(output => output.nodeIds)) message = { role: 'assistant', content: '', tool_calls: [tool('instantiate', 'flow_canvas.skill.instantiate', {
+                    skillId: outputs.find(output => output.workflow).workflow.id, referenceNodeIds: ['reference']
+                })] };
+                else message = { role: 'assistant', content: '流程已保存并用新引用实例化，尚未提交新的生成。' };
+            } else if (!outputs.length) message = { role: 'assistant', content: '先读取画布和模型。', tool_calls: [
                 tool('snapshot', 'flow_canvas.board.get_snapshot', { scope: 'project' }),
                 tool('models', 'flow_canvas.model.list', {}),
                 tool('inspect', 'flow_canvas.asset.read', { nodeId: 'reference' }),
                 ...(videoTest ? [tool('video', 'flow_canvas.asset.read', { nodeId: 'clip', time: 0.5 })] : [])
+            ] };
+            else if (!outputs.some(output => output.document)) message = { role: 'assistant', content: '', tool_calls: [
+                tool('document', 'flow_canvas.document.create', { title: '验收分镜表', templateId: 'shots',
+                    rows: [{ id: 'shot-smoke', cells: { shot: '1', action: '固定镜头', duration: '5秒' }, references: [{ itemId: 'reference' }] }] })
             ] };
             else if (!outputs.some(output => output.completed)) message = { role: 'assistant', content: '已准备一张图片的生成计划。',
                 tool_calls: [tool('generate', 'flow_canvas.graph.run', { nodeIds: ['generate'], summary: '保留参考图主体，生成一张图片' })] };
@@ -120,8 +131,22 @@ async function poll(read, test, timeout = 30000) {
         }
         if (!live) assert.equal(submissions, 1);
         assert.equal(result.steps.filter(step => step.status === 'completed').length, 1);
+        if (!live) {
+            const workflowRun = await page.evaluate(id => window.flowCanvas.agent.start({ projectId: 'smoke', conversationId: 'workflow-conversation',
+                messages: [{ role: 'user', content: `SAVE:${id}` }] }), run.id);
+            const workflow = await poll(() => page.evaluate(id => window.flowCanvas.agent.get({ runId: id }), workflowRun.id),
+                state => ['completed', 'failed'].includes(state.status));
+            assert.equal(workflow.status, 'completed', workflow.error);
+            assert.ok(workflow.events.some(event => event.type === 'tool_result' && event.data?.result?.nodeIds?.length));
+            assert.equal(submissions, 1);
+        }
         const board = JSON.parse(await fs.readFile(path.join(profile, 'data', 'board.json'), 'utf8'));
         assert.equal(board.folderGroups.find(g => g.id === 'other').savedItems.length, 0);
+        if (!live) {
+            const project = board.folderGroups.find(g => g.id === 'smoke');
+            assert.equal(project.plans[0].rows[0].id, 'shot-smoke');
+            assert.equal(project.agentWorkflows.length, 1);
+        }
         assert.ok(board.folderGroups.find(g => g.id === 'smoke').savedItems.some(item => item.metadata?.agentRunId === run.id && item.filePath));
         if (!live) assert.ok(requests.some(request => (request.messages || []).some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))));
         const directory = path.resolve('output', 'agent-smoke');

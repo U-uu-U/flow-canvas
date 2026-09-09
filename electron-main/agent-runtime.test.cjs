@@ -41,6 +41,20 @@ test('retry refuses ambiguous submissions and wrong projects', async t => {
     assert.equal(h.stepCalls.length, 0);
 });
 
+test('external graph proposals confirm and run without invoking an internal language model', async t => {
+    const h = harness(t, { script: [] });
+    const proposal = await h.runtime.propose({ projectId: 'a', toolName: 'flow_canvas.graph.run',
+        input: { nodeIds: ['image-1'], summary: 'External batch' } });
+    assert.equal(proposal.external, true);
+    assert.equal(proposal.status, 'awaiting_confirmation');
+    assert.equal(h.stepCalls.length, 0);
+    h.runtime.confirm({ runId: proposal.id, planVersion: proposal.plan.version });
+    const result = await h.idle(proposal.id);
+    assert.equal(result.status, 'completed');
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.stepCalls.length, 1);
+});
+
 async function until(predicate, label = 'condition') {
     const deadline = Date.now() + 2000;
     while (!predicate()) {

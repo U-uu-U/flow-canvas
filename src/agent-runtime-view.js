@@ -10,7 +10,7 @@ export const runtimeScopeKey = (projectId, conversationId) => JSON.stringify([pr
 
 export function runtimeActions(run) {
     if (run.status === 'awaiting_confirmation' && run.plan?.version != null) {
-        return ['confirm', 'revise', 'cancel'];
+        return run.external ? ['confirm', 'cancel'] : ['confirm', 'revise', 'cancel'];
     }
     if (['partial_failed', 'failed'].includes(run.status)) return ['resume', 'retry'];
     if (run.status === 'interrupted') return ['resume'];
@@ -213,8 +213,7 @@ export class AgentRuntimeClient {
             if (!Array.isArray(snapshots)) throw new Error('运行列表格式无效');
             this.onSync(scope);
             for (const snapshot of snapshots) {
-                if (runtimeScopeKey(snapshot.projectId, snapshot.conversationId)
-                    === runtimeScopeKey(scope.projectId, scope.conversationId)) {
+                if (snapshot.projectId === scope.projectId && (!scope.conversationId || snapshot.conversationId === scope.conversationId)) {
                     this.accept(snapshot);
                     if (!this.cursors.has(snapshot.id) || this.cursors.get(snapshot.id) < snapshot.lastSeq) {
                         void this.refresh(snapshot.id);

@@ -38,6 +38,14 @@ Prices are per-route sale metadata with currency, unit, source and timestamp. HM
 
 Set `FLOW_CANVAS_SMOKE_LIVE=1` only for an explicitly authorized single-image live test using the existing encrypted desktop API configuration. The live test copies encrypted local configuration into its isolated profile and never edits the primary profile. The test allows exactly one planned image request; further plans are not confirmed.
 
-## Follow-Up
+## Documents And Workflow Reuse
 
-Five versioned workflow recipes are available to the runtime: asset organization, multiple references, series images, image-to-video and review. Existing custom Skills remain instruction-based. User-authored executable Skill packaging and editable script/character/shot-table entities remain a separate fourth-stage iteration after the runtime has passed acceptance. Native audio understanding, web research, editing timelines and collaboration are outside this release.
+Five versioned workflow recipes are available to the runtime: asset organization, multiple references, series images, image-to-video and review. Existing custom Skills remain instruction-based.
+
+`flow_canvas.document.list/get/create/update` creates editable general tables, scripts, character sheets and shot lists using the existing canvas table UI. Updates merge cells by stable row ID and require the last read project revision. References bind to existing project nodes instead of arbitrary paths.
+
+`flow_canvas.skill.list/save/instantiate` turns a completed generation run into a versioned graph recipe with ordered input slots. Saved recipes omit credentials, local source paths and provider IDs. Instantiation builds actual connected nodes through a single undoable transaction. `graph.run` still requires approval before paid calls. Arbitrary external scripts are not executed.
+
+External `graph.run` proposals do not require an internal language API. They appear under the desktop external-assistant conversation for confirmation. The external harness owns result reasoning; direct `asset.read` returns visual content without charging an extra internal analysis call.
+
+Native audio understanding, web research, editing timelines and collaboration are outside this release. The fixed acceptance cases and mocked suites do not establish a 90% real-model task success rate. A real image run completed; the single sd2.5 video trial received task ID `task_5262`, but subsequent upstream queries returned 502, so no successful live-video result is claimed.

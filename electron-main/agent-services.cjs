@@ -67,6 +67,8 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         }
     });
     const originalSubmitted = bridge.notifyTaskSubmitted;
+    const { AgentCreativeService } = await import('./agent-creative-service.mjs');
+    runtime.creative = new AgentCreativeService({ board, getRun: id => runtime.runs.get(id) });
     runtime.getSecrets = () => generation.providers().map(provider => provider.apiKey).filter(Boolean);
     runtime.analyzeMedia = async (inspected, run, signal) => {
         const provider = runtime.providerSessions.get(run.id) || generation.resolveProvider(run.providerRef, 'text');
@@ -109,11 +111,9 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
             if (!['start', 'get', 'list', 'cancel', 'resume', 'revise', 'retry'].includes(action)) throw new Error('Unknown runtime action');
             return runtime[action]({ ...input, projectId, conversationId: input.conversationId || 'external-harness' });
         }
-        if (name === 'flow_canvas.graph.run') return runtime.start({ projectId, conversationId: input.conversationId || 'external-harness',
-            messages: [{ role: 'user', content: `请运行这些节点并先提交确认计划：${JSON.stringify(input)}` }] });
-        if (name === 'flow_canvas.memory.propose') return runtime.start({ projectId, conversationId: 'external-harness',
-            messages: [{ role: 'user', content: `请提出项目记忆更新并等待确认：${JSON.stringify(input)}` }] });
-        const context = { id: 'external-read', projectId, attachments: [] };
+        if (['flow_canvas.graph.run', 'flow_canvas.memory.propose'].includes(name)) return runtime.propose({ projectId,
+            conversationId: 'external-harness', toolName: name, input });
+        const context = { id: 'external-read', projectId, attachments: [], external: true };
         const result = await runtime.executeTool(context, name, input);
         if (name === 'flow_canvas.asset.read') {
             const images = runtime.visuals.get(context.id) || [];

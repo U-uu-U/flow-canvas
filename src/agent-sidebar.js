@@ -1532,8 +1532,7 @@ export class AgentSidebar {
         this._renderAgentRuntimeCards();
         if (this.runtimeClient && !this.runtimeClient.closed) {
             void this.runtimeClient.watch({
-                projectId: this.activeRuntimeProjectId,
-                conversationId: this.activeConversationId
+                projectId: this.activeRuntimeProjectId
             });
         }
     }
@@ -1551,7 +1550,13 @@ export class AgentSidebar {
         if (!run) return;
         const key = this._projectCacheKey(run.projectId);
         const store = this._loadAgentConversationStore();
-        const project = store[key];
+        let project = store[key];
+        if (run.external && !project?.conversations?.some(entry => entry.id === run.conversationId)) {
+            project ||= { conversations: [], activeConversationId: run.conversationId };
+            project.conversations.push(createAgentConversation({ id: run.conversationId, title: '外部助手任务', customTitle: true }));
+            this._saveAgentConversationProject(key, project, store);
+            if (key === this.activeProjectCacheKey) this._renderAgentConversationHeader();
+        }
         const index = project?.conversations?.findIndex(entry => entry.id === run.conversationId) ?? -1;
         let changed = false;
         if (index >= 0) {
@@ -1578,11 +1583,22 @@ export class AgentSidebar {
             if (changed) this._renderAgentMessages();
             else this._renderAgentRuntimeCards();
             this._syncAgentRuntimeSendState();
-        }
+        } else if (key === this.activeProjectCacheKey) this._renderAgentRuntimeCards();
     }
 
     _renderAgentRuntimeCards() {
         if (!this.messagesEl || !this.runtimeCards) return;
+        this.messagesEl.querySelector('.agent-runtime-external-notice')?.remove();
+        const externalPending = [...(this.runtimeClient?.runs.values() || [])].find(run => run.external
+            && this._projectCacheKey(run.projectId) === this.activeProjectCacheKey
+            && run.conversationId !== this.activeConversationId && run.status === 'awaiting_confirmation');
+        if (externalPending) {
+            const button = document.createElement('button');
+            button.type = 'button'; button.className = 'agent-runtime-external-notice agent-apply-plan-btn';
+            button.textContent = '查看外部助手的待确认任务';
+            button.addEventListener('click', () => this._switchAgentConversation(externalPending.conversationId));
+            this.messagesEl.prepend(button);
+        }
         const conversation = this._loadAgentConversationStore()[this.activeProjectCacheKey]?.conversations
             ?.find(entry => entry.id === this.activeConversationId);
         for (const run of this.runtimeClient?.runs.values() || []) {
