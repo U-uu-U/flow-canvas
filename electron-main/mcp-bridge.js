@@ -38,6 +38,7 @@ const {
 } = require('./openai-image-request');
 const { ReferenceCache } = require('./reference-cache');
 const { GenerationRecoveryStore } = require('./generation-recovery-store.cjs');
+const { imageRequestFailure } = require('./image-request-diagnostics.cjs');
 const {
     buildMiniMaxH3RequestBody,
     buildSeedance25RequestBody,
@@ -830,6 +831,10 @@ class FlowCanvasBridge {
             result = await tryGenerateWithOpenAI(prompt, targetDir, {
                 ...generationOptions,
                 signal,
+                onRequestDiagnostic: diagnostic => this.recoveryStore.update(body.clientTaskId, {
+                    requestDiagnostic: diagnostic,
+                    ...(diagnostic.state ? { state: diagnostic.state } : {})
+                }),
                 onTaskSubmitted: ({ taskId, model, status, location }) => this._rememberSubmitted(body, {
                     clientTaskId: body.clientTaskId || null,
                     remoteTaskId: taskId,
@@ -1989,6 +1994,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
 
         const requestId = options.requestId || crypto.randomUUID?.() || crypto.randomBytes(16).toString('hex');
         let res;
+        let responseText = '';
         let responseErrorText = '';
         let requestAttempt = 0;
         let compatibilityFallbackUsed = false;
@@ -1997,6 +2003,13 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             throwIfGenerationCanceled(options.signal);
             const requestAbort = createLinkedAbortController(options.signal, 300000);
             const activeRequestId = compatibilityFallbackUsed ? `${requestId}-mj-compat` : requestId;
+            const startedAt = Date.now();
+            let phase = '等待响应';
+            const diagnostic = {
+                requestId: activeRequestId, startedAt,
+                payloadBytes: Buffer.byteLength(requestPayload), imageCount: sourceImages.length
+            };
+            options.onRequestDiagnostic?.({ ...diagnostic, phase });
             try {
                 res = await net.fetch(endpoint, {
                     method: 'POST',
@@ -2013,11 +2026,24 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     signal: requestAbort.controller.signal,
                     redirect: 'follow'
                 });
+                phase = '读取结果';
+                const location = res.headers.get('location');
+                const earlyTaskId = location && getImageTaskId({}, res.status, location);
+                if (res.ok && earlyTaskId) options.onTaskSubmitted?.({ taskId: earlyTaskId, model, status: 'queued', location });
+                responseText = await res.text();
             } catch (error) {
                 throwIfGenerationCanceled(options.signal);
                 const attempts = requestAttempt + 1;
+                const timedOut = requestAbort.controller.signal.aborted;
+                // A dropped POST response does not prove the server rejected the paid task.
+                if (phase === '读取结果' || timedOut || /ERR_EMPTY_RESPONSE/i.test(error?.message || '')) {
+                    options.onRequestDiagnostic?.({ ...diagnostic, phase, state: 'submission_unknown' });
+                    throw remoteConnectionError('提交图片生成请求', endpoint,
+                        imageRequestFailure(error, { ...diagnostic, phase, timedOut }), attempts);
+                }
                 if (!isRetryableImageNetworkError(error) || requestAttempt >= retryDelays.length) {
-                    throw remoteConnectionError('提交图片生成请求', endpoint, error, attempts);
+                    throw remoteConnectionError('提交图片生成请求', endpoint,
+                        imageRequestFailure(error, { ...diagnostic, phase, timedOut }), attempts);
                 }
                 const retryDelay = retryDelays[requestAttempt];
                 console.warn(`[FlowCanvasBridge] Image API connection failed; retrying in ${retryDelay}ms (${attempts}/${retryDelays.length}): ${error.message}`);
@@ -2028,7 +2054,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             }
             if (res.ok) break;
 
-            responseErrorText = await res.text();
+            responseErrorText = responseText;
             if (
                 midjourneyModel
                 && options.noSubmissionRetry !== true
@@ -2050,7 +2076,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             await sleep(retryDelay, options.signal);
         }
         if (!res.ok) {
-            const text = responseErrorText || await res.text();
+            const text = responseErrorText || responseText;
             if (res.status === 413) {
                 return {
                     success: false,
@@ -2067,7 +2093,6 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                 })
             };
         }
-        const responseText = await res.text();
         const location = res.headers.get('location');
         const json = parseImageApiResponseText(responseText, res.headers.get('content-type'))
             || (location ? { status: 'queued' } : null);
