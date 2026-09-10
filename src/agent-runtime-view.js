@@ -6,6 +6,13 @@ const STATUS_LABELS = {
 };
 
 export const isRuntimeTerminal = status => TERMINAL.has(status);
+export function formatAgentElapsed(milliseconds) {
+    if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds) || milliseconds < 0) return '';
+    const seconds = Math.floor(milliseconds / 1000);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor(seconds % 3600 / 60);
+    return `用时 ${hours ? `${hours}小时 ` : ''}${minutes ? `${minutes}分钟 ` : ''}${seconds % 60}秒`;
+}
 export const runtimeScopeKey = (projectId, conversationId) => JSON.stringify([projectId ?? null, conversationId]);
 
 export function runtimeActions(run) {
@@ -96,7 +103,9 @@ export function settleRuntimeConversation(conversation, run) {
     const content = String(run.outputText || '').trim();
     const index = messages.findIndex(message => message.role === 'assistant' && message.runtimeRunId === run.id);
     if (content) {
-        const message = { role: 'assistant', content, runtimeRunId: run.id };
+        const timing = Number.isFinite(run.createdAt) && Number.isFinite(run.updatedAt)
+            ? { createdAt: run.updatedAt, elapsedMs: Math.max(0, run.updatedAt - run.createdAt) } : {};
+        const message = { role: 'assistant', content, runtimeRunId: run.id, ...timing };
         if (index >= 0) messages[index] = { ...messages[index], ...message };
         else if (!receipt?.hasMessage) messages.push(message);
     }
@@ -292,6 +301,8 @@ function element(tag, className, text) {
 
 export function createRuntimeCard({ onAction, onLocate }) {
     const root = element('section', 'agent-runtime-card');
+    const elapsed = element('div', 'agent-msg-duration');
+    elapsed.title = '从发送到当前状态的总用时';
     const header = element('div', 'agent-runtime-header');
     const title = element('strong', '', '执行任务');
     const status = element('span', 'agent-runtime-status');
@@ -319,7 +330,7 @@ export function createRuntimeCard({ onAction, onLocate }) {
     const submit = element('button', '', '提交修改');
     submit.type = 'submit';
     feedback.append(input, submit);
-    root.append(header, summary, steps, estimate, proposed, progress, output, review, error, actions, feedback);
+    root.append(elapsed, header, summary, steps, estimate, proposed, progress, output, review, error, actions, feedback);
     let current;
     let localError = '';
     let renderedPlan = '';
@@ -343,6 +354,9 @@ export function createRuntimeCard({ onAction, onLocate }) {
         root,
         update(run, { busy = false, saved = false, confirmed = false } = {}) {
             current = run;
+            elapsed.textContent = Number.isFinite(run.createdAt) && Number.isFinite(run.updatedAt)
+                ? formatAgentElapsed(Math.max(0, run.updatedAt - run.createdAt)) : '';
+            elapsed.hidden = !elapsed.textContent || (saved && isRuntimeTerminal(run.status));
             const plan = runtimeDisplayPlan(run);
             root.dataset.runId = run.id;
             root.dataset.status = run.status;

@@ -66,6 +66,8 @@ jobs:
           FLOW_CANVAS_SMOKE_ASAR: ${{ github.workspace }}/release/mac-universal/Flow Canvas.app/Contents/Resources/app.asar
           FLOW_CANVAS_SMOKE_VIDEO: "1"
         run: node scripts/agent-smoke.cjs
+      - name: Verify released UI controls
+        run: node scripts/release-ui-smoke.cjs
       - uses: actions/upload-artifact@v4
         with:
           name: flow-canvas-macos-universal

@@ -37,7 +37,7 @@ import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
 import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
 import {
     AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
-    settleRuntimeConversation
+    settleRuntimeConversation, formatAgentElapsed
 } from './agent-runtime-view.js';
 import { createBoardToolRegistry } from './board-tool-registry.js';
 import {
@@ -252,7 +252,6 @@ export class AgentSidebar {
         this.textModelSelectEl = document.getElementById('agentTextModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
-        this.modePicker = document.getElementById('creationModePicker');
         this.modeTitle = document.getElementById('creationModeTitle');
         this.conversationMenuBtn = document.getElementById('agentConversationMenuBtn');
         this.conversationTitleBtn = document.getElementById('agentConversationTitleBtn');
@@ -384,14 +383,13 @@ export class AgentSidebar {
         this.imagePromptPresetDelete = document.getElementById('imagePromptPresetDelete');
         this.imagePromptPresetCount = document.getElementById('imagePromptPresetCount');
         this.imagePromptPresetStatus = document.getElementById('imagePromptPresetStatus');
-        this.currentMode = 'review';
+        this.currentMode = 'canvas';
         this.taskHistoryOpen = false;
         this.taskHistoryFilter = 'all';
         this.generationTasks = [];
         this.processedBrowserSyncEventIds = new Set();
         this.browserSyncPolling = false;
         this.activeVideoWorkspaceTaskId = null;
-        this.modePickerHideTimer = null;
         this.lastCanvasSelection = this.options.getSelectedCanvasEntries?.() || [];
 
         // Form inputs
@@ -418,6 +416,7 @@ export class AgentSidebar {
 
         // 绑定事件
         this._bindEvents();
+        this._bindAgentSidebarResize();
         this._syncHudState();
 
         // 渲染 UI
@@ -1046,7 +1045,7 @@ export class AgentSidebar {
             return;
         }
         this.messages.forEach(message => {
-            const element = this._appendAgentMessageElement(message.role, message.content);
+            const element = this._appendAgentMessageElement(message.role, message.content, message);
             if (message.runtimeRunId) element.dataset.runtimeMessageId = message.runtimeRunId;
             if (message.role === 'assistant' && !message.runtimeRunId) this._attachAgentPlanAction(element, message.content);
         });
@@ -1054,31 +1053,40 @@ export class AgentSidebar {
         this._scrollAgentMessages();
     }
 
-    _appendAgentMessageElement(role, content) {
+    _appendAgentMessageElement(role, content, metadata = {}) {
         if (!this.messagesEl) return null;
         this.messagesEl.querySelector('.agent-welcome')?.remove();
         const element = document.createElement('div');
         element.className = `agent-msg ${role}`;
 
-        const roleElement = document.createElement('span');
-        roleElement.className = 'agent-msg-role';
-        roleElement.setAttribute('aria-hidden', 'true');
-        if (role === 'assistant') {
-            roleElement.innerHTML = '<svg class="flow-icon flow-icon-sm"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>';
-        } else {
-            roleElement.textContent = role === 'user' ? '你' : '!';
-        }
-
         const body = document.createElement('div');
         body.className = 'agent-msg-body';
-        const label = document.createElement('span');
-        label.className = 'agent-msg-label';
-        label.textContent = role === 'assistant' ? 'AI Agent' : role === 'user' ? '你' : '请求错误';
+        element.setAttribute('aria-label', role === 'assistant' ? '助手回复' : role === 'user' ? '你的消息' : '请求错误');
+        if (role === 'error') element.setAttribute('role', 'alert');
+        const duration = role === 'assistant' ? formatAgentElapsed(metadata.elapsedMs) : '';
+        if (duration) {
+            const elapsed = document.createElement('div');
+            elapsed.className = 'agent-msg-duration';
+            elapsed.textContent = duration;
+            elapsed.title = '从发送到完成的总用时';
+            body.append(elapsed);
+        }
         const contentElement = document.createElement('div');
         contentElement.className = 'agent-msg-content';
         contentElement.textContent = content;
-        body.append(label, contentElement);
-        element.append(roleElement, body);
+        body.append(contentElement);
+        if (Number.isFinite(metadata.createdAt)) {
+            const timestamp = new Date(metadata.createdAt);
+            if (Number.isFinite(timestamp.getTime())) {
+                const time = document.createElement('time');
+                time.className = 'agent-msg-time';
+                time.dateTime = timestamp.toISOString();
+                time.textContent = timestamp.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+                time.title = timestamp.toLocaleString('zh-CN');
+                body.append(time);
+            }
+        }
+        element.append(body);
         this.messagesEl.appendChild(element);
         this._scrollAgentMessages();
         return element;
@@ -1658,7 +1666,7 @@ export class AgentSidebar {
             return { ok: false, reason };
         }
         // Capture identity and request synchronously; the parent owns flushing and source binding.
-        const requestMessages = this._normalizeAgentMessages([...this.messages, { role: 'user', content: text }]);
+        const requestMessages = this._normalizeAgentMessages([...this.messages, { role: 'user', content: text, createdAt: Date.now() }]);
         const selection = this.options.getSelectedCanvasEntries?.() ?? this.lastCanvasSelection ?? [];
         const request = {
             projectId, conversationId, provider: { ...provider },
@@ -1779,10 +1787,10 @@ export class AgentSidebar {
         const conversationFiles = this._captureAgentConversationFiles(attachments, 'input');
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
-            { role: 'user', content: displayPrompt }
+            { role: 'user', content: displayPrompt, createdAt: Date.now() }
         ]);
         this.messages = requestMessages;
-        this._appendAgentMessageElement('user', displayPrompt);
+        this._appendAgentMessageElement('user', displayPrompt, requestMessages.at(-1));
         this._saveAgentConversation(projectKey, requestMessages, {
             conversationId,
             files: conversationFiles
@@ -1800,6 +1808,7 @@ export class AgentSidebar {
         this.isAgentSending = true;
         if (this.sendBtn) this.sendBtn.disabled = true;
         const typing = this._appendAgentTyping();
+        const startedAt = Date.now();
         let compilation;
         try {
             const result = await window.flowCanvas.ai.generateText({
@@ -1829,11 +1838,11 @@ export class AgentSidebar {
             : `已整理并提交生图：\n\n${compilation.prompt}`;
         const completedMessages = this._normalizeAgentMessages([
             ...requestMessages,
-            { role: 'assistant', content: assistantContent }
+            { role: 'assistant', content: assistantContent, createdAt: Date.now(), elapsedMs: Date.now() - startedAt }
         ]);
         if (this._isActiveConversation(projectKey, conversationId)) {
             this.messages = completedMessages;
-            this._appendAgentMessageElement('assistant', assistantContent);
+            this._appendAgentMessageElement('assistant', assistantContent, completedMessages.at(-1));
         }
         this._saveAgentConversation(projectKey, completedMessages, {
             conversationId,
@@ -1913,10 +1922,10 @@ export class AgentSidebar {
 
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
-            { role: 'user', content: text }
+            { role: 'user', content: text, createdAt: Date.now() }
         ]);
         this.messages = requestMessages;
-        this._appendAgentMessageElement('user', text);
+        this._appendAgentMessageElement('user', text, requestMessages.at(-1));
         this._saveAgentConversation(projectKey, requestMessages, {
             conversationId,
             files: conversationFiles
@@ -1929,6 +1938,7 @@ export class AgentSidebar {
         this.isAgentSending = true;
         if (this.sendBtn) this.sendBtn.disabled = true;
         const typing = this._appendAgentTyping();
+        const startedAt = Date.now();
         try {
             const result = await window.flowCanvas.ai.generateText({
                 provider,
@@ -1944,12 +1954,12 @@ export class AgentSidebar {
             const content = String(result.text || '').trim() || '模型没有返回可显示的文本。';
             const completedMessages = this._normalizeAgentMessages([
                 ...requestMessages,
-                { role: 'assistant', content }
+                { role: 'assistant', content, createdAt: Date.now(), elapsedMs: Date.now() - startedAt }
             ]);
             typing?.remove();
             if (this._isActiveConversation(projectKey, conversationId)) {
                 this.messages = completedMessages;
-                const messageElement = this._appendAgentMessageElement('assistant', content);
+                const messageElement = this._appendAgentMessageElement('assistant', content, completedMessages.at(-1));
                 this._attachAgentPlanAction(messageElement, content);
             }
             this._saveAgentConversation(projectKey, completedMessages, {
@@ -2578,6 +2588,91 @@ export class AgentSidebar {
         this._persistShortcutBindings('已恢复默认快捷键');
     }
 
+    _bindAgentSidebarResize() {
+        const handle = document.getElementById('agentSidebarResizeHandle');
+        const panel = document.getElementById('agentSidebar');
+        if (!handle || !panel) return;
+        const storageKey = 'flow-canvas-agent-panel-width';
+        let preferredWidth = 420;
+        try {
+            const saved = Number(localStorage.getItem(storageKey));
+            if (Number.isFinite(saved) && saved >= 320) preferredWidth = Math.min(saved, 960);
+        } catch (_) { }
+        const bounds = () => {
+            const viewport = window.innerWidth;
+            const leftWidth = document.getElementById('sidebarWrapper')?.getBoundingClientRect().width || 0;
+            const min = Math.min(320, viewport);
+            const max = viewport <= 520 ? viewport : Math.max(min, Math.min(960, viewport - leftWidth - 240));
+            return { min, max };
+        };
+        const apply = width => {
+            const { min, max } = bounds();
+            const value = Math.round(Math.max(min, Math.min(max, width)));
+            document.body.style.setProperty('--agent-panel-width', `${value}px`);
+            handle.setAttribute('aria-valuemin', String(min));
+            handle.setAttribute('aria-valuemax', String(max));
+            handle.setAttribute('aria-valuenow', String(value));
+            return value;
+        };
+        const save = () => {
+            try { localStorage.setItem(storageKey, String(preferredWidth)); } catch (_) { }
+        };
+        let drag = null;
+        let frame = null;
+        const renderDrag = () => {
+            frame = null;
+            if (drag) preferredWidth = apply(drag.width + drag.x - drag.latestX);
+        };
+        const finish = () => {
+            if (!drag) return;
+            if (frame !== null) cancelAnimationFrame(frame);
+            renderDrag();
+            const pointerId = drag.pointerId;
+            drag = null;
+            document.body.classList.remove('agent-sidebar-resizing');
+            if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+            save();
+        };
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || drag || this.currentMode !== 'agent') return;
+            event.preventDefault();
+            event.stopPropagation();
+            drag = { pointerId: event.pointerId, x: event.clientX, latestX: event.clientX, width: panel.getBoundingClientRect().width };
+            handle.setPointerCapture(event.pointerId);
+            document.body.classList.add('agent-sidebar-resizing');
+        });
+        handle.addEventListener('pointermove', event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            drag.latestX = event.clientX;
+            if (frame === null) frame = requestAnimationFrame(renderDrag);
+        });
+        for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) handle.addEventListener(eventName, finish);
+        handle.addEventListener('dblclick', event => {
+            event.preventDefault();
+            preferredWidth = 420;
+            apply(preferredWidth);
+            save();
+        });
+        handle.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
+            event.preventDefault();
+            preferredWidth = event.key === 'Home' ? 420
+                : Number(handle.getAttribute('aria-valuenow')) + (event.key === 'ArrowLeft' ? 24 : -24);
+            preferredWidth = apply(preferredWidth);
+            save();
+        });
+        window.addEventListener('resize', () => apply(preferredWidth));
+        window.addEventListener('blur', finish);
+        window.addEventListener('pagehide', finish);
+        this._finishAgentSidebarResize = finish;
+        const leftSidebar = document.getElementById('sidebarWrapper');
+        if (leftSidebar) {
+            this.agentSidebarWidthObserver = new ResizeObserver(() => apply(preferredWidth));
+            this.agentSidebarWidthObserver.observe(leftSidebar);
+        }
+        apply(preferredWidth);
+    }
+
     _bindEvents() {
         // 主 HUD：左键打开 Agent，右键把主窗口收进置顶浮动按钮。
         const toggleBtn = document.getElementById('agentToggleBtn');
@@ -2587,7 +2682,6 @@ export class AgentSidebar {
             collapsingToOrb = true;
             toggleBtn.classList.add('activating');
             toggleBtn.setAttribute('aria-busy', 'true');
-            this.modePicker?.classList.remove('mode-picker-visible');
 
             try {
                 await new Promise(resolve => setTimeout(resolve, 140));
@@ -2603,9 +2697,8 @@ export class AgentSidebar {
         toggleBtn?.addEventListener('click', event => {
             if (event.button !== 0) return;
             if (document.body.classList.contains('agent-open')) {
-                this.modePicker?.classList.remove('mode-picker-visible');
                 if (this.currentMode === 'settings') {
-                    this.setMode('review');
+                    this.setMode('canvas');
                     return;
                 }
                 this.close();
@@ -2617,16 +2710,6 @@ export class AgentSidebar {
             event.preventDefault();
             void collapseToOrb();
         });
-        toggleBtn?.addEventListener('pointerenter', () => this._showModePicker());
-        toggleBtn?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
-        toggleBtn?.addEventListener('focusin', () => this._showModePicker());
-        toggleBtn?.addEventListener('focusout', () => this._scheduleModePickerHide());
-        this.modePicker?.addEventListener('pointerenter', () => this._showModePicker());
-        this.modePicker?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
-        this.modePicker?.addEventListener('focusin', () => this._showModePicker());
-        this.modePicker?.addEventListener('focusout', () => this._scheduleModePickerHide());
-        document.getElementById('creationModeSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
-        document.getElementById('creationModeReviewBtn')?.addEventListener('click', () => this.setMode('review'));
         this.settingsTabs?.addEventListener('click', event => {
             const button = event.target.closest('[data-settings-tab]');
             if (button) this._setSettingsTab(button.dataset.settingsTab);
@@ -2741,7 +2824,6 @@ export class AgentSidebar {
             event.stopPropagation();
             const open = !this.taskHistoryOpen;
             this._setTaskHistoryOpen(open);
-            this.modePicker?.classList.remove('mode-picker-visible');
         });
         this.taskHistoryCloseBtn?.addEventListener('click', () => this._setTaskHistoryOpen(false));
         this.taskHistoryFilters?.addEventListener('click', event => {
@@ -2864,10 +2946,11 @@ export class AgentSidebar {
         document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings', 'api'));
         this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
 
-        // 右上角齿轮与圆球菜单都可进入设置模式。
+        // 左侧工具栏中的齿轮切换设置面板。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
             this._closeAgentHeaderPopovers();
-            this.setMode('settings');
+            this.setMode(this.currentMode === 'settings' && document.body.classList.contains('agent-open')
+                ? 'canvas' : 'settings');
         });
 
         // 模板点击
@@ -2934,38 +3017,9 @@ export class AgentSidebar {
 
     }
 
-    _showModePicker() {
-        if (document.body.classList.contains('agent-open')) {
-            this.modePicker?.classList.remove('mode-picker-visible');
-            return;
-        }
-        if (this.modePickerHideTimer) {
-            clearTimeout(this.modePickerHideTimer);
-            this.modePickerHideTimer = null;
-        }
-        this.modePicker?.classList.add('mode-picker-visible');
-    }
-
-    _scheduleModePickerHide() {
-        if (this.modePickerHideTimer) clearTimeout(this.modePickerHideTimer);
-        this.modePickerHideTimer = setTimeout(() => {
-            const toggleBtn = document.getElementById('agentToggleBtn');
-            const activeElement = document.activeElement;
-            const remainsInteractive = toggleBtn?.matches(':hover')
-                || this.modePicker?.matches(':hover')
-                || toggleBtn?.contains(activeElement)
-                || this.modePicker?.contains(activeElement);
-            if (remainsInteractive) {
-                this.modePickerHideTimer = null;
-                return;
-            }
-            this.modePicker?.classList.remove('mode-picker-visible');
-            this.modePickerHideTimer = null;
-        }, 160);
-    }
-
-    setMode(mode = 'review', settingsTab = null) {
-        const nextMode = ['agent', 'settings', 'review'].includes(mode) ? mode : 'review';
+    setMode(mode = 'canvas', settingsTab = null) {
+        this._finishAgentSidebarResize?.();
+        const nextMode = ['agent', 'settings', 'canvas'].includes(mode) ? mode : 'canvas';
         const body = document.body;
         this._closeAgentComposerPopovers();
         this._closeAgentHeaderPopovers();
@@ -2975,17 +3029,12 @@ export class AgentSidebar {
         if (this.modeTitle) {
             this.modeTitle.textContent = {
                 agent: 'AI Agent',
-                settings: '\u8bbe\u7f6e\u6a21\u5f0f'
+                settings: '\u8bbe\u7f6e'
             }[nextMode] || '';
         }
 
         body.classList.remove('agent-mode', 'settings-mode', 'image-mode', 'video-mode');
-        document.querySelectorAll('.creation-mode-option').forEach(option => {
-            const optionId = 'creationMode' + nextMode[0].toUpperCase() + nextMode.slice(1) + 'Btn';
-            option.classList.toggle('active', option.id === optionId);
-        });
-
-        if (nextMode === 'review') {
+        if (nextMode === 'canvas') {
             body.classList.remove('creation-mode');
             this.close();
             this.settingsPanel?.classList.remove('show');
@@ -2993,7 +3042,6 @@ export class AgentSidebar {
             if (this.videoModelPicker) this.videoModelPicker.hidden = true;
             if (this.videoPromptDock) this.videoPromptDock.hidden = true;
             if (this.imageWorkspace) this.imageWorkspace.hidden = true;
-            this.modePicker?.classList.remove('mode-picker-visible');
             return;
         }
 
@@ -3005,7 +3053,6 @@ export class AgentSidebar {
         if (this.videoModelPicker) this.videoModelPicker.hidden = true;
         if (this.videoPromptDock) this.videoPromptDock.hidden = true;
         if (this.imageWorkspace) this.imageWorkspace.hidden = true;
-        this.modePicker?.classList.remove('mode-picker-visible');
         this.open();
         if (nextMode === 'agent') setTimeout(() => this.inputEl?.focus(), 120);
     }
@@ -5107,6 +5154,7 @@ export class AgentSidebar {
     }
 
     close() {
+        this._finishAgentSidebarResize?.();
         this._closeAgentHeaderPopovers();
         document.body.classList.remove('agent-open');
         this._syncHudState();
@@ -5118,6 +5166,10 @@ export class AgentSidebar {
     }
 
     _syncHudState() {
+        const settingsButton = document.getElementById('agentSettingsBtn');
+        const settingsOpen = this.currentMode === 'settings' && document.body.classList.contains('agent-open');
+        settingsButton?.classList.toggle('active', settingsOpen);
+        settingsButton?.setAttribute('aria-expanded', String(settingsOpen));
         const button = document.getElementById('agentToggleBtn');
         if (!button) return;
         const isOpen = document.body.classList.contains('agent-open');

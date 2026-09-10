@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
     AgentRuntimeClient, isRuntimeTerminal, mergeRuntimeSnapshot, runtimeActions,
     runtimeOutputFiles, runtimePriceText, runtimeScopeKey, settleRuntimeConversation, runtimeDisplayText, runtimeDisplayPlan,
-    runtimeTaskTitle, runtimeEstimateText, runtimeProgressText, runtimeStepSources
+    runtimeTaskTitle, runtimeEstimateText, runtimeProgressText, runtimeStepSources, formatAgentElapsed
 } from './agent-runtime-view.js';
 
 const snapshot = (patch = {}) => ({
@@ -11,6 +11,13 @@ const snapshot = (patch = {}) => ({
     status: 'planning', outputText: '', events: [], lastSeq: 0, ...patch
 });
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('elapsed labels handle missing, short and long runs', () => {
+    for (const value of [undefined, null, NaN, -1]) assert.equal(formatAgentElapsed(value), '');
+    assert.equal(formatAgentElapsed(0), '用时 0秒');
+    assert.equal(formatAgentElapsed(61999), '用时 1分钟 1秒');
+    assert.equal(formatAgentElapsed(3661000), '用时 1小时 1分钟 1秒');
+});
 
 test('status controls expose one plan confirmation and recovery', () => {
     assert.deepEqual(runtimeActions(snapshot({ status: 'awaiting_confirmation', plan: { version: 3 } })), ['confirm', 'revise', 'cancel']);
