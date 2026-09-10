@@ -1,5 +1,6 @@
 import { CanvasManager } from './canvas.js';
 import './mcp-client-settings.js';
+import './diagnostics-settings.js';
 import './generation-recovery.css';
 import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';

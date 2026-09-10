@@ -42,6 +42,15 @@ let mediaPreviewWasFullScreen = null;
 const isDev = !app.isPackaged;
 
 installSafeConsole();
+require('./diagnostics-electron.cjs').installDiagnostics({
+    getWindow: () => mainWindow,
+    getTasks: () => flowCanvasBridge?.recoveryStore.list() || [],
+    getSecrets: () => {
+        const keys = (apiConfigStore?.load()?.config?.providers || []).map(provider => provider.apiKey).filter(Boolean);
+        try { keys.push(...(agentServices?.runtime?.getSecrets?.() || [])); } catch { /* Runtime may still be initializing. */ }
+        return keys;
+    }
+});
 
 if (IS_MAC) {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -1260,6 +1269,12 @@ ipcMain.handle('store:save', async (_, data) => {
 });
 ipcMain.on('store:saveSync', (event, data) => {
     event.returnValue = agentServices ? agentServices.saveRenderer(data) : store.save(data?.data || data);
+    if (event.returnValue === false || event.returnValue?.ok === false) {
+        require('./diagnostics.cjs').diagnostic('error', 'board.saveConflict', {
+            projectId: data?.data?.activeGroupId, sourceRevisions: data?.sourceRevisions,
+            conflicts: event.returnValue?.conflicts, code: event.returnValue?.code
+        });
+    }
 });
 
 for (const action of ['list', 'save', 'remove', 'test']) {

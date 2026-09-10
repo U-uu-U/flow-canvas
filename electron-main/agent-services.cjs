@@ -58,6 +58,13 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         listModels: () => generation.listModels(), readMedia: (...args) => media.read(...args),
         prepareGraph: (...args) => generation.prepare(...args), executeStep: (...args) => generation.execute(...args),
         onEvent: event => {
+            if (!/delta|token/i.test(event.type)) require('./diagnostics.cjs').diagnostic(
+                event.data?.error ? 'error' : 'info', 'agent.event', {
+                    runId: event.runId, projectId: event.projectId, conversationId: event.conversationId,
+                    type: event.type, stepId: event.data?.stepId, status: event.data?.status,
+                    toolName: event.data?.tool || event.data?.toolName, error: event.data?.error,
+                    usage: event.type === 'usage' ? event.data : undefined
+                });
             const window = getMainWindow();
             if (window && !window.isDestroyed()) window.webContents.send('agent:event', event);
             if (event.type === 'status' && ['failed', 'partial_failed', 'canceled'].includes(event.data.status)) {

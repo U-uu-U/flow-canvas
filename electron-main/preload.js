@@ -3,6 +3,12 @@
 // ============================================================
 
 const { contextBridge, ipcRenderer } = require('electron');
+window.addEventListener('error', event => ipcRenderer.send('diagnostics:renderer', {
+    type: 'error', message: event.message, stack: event.error?.stack
+}));
+window.addEventListener('unhandledrejection', event => ipcRenderer.send('diagnostics:renderer', {
+    type: 'unhandledrejection', message: event.reason?.message || String(event.reason), stack: event.reason?.stack
+}));
 
 let sourceRevisions = {};
 let sourceActiveGroupId = null;
@@ -26,6 +32,11 @@ function savedStore(result) {
 
 contextBridge.exposeInMainWorld('flowCanvas', {
     platform: process.platform,
+    diagnostics: {
+        summary: () => ipcRenderer.invoke('diagnostics:summary'),
+        copy: () => ipcRenderer.invoke('diagnostics:copy'),
+        export: () => ipcRenderer.invoke('diagnostics:export'),
+    },
 
     // 数据存储
     store: {

@@ -39,6 +39,7 @@ const {
 const { ReferenceCache } = require('./reference-cache');
 const { GenerationRecoveryStore } = require('./generation-recovery-store.cjs');
 const { imageRequestFailure } = require('./image-request-diagnostics.cjs');
+const { diagnostic: recordDiagnostic } = require('./diagnostics.cjs');
 const {
     buildMiniMaxH3RequestBody,
     buildSeedance25RequestBody,
@@ -192,7 +193,18 @@ class FlowCanvasBridge {
         this.notifyRenderer = notifyRenderer;
         this.notifyTaskSubmitted = notifyTaskSubmitted;
         this.notifyTaskCompleted = notifyTaskCompleted;
-        this.notifyVideoProgress = notifyVideoProgress;
+        const progressStates = new Map();
+        this.notifyVideoProgress = event => {
+            const key = event.clientTaskId || 'unknown';
+            const signature = `${event.stage}:${Math.floor((Number(event.progress) || 0) / 10)}:${event.retryCount || 0}`;
+            if (progressStates.get(key) !== signature) {
+                if (progressStates.size >= 500) progressStates.delete(progressStates.keys().next().value);
+                progressStates.set(key, signature);
+                recordDiagnostic('info', 'generation.progress', { clientTaskId: event.clientTaskId, stage: event.stage,
+                    progress: event.progress, retryCount: event.retryCount, lastError: event.lastError });
+            }
+            notifyVideoProgress?.(event);
+        };
         this.server = null;
         this.host = DEFAULT_MCP_CONFIG.host;
         this.port = DEFAULT_MCP_CONFIG.port;
@@ -218,9 +230,14 @@ class FlowCanvasBridge {
         }
         try {
             throwIfGenerationCanceled(controller.signal);
+            recordDiagnostic('info', 'generation.start', { clientTaskId: id });
             const result = await action(controller.signal);
             throwIfGenerationCanceled(controller.signal);
+            recordDiagnostic('info', 'generation.complete', { clientTaskId: id, taskId: result?.taskId });
             return result;
+        } catch (error) {
+            recordDiagnostic('error', 'generation.failed', { clientTaskId: id, canceled: controller.signal.aborted, error });
+            throw error;
         } finally {
             if (id && this.activeGenerationRequests.get(id) === controller) {
                 this.activeGenerationRequests.delete(id);
@@ -244,6 +261,11 @@ class FlowCanvasBridge {
     _rememberGeneration(kind, body) {
         const request = { ...body, clientTaskId: body.clientTaskId || crypto.randomUUID(),
             projectId: body.projectId || this.store.load().activeGroupId || null };
+        recordDiagnostic('info', 'generation.prepare', { kind, clientTaskId: request.clientTaskId,
+            projectId: request.projectId, nodeId: body.nodeId, model: body.providerConfig?.model || body.model,
+            endpoint: body.providerConfig?.endpoint, imageCount: body.sourceReferences?.length || 0,
+            videoCount: body.videoReferences?.length || 0, audioCount: body.audioReferences?.length || 0,
+            size: body.size, duration: body.duration, resolution: body.resolution, stream: body.stream });
         const params = Object.fromEntries(['size', 'quality', 'responseFormat', 'historyDisabled', 'stream',
             'ratio', 'resolution', 'duration', 'cameraFixed', 'generateAudio', 'webSearch', 'watermark', 'n', 'midjourney']
             .filter(key => body[key] !== undefined).map(key => [key, body[key]]));
@@ -261,6 +283,8 @@ class FlowCanvasBridge {
     }
 
     _rememberSubmitted(body, event) {
+        recordDiagnostic('info', 'generation.submitted', { clientTaskId: body.clientTaskId, projectId: body.projectId,
+            nodeId: body.nodeId, taskId: event.remoteTaskId, model: event.model, location: event.location });
         this.recoveryStore.update(body.clientTaskId, { taskId: event.remoteTaskId,
             targetDir: event.targetDir, model: event.model, state: 'submitted',
             ...(event.location ? { location: event.location } : {}) });
@@ -268,6 +292,8 @@ class FlowCanvasBridge {
     }
 
     _rememberResult(body, result) {
+        recordDiagnostic('info', 'generation.downloaded', { clientTaskId: body.clientTaskId, projectId: body.projectId,
+            taskId: result.taskId, count: result.filePaths?.length || (result.filePath ? 1 : 0) });
         if (!this.recoveryStore.get(body.clientTaskId)?.kind) {
             this.recoveryStore.update(body.clientTaskId, { kind: result.mediaType || body.kind,
                 projectId: body.projectId, nodeId: body.nodeId, prompt: body.prompt,
@@ -2007,9 +2033,11 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             let phase = '等待响应';
             const diagnostic = {
                 requestId: activeRequestId, startedAt,
+                clientTaskId: options.clientTaskId, projectId: options.projectId, nodeId: options.nodeId,
                 payloadBytes: Buffer.byteLength(requestPayload), imageCount: sourceImages.length
             };
             options.onRequestDiagnostic?.({ ...diagnostic, phase });
+            recordDiagnostic('info', 'image.request', { ...diagnostic, endpoint, model });
             try {
                 res = await net.fetch(endpoint, {
                     method: 'POST',
@@ -2027,14 +2055,22 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     redirect: 'follow'
                 });
                 phase = '读取结果';
+                recordDiagnostic('info', 'image.responseHeaders', { requestId: activeRequestId,
+                    status: res.status, elapsedMs: Date.now() - startedAt,
+                    serverRequestId: res.headers.get('x-request-id') || res.headers.get('x-log-id') || res.headers.get('request-id'),
+                    contentType: res.headers.get('content-type') });
                 const location = res.headers.get('location');
                 const earlyTaskId = location && getImageTaskId({}, res.status, location);
                 if (res.ok && earlyTaskId) options.onTaskSubmitted?.({ taskId: earlyTaskId, model, status: 'queued', location });
                 responseText = await res.text();
+                recordDiagnostic('info', 'image.responseBody', { requestId: activeRequestId,
+                    elapsedMs: Date.now() - startedAt, responseBytes: Buffer.byteLength(responseText) });
             } catch (error) {
                 throwIfGenerationCanceled(options.signal);
                 const attempts = requestAttempt + 1;
                 const timedOut = requestAbort.controller.signal.aborted;
+                recordDiagnostic('error', 'image.requestFailed', { ...diagnostic, phase, timedOut,
+                    elapsedMs: Date.now() - startedAt, error });
                 // A dropped POST response does not prove the server rejected the paid task.
                 if (phase === '读取结果' || timedOut || /ERR_EMPTY_RESPONSE/i.test(error?.message || '')) {
                     options.onRequestDiagnostic?.({ ...diagnostic, phase, state: 'submission_unknown' });
