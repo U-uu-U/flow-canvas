@@ -27,11 +27,13 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         await page.waitForFunction(() => !document.body.classList.contains('agent-open'));
         await page.locator('#agentToggleBtn').click();
         await page.waitForFunction(() => document.body.classList.contains('agent-mode') && document.body.classList.contains('agent-open'));
+        await page.waitForFunction(() => document.activeElement === document.querySelector('#agentInput'));
         assert.equal(await page.locator('#agentSendBtn use').getAttribute('href'), './icons/flow-icons.svg#icon-arrow-up');
         const handle = page.locator('#agentSidebarResizeHandle');
         await handle.waitFor({ state: 'visible' });
         // Keyboard controls also exercise persisted clamping without depending on animation timing.
         await handle.focus();
+        assert.equal(await handle.evaluate(element => element === document.activeElement), true);
         await page.keyboard.press('Home');
         await page.keyboard.press('ArrowLeft');
         assert.equal(await handle.getAttribute('aria-valuenow'), '444');
@@ -65,6 +67,19 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         await page.waitForFunction(() => document.body.classList.contains('agent-open'));
         assert.equal(Number(await handle.getAttribute('aria-valuenow')), width);
         console.log('Release UI smoke passed: settings rail/toggle, no old picker, send icon, drag, keyboard, persistence, compact viewport.');
+    } catch (error) {
+        const page = app && await app.firstWindow().catch(() => null);
+        if (page) {
+            const output = path.join(__dirname, '../output/playwright');
+            await fs.mkdir(output, { recursive: true });
+            await page.screenshot({ path: path.join(output, 'release-ui-failure.png') }).catch(() => {});
+            console.error(await page.evaluate(() => ({
+                focused: document.activeElement?.id, viewport: innerWidth,
+                handle: document.querySelector('#agentSidebarResizeHandle')?.outerHTML,
+                mode: document.body.className
+            })).catch(() => null));
+        }
+        throw error;
     } finally {
         await app?.close();
         await fs.rm(profile, { recursive: true, force: true });

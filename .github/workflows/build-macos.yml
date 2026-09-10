@@ -69,6 +69,12 @@ jobs:
       - name: Verify released UI controls
         run: node scripts/release-ui-smoke.cjs
       - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-release-ui-screenshots
+          path: output/playwright/release-ui-*.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         with:
           name: flow-canvas-macos-universal
           path: release/*.dmg
