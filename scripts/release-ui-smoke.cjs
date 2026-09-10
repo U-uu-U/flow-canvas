@@ -15,6 +15,10 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         app = await electron.launch({ executablePath: require('electron'), args: [path.join(__dirname, 'mcp-client-smoke-entry.cjs')], env });
         const page = await app.firstWindow();
         await page.waitForFunction(() => window.flowCanvas?.store && document.querySelector('#agentToggleBtn'));
+        if (process.env.FLOW_UI_TEST_PLATFORM) await page.evaluate(platform => {
+            document.body.classList.remove('platform-win32', 'platform-darwin');
+            document.body.classList.add(`platform-${platform}`);
+        }, process.env.FLOW_UI_TEST_PLATFORM);
         await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => window.isVisible()).setSize(1300, 900));
         const settings = page.locator('#agentSettingsBtn');
         assert.equal(await page.locator('.titlebar #agentSettingsBtn').count(), 0);
@@ -39,9 +43,13 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         assert.equal(await handle.getAttribute('aria-valuenow'), '444');
         await page.waitForTimeout(250);
         const box = await handle.boundingBox();
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        const pointer = { x: box.x + box.width - 2, y: box.y + box.height / 2 };
+        const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.id, pointer);
+        assert.equal(hit, 'agentSidebarResizeHandle');
+        await page.mouse.move(pointer.x, pointer.y);
         await page.mouse.down();
-        await page.mouse.move(box.x + box.width / 2 - 80, box.y + box.height / 2, { steps: 8 });
+        await page.waitForFunction(() => document.body.classList.contains('agent-sidebar-resizing'), null, { timeout: 3000 });
+        await page.mouse.move(pointer.x - 80, pointer.y, { steps: 8 });
         await page.mouse.up();
         const width = Number(await handle.getAttribute('aria-valuenow'));
         assert.ok(width >= 520 && width <= 528, `Unexpected resized width: ${width}`);
