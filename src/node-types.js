@@ -103,10 +103,13 @@ function restoreReferenceCitations(prompt, config = {}) {
     const offsets = config.referenceCitationOffsets && typeof config.referenceCitationOffsets === 'object'
         ? config.referenceCitationOffsets
         : {};
-    const insertions = ids.map((id, index) => ({
+    const occurrences = Array.isArray(config.referenceCitationOccurrences)
+        ? config.referenceCitationOccurrences
+        : ids.map(id => ({ connectionId: id, offset: offsets[id] }));
+    const insertions = occurrences.map((entry, index) => ({
         index,
-        label: typeof labels[index] === 'string' ? labels[index].trim() : '',
-        offset: Number(offsets[id])
+        label: String(labels[ids.indexOf(entry.connectionId)] || '').trim(),
+        offset: Number(entry.offset)
     })).filter(entry => entry.label && Number.isFinite(entry.offset) && entry.offset >= 0 && entry.offset <= text.length);
 
     let restored = text;

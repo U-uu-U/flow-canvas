@@ -55,6 +55,28 @@ test('expandGenerationPrompts: 按胶囊位置还原图一和图二的编辑职�
     );
 });
 
+test('expandGenerationPrompts: repeated citations retain occurrence order without duplicating upload labels', () => {
+    const config = {
+        prompt: 'A B C',
+        referenceCitationIds: ['first', 'second'],
+        referenceCitationLabels: ['图一', '图二'],
+        referenceCitationOffsets: { first: 0, second: 0 },
+        referenceCitationOccurrences: [
+            { id: 'a', connectionId: 'first', offset: 0 },
+            { id: 'b', connectionId: 'second', offset: 2 },
+            { id: 'c', connectionId: 'first', offset: 4 },
+            { id: 'd', connectionId: 'second', offset: 4 }
+        ]
+    };
+    assert.deepEqual(helpers.expandGenerationPrompts({}, JSON.parse(JSON.stringify(config))), [
+        '参考图编号与上传顺序一致：图一=第1张，图二=第2张。\n图一A 图二B 图一图二C'
+    ]);
+    config.referenceCitationOccurrences.splice(0, 1);
+    assert.match(helpers.expandGenerationPrompts({}, config)[0], /\nA 图二B 图一图二C$/);
+    config.referenceCitationOccurrences = [];
+    assert.match(helpers.expandGenerationPrompts({}, config)[0], /\nA B C$/);
+});
+
 test('mapWithConcurrency: 保持结果顺序并限制并发', async () => {
     let active = 0;
     let peak = 0;

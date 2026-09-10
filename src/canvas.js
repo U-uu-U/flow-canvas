@@ -8789,19 +8789,18 @@ export class CanvasManager {
                 tile.tabIndex = 0;
                 tile.setAttribute('role', 'button');
                 tile.setAttribute('aria-label', `引用${referenceLabel}`);
-                tile.setAttribute('aria-pressed', citationState.selectedIds.has(connection.id) ? 'true' : 'false');
                 tile.title = `点击引用${referenceLabel} · ${tile.title}`;
-                const toggleCitation = () => this._toggleGenerationComposerCitation(nodeId, connection.id);
+                const addCitation = () => this._addGenerationComposerCitation(nodeId, connection.id);
                 tile.addEventListener('pointerdown', event => {
                     if (event.target.closest('button')) return;
                     event.preventDefault();
                 });
-                tile.addEventListener('click', toggleCitation);
+                tile.addEventListener('click', addCitation);
                 tile.addEventListener('keydown', event => {
                     if (event.target !== tile) return;
                     if (event.key !== 'Enter' && event.key !== ' ') return;
                     event.preventDefault();
-                    toggleCitation();
+                    addCitation();
                 });
             } else {
                 const icon = document.createElement('span');
@@ -8866,7 +8865,14 @@ export class CanvasManager {
         const configuredIds = Array.isArray(data.config.referenceCitationIds)
             ? data.config.referenceCitationIds.filter(id => validIds.has(id))
             : [];
-        const selectedIds = new Set(configuredIds);
+        const occurrences = (Array.isArray(data.config.referenceCitationOccurrences)
+            ? data.config.referenceCitationOccurrences
+            : configuredIds.map(connectionId => ({
+                id: crypto.randomUUID(), connectionId,
+                offset: data.config.referenceCitationOffsets?.[connectionId]
+            }))).filter(entry => entry && validIds.has(entry.connectionId));
+        data.config.referenceCitationOccurrences = occurrences;
+        const selectedIds = new Set(occurrences.map(entry => entry.connectionId));
         const orderedIds = imageReferences
             .map(({ connection }) => connection.id)
             .filter(id => selectedIds.has(id));
@@ -8887,29 +8893,27 @@ export class CanvasManager {
         data.config.referenceCitationIds = orderedIds;
         data.config.referenceCitationLabels = labels;
         data.config.referenceCitationOffsets = offsets;
-        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets };
+        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets, occurrences };
     }
 
-    _toggleGenerationComposerCitation(nodeId, connectionId) {
+    _addGenerationComposerCitation(nodeId, connectionId) {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
         if (active?.nodeId !== nodeId || !data) return;
         const state = this._generationComposerCitationState(data);
-        if (!state.imageReferences.some(({ connection }) => connection.id === connectionId)) return;
-        const adding = !state.selectedIds.has(connectionId);
-        if (adding) state.selectedIds.add(connectionId);
-        else {
-            state.selectedIds.delete(connectionId);
-            delete data.config.referenceCitationOffsets?.[connectionId];
-        }
-        data.config.referenceCitationIds = [...state.selectedIds];
+        const index = state.imageReferences.findIndex(({ connection }) => connection.id === connectionId);
+        if (index < 0) return;
+        const prompt = active.element.querySelector('[data-prompt]');
+        const citation = this._createGenerationComposerCitation(
+            nodeId, connectionId, this._generationImageReferenceLabel(index), crypto.randomUUID()
+        );
+        this._insertGenerationComposerCitation(prompt, citation, undefined, this._generationComposerPromptSelection(prompt));
+        this._syncGenerationComposerCitationsFromPrompt(data, prompt);
         active.changed = true;
         this._renderGenerationComposerReferences(nodeId);
-        const prompt = active.element.querySelector('[data-prompt]');
-        const citation = [...prompt.querySelectorAll('[data-citation-id]')]
-            .find(element => element.dataset.citationId === connectionId);
-        if (adding && citation) this._focusGenerationComposerPromptAfterCitation(prompt, citation);
-        else this._focusGenerationComposerPromptEnd(prompt);
+        this._focusGenerationComposerPromptAfterCitation(prompt, citation);
+        this._cacheMediaGenerationPromptDraft(data);
+        this.emit('change');
     }
 
     _renderGenerationComposerCitations(nodeId, references = null) {
@@ -8924,9 +8928,11 @@ export class CanvasManager {
             this._generationImageReferenceLabel(index)
         ]));
         const existingById = new Map();
+        const occurrenceIds = new Set(state.occurrences.map(entry => entry.id));
         prompt.querySelectorAll('[data-citation-id]').forEach(citation => {
             const citationId = citation.dataset.citationId;
-            if (!state.selectedIds.has(citationId) || existingById.has(citationId)) {
+            const occurrenceId = citation.dataset.citationOccurrenceId;
+            if (!occurrenceIds.has(occurrenceId) || existingById.has(occurrenceId)) {
                 citation.remove();
                 return;
             }
@@ -8934,24 +8940,20 @@ export class CanvasManager {
             citation.textContent = label;
             citation.title = `取消引用${label}`;
             citation.setAttribute('aria-label', `取消引用${label}`);
-            existingById.set(citationId, citation);
+            existingById.set(occurrenceId, citation);
         });
 
-        const selectionRange = this._generationComposerPromptSelection(prompt);
-        const missing = state.imageReferences.filter(({ connection }) =>
-            state.selectedIds.has(connection.id) && !existingById.has(connection.id)
-        );
+        const missing = state.occurrences.filter(entry => !existingById.has(entry.id));
         for (let index = missing.length - 1; index >= 0; index -= 1) {
-            const { connection } = missing[index];
-            const label = labelsById.get(connection.id);
-            const pill = this._createGenerationComposerCitation(nodeId, connection.id, label);
+            const entry = missing[index];
+            const label = labelsById.get(entry.connectionId);
+            const pill = this._createGenerationComposerCitation(nodeId, entry.connectionId, label, entry.id);
             this._insertGenerationComposerCitation(
                 prompt,
                 pill,
-                state.offsets[connection.id],
-                selectionRange
+                Number.isFinite(entry.offset) ? entry.offset : this._generationComposerPromptValue(prompt).length
             );
-            existingById.set(connection.id, pill);
+            existingById.set(entry.id, pill);
         }
         const synced = this._syncGenerationComposerCitationsFromPrompt(data, prompt);
         prompt.dataset.empty = this._generationComposerPromptValue(prompt) || synced.selectedIds.size
@@ -8959,11 +8961,12 @@ export class CanvasManager {
             : 'true';
     }
 
-    _createGenerationComposerCitation(nodeId, connectionId, label) {
+    _createGenerationComposerCitation(nodeId, connectionId, label, occurrenceId) {
         const pill = document.createElement('button');
         pill.type = 'button';
         pill.className = 'generation-composer-citation';
         pill.dataset.citationId = connectionId;
+        pill.dataset.citationOccurrenceId = occurrenceId;
         pill.contentEditable = 'false';
         pill.textContent = label;
         pill.title = `取消引用${label}`;
@@ -8975,7 +8978,16 @@ export class CanvasManager {
         pill.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            this._toggleGenerationComposerCitation(nodeId, connectionId);
+            const active = this._generationComposer;
+            const data = this.items.get(nodeId)?.data;
+            if (active?.nodeId !== nodeId || !data) return;
+            const prompt = active.element.querySelector('[data-prompt]');
+            pill.remove();
+            this._syncGenerationComposerCitationsFromPrompt(data, prompt);
+            active.changed = true;
+            this._renderGenerationComposerReferences(nodeId);
+            this._cacheMediaGenerationPromptDraft(data);
+            this.emit('change');
         });
         return pill;
     }
@@ -9047,7 +9059,7 @@ export class CanvasManager {
             }
             if (node.nodeType !== Node.ELEMENT_NODE) return;
             if (node.matches('[data-citation-id]')) {
-                offsets[node.dataset.citationId] = textOffset;
+                offsets[node.dataset.citationOccurrenceId] = textOffset;
                 return;
             }
             if (node.tagName === 'BR') {
@@ -9063,16 +9075,18 @@ export class CanvasManager {
     _syncGenerationComposerCitationsFromPrompt(data, prompt) {
         const references = this._opReferenceEntries(data);
         const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
-        const visibleIds = new Set([...prompt.querySelectorAll('[data-citation-id]')]
-            .map(citation => citation.dataset.citationId));
-        data.config.referenceCitationIds = imageReferences
-            .map(({ connection }) => connection.id)
-            .filter(id => visibleIds.has(id));
-        const state = this._generationComposerCitationState(data, references);
+        const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
         const measuredOffsets = this._generationComposerCitationOffsets(prompt);
-        data.config.referenceCitationOffsets = Object.fromEntries(state.orderedIds
-            .filter(id => Number.isFinite(measuredOffsets[id]))
-            .map(id => [id, measuredOffsets[id]]));
+        data.config.referenceCitationOccurrences = [...prompt.querySelectorAll('[data-citation-id]')]
+            .filter(citation => validIds.has(citation.dataset.citationId))
+            .map(citation => ({
+                id: citation.dataset.citationOccurrenceId,
+                connectionId: citation.dataset.citationId,
+                offset: measuredOffsets[citation.dataset.citationOccurrenceId]
+            }));
+        const state = this._generationComposerCitationState(data, references);
+        data.config.referenceCitationOffsets = Object.fromEntries(state.occurrences
+            .map(entry => [entry.connectionId, entry.offset]));
         state.offsets = data.config.referenceCitationOffsets;
         return state;
     }
