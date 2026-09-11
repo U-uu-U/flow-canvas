@@ -7960,6 +7960,28 @@ select.plan-cell-input {
     color: #bfc2c7;
 }
 
+.generation-composer-model-routes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.generation-composer-model-routes .generation-composer-model-option {
+    min-width: 0;
+    border-radius: 0;
+    gap: 4px;
+}
+
+.generation-composer-model-routes .generation-composer-model-option + .generation-composer-model-option {
+    border-left-color: rgba(255, 255, 255, 0.12);
+}
+
+.generation-composer-model-routes .generation-composer-model-option:focus-visible {
+    outline: 1px solid #bfc2c7;
+    outline-offset: -2px;
+}
+
 .generation-composer-prompt-library-popover {
     width: min(540px, calc(100vw - 20px));
     height: min(520px, calc(100vh - 20px));
