@@ -7961,9 +7961,65 @@ select.plan-cell-input {
 }
 
 .generation-composer-model-routes {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     border-radius: 6px;
+    overflow: hidden;
+    background: #292b2f;
+}
+
+.generation-composer-route-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 48px;
+    padding: 7px 9px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: #bcc0c6;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.generation-composer-route-trigger > span {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.generation-composer-route-trigger strong { font-size: 11px; }
+.generation-composer-route-trigger small { font-size: 9px; color: #7d828a; }
+.generation-composer-route-trigger .flow-icon {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    transform: rotate(180deg);
+    transition: transform 160ms ease;
+}
+
+.generation-composer-model-routes.expanded .generation-composer-route-trigger,
+.generation-composer-route-trigger.selected {
+    background: #33353a;
+    color: #f0f1f3;
+}
+
+.generation-composer-model-routes.expanded .flow-icon { transform: rotate(0); }
+
+.generation-composer-route-panel {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 180ms ease, opacity 140ms ease;
+}
+
+.generation-composer-model-routes.expanded .generation-composer-route-panel {
+    grid-template-rows: 1fr;
+    opacity: 1;
+}
+
+.generation-composer-route-options {
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -7971,13 +8027,17 @@ select.plan-cell-input {
     min-width: 0;
     border-radius: 0;
     gap: 4px;
+    width: 100%;
+    padding-left: 20px;
+    border-top-color: rgba(255, 255, 255, 0.06);
 }
 
-.generation-composer-model-routes .generation-composer-model-option + .generation-composer-model-option {
-    border-left-color: rgba(255, 255, 255, 0.12);
+@media (prefers-reduced-motion: reduce) {
+    .generation-composer-route-panel,
+    .generation-composer-route-trigger .flow-icon { transition: none; }
 }
 
-.generation-composer-model-routes .generation-composer-model-option:focus-visible {
+.generation-composer-model-routes button:focus-visible {
     outline: 1px solid #bfc2c7;
     outline-offset: -2px;
 }

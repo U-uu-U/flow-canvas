@@ -45,7 +45,9 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         assert.equal(await page.locator('.generation-composer-segmented').count(), 0);
         const split = page.locator('.generation-composer-model-routes');
         assert.equal(await split.count(), 1);
-        assert.deepEqual(await split.locator('strong').allTextContents(), ['\u7ebf\u8def\u4e00', '\u7ebf\u8def\u4e8c']);
+        assert.equal(await split.locator('.generation-composer-route-trigger strong').innerText(), 'Seedance 2.5');
+        assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
+        assert.deepEqual(await split.locator('.generation-composer-route-options strong').allTextContents(), ['\u7ebf\u8def\u4e00', '\u7ebf\u8def\u4e8c']);
         assert.equal(await page.locator('.generation-composer-model-options > .generation-composer-model-option').count(), 2);
         assert.equal(await options.filter({ hasText: 'seedance_v2.5' }).count(), 0);
         for (const [index, model] of [[0, 'sd2.5-route1'], [1, 'sd2.5']]) {
@@ -53,16 +55,17 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             assert.equal(await options.count(), 0);
             await page.locator('.generation-composer-popover-search input').fill('');
             assert.equal(await options.count(), 4);
-            const halves = split.locator('button');
+            await split.locator('.generation-composer-route-trigger').hover();
+            await page.waitForFunction(() => getComputedStyle(document.querySelector('.generation-composer-route-panel')).opacity === '1');
+            const halves = split.locator('.generation-composer-model-option');
             const left = await halves.nth(0).boundingBox();
             const right = await halves.nth(1).boundingBox();
             assert.ok(Math.abs(left.width - right.width) < 1);
-            assert.ok(Math.abs(left.y - right.y) < 1);
-            assert.ok(Math.abs(left.x + left.width - right.x) < 1);
+            assert.ok(Math.abs(left.x - right.x) < 1);
+            assert.ok(Math.abs(left.y + left.height - right.y) < 1);
             const fits = await page.locator('.generation-composer-model-popover').evaluate(element => element.scrollWidth <= element.clientWidth);
             assert.equal(fits, true);
             if (process.env.FLOW_ROUTE_SCREENSHOT) {
-                await page.mouse.move(900, 600);
                 await page.screenshot({ path: `${process.env.FLOW_ROUTE_SCREENSHOT}-${model}.png`, animations: 'disabled' });
             }
             await halves.nth(index).click();
@@ -70,6 +73,13 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             await page.evaluate(() => window.routeFixture.fixture._showGenerationComposerModelMenu('node', {}));
             assert.equal(await split.locator('[aria-selected="true"]').count(), 1);
         }
+        await split.locator('.generation-composer-route-trigger').hover();
+        await page.mouse.move(900, 600);
+        assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
+        await split.locator('.generation-composer-route-trigger').focus();
+        assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'true');
+        await page.keyboard.press('Escape');
+        assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
         await page.locator('.generation-composer-popover-search input').fill('sd2.5-route1');
         assert.equal(await options.count(), 2);
         await page.evaluate(() => {
@@ -80,7 +90,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         });
         assert.equal(await split.count(), 0);
         assert.equal(await options.filter({ hasText: 'seedance_v2.5' }).count(), 1);
-        console.log('Video route picker passed: split rows, route order, account isolation, search, model binding, compact layout.');
+        console.log('Video route picker passed: hover expansion, mouse leave, keyboard, route order, account isolation, model binding.');
     } finally {
         await app?.close();
         await fs.rm(profile, { recursive: true, force: true });

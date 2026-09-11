@@ -9258,12 +9258,47 @@ export class CanvasManager {
             }
             matches.forEach(row => {
                 const split = row.length === 2 && row[0].routeLabel !== row[1].routeLabel;
-                const container = split ? document.createElement('div') : list;
+                let container = list;
                 if (split) {
-                    container.className = 'generation-composer-model-routes';
-                    container.setAttribute('role', 'group');
-                    container.setAttribute('aria-label', `${row[0].routeModelLabel} 线路选择`);
-                    list.appendChild(container);
+                    const group = document.createElement('div');
+                    group.className = 'generation-composer-model-routes';
+                    group.setAttribute('role', 'group');
+                    group.setAttribute('aria-label', 'Seedance 2.5 线路选择');
+                    const current = row.find(provider => provider.id === data.config?.providerId
+                        || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model));
+                    const trigger = document.createElement('button');
+                    trigger.type = 'button';
+                    trigger.className = 'generation-composer-route-trigger';
+                    trigger.classList.toggle('selected', !!current);
+                    trigger.innerHTML = '<span><strong>Seedance 2.5</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
+                    trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
+                    const panel = document.createElement('div');
+                    panel.className = 'generation-composer-route-panel';
+                    container = document.createElement('div');
+                    container.className = 'generation-composer-route-options';
+                    panel.appendChild(container);
+                    const expand = open => {
+                        group.classList.toggle('expanded', open);
+                        trigger.setAttribute('aria-expanded', String(open));
+                        panel.inert = !open;
+                    };
+                    group.addEventListener('mouseenter', () => expand(true));
+                    group.addEventListener('mouseleave', () => expand(false));
+                    group.addEventListener('focusin', () => expand(true));
+                    group.addEventListener('focusout', event => {
+                        if (!group.contains(event.relatedTarget)) expand(false);
+                    });
+                    trigger.addEventListener('click', () => expand(true));
+                    group.addEventListener('keydown', event => {
+                        if (event.key === 'Escape') {
+                            event.stopPropagation();
+                            trigger.focus();
+                            expand(false);
+                        }
+                    });
+                    expand(false);
+                    group.append(trigger, panel);
+                    list.appendChild(group);
                 }
                 row.forEach(provider => {
                     const selected = provider.id === data.config?.providerId
