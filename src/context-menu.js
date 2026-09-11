@@ -52,7 +52,7 @@ export class ContextMenu {
                     const copyPaths = filePaths.length > 0 ? filePaths : [primaryPath];
                     const res = await window.flowCanvas.clipboard.copy(copyPaths);
                     if (res.success) {
-                        let msg = res.sizeMB ? `已复制 (${res.sizeMB}MB)` : `已复制 ${res.type === 'file' ? '文件' : '路径'}`;
+                        const msg = res.sizeMB ? `已复制 (${res.sizeMB}MB)` : `已复制 ${res.type === 'file' ? '文件' : '路径'}`;
                         this._showStatus(msg);
                     } else {
                         this._showStatus('复制失败');

@@ -116,7 +116,6 @@ test('canConnect: 端口不存在被拒', () => {
 });
 
 test('canConnect: 普通图片 source 端口允许多条参考连线', () => {
-    const a = media('a', 'a.png');
     const b = media('b', 'b.png');
     const target = media('target', 'target.png');
     const existing = [conn('a', 'out', 'target', 'source')];
@@ -323,7 +322,6 @@ test('collectInputContext: 保留连接 ID、来源节点、素材尺寸和原�
 });
 
 test('canConnect: multi 端口允许多条连线，不触发替换', () => {
-    const a = media('a', 'a.png');
     const b = media('b', 'b.png');
     const gen = op('gen', 'image');
     const existing = [conn('a', 'out', 'gen', 'source')];

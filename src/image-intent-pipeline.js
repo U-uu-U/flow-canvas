@@ -83,7 +83,7 @@ export function buildReferenceContext({
     const references = asList(sourceReferences).map((reference, uploadIndex) => {
         const filePath = String(reference?.filePath || reference || '').trim();
         const normalized = normalizePath(filePath);
-        let candidateIndex = candidates.findIndex((candidate, index) =>
+        const candidateIndex = candidates.findIndex((candidate, index) =>
             !usedCandidateIndexes.has(index) && normalizePath(candidate.filePath) === normalized
         );
         if (candidateIndex >= 0) usedCandidateIndexes.add(candidateIndex);

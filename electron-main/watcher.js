@@ -77,7 +77,7 @@ class Watcher {
         }
 
         const watcher = chokidar.watch(folderPath, {
-            ignored: /(^|[\/\\])\../,
+            ignored: /(^|[/\\])\../,
             persistent: true,
             ignoreInitial: true,
             depth: WATCH_DEPTH,

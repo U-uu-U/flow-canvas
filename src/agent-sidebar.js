@@ -42,7 +42,6 @@ import {
 } from './agent-runtime-view.js';
 import { createBoardToolRegistry } from './board-tool-registry.js';
 import {
-    AGENT_SKILL_CATEGORY_IDS,
     CUSTOM_AGENT_SKILL_LIMIT,
     createCustomAgentSkill,
     normalizeCustomAgentSkills,
@@ -104,7 +103,6 @@ const RAVENHASH_IMAGE_SIZES = [
 ];
 
 const VIDEO_REFERENCE_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
-const VIDEO_REFERENCE_LABELS = Object.freeze({ image: '图片', video: '视频', audio: '音频' });
 const VIDEO_REFERENCE_LARGE_TOTAL_BYTES = 10 * 1024 * 1024;
 const IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES = 6 * 1024 * 1024;
 const IMAGE_REFERENCE_MANUAL_BUDGET_BYTES = 2 * 1024 * 1024;
@@ -3112,9 +3110,9 @@ export class AgentSidebar {
             const title = this.videoModelEmpty.querySelector('strong');
             const detail = this.videoModelEmpty.querySelector('span');
             if (title) title.textContent = keyword ? '没有匹配的视频模型' : '没有可用的视频模型';
-            if (detail) detail.textContent = keyword
+            if (detail) {detail.textContent = keyword
                 ? '换一个关键词，或到设置中检查模型名称。'
-                : '请先在设置中添加 API，并填写视频模型名称。';
+                : '请先在设置中添加 API，并填写视频模型名称。';}
             return;
         }
 

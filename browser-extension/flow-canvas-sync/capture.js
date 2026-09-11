@@ -24,7 +24,7 @@ let context = null;
 let page = null;
 let assets = [];
 let selected = new Set();
-let selectedCategories = new Set();
+const selectedCategories = new Set();
 
 function request(message) {
   return chrome.runtime.sendMessage(message);

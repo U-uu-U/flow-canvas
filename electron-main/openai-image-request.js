@@ -24,11 +24,6 @@ function collectImageEditInputs(sourceReferences = []) {
     });
 }
 
-function isGptImage2Model(model) {
-    const normalized = String(model || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
-    return normalized === 'gptimage2';
-}
-
 function buildOpenAiImageRequestBody({ model, prompt, size, n = 1, responseFormat = 'b64_json', options = {} } = {}) {
     const stream = options.stream === true;
     const body = {
@@ -415,7 +410,7 @@ function getGeneratedImageDataList(payload = {}) {
         if (value == null || depth > 8) return;
         if (typeof value === 'string') {
             const source = value.trim();
-            if (/^[\[{]/.test(source)) {
+            if (/^[[{]/.test(source)) {
                 try {
                     visit(JSON.parse(source), depth + 1, allowPlainString);
                     return;
@@ -570,13 +565,6 @@ function midjourneyAspectRatio(size = '') {
     if (!width || !height) return '';
     const divisor = greatestCommonDivisor(width, height);
     return `${width / divisor}:${height / divisor}`;
-}
-
-function appendMidjourneyAspectRatio(prompt, size = '') {
-    const value = String(prompt || '').trim();
-    if (!value || /(?:^|\s)--(?:ar|aspect)(?:\s|=)/i.test(value)) return value;
-    const ratio = midjourneyAspectRatio(size);
-    return ratio ? `${value} --ar ${ratio}` : value;
 }
 
 function hasMidjourneyParameter(prompt, names) {

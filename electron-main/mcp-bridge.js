@@ -1719,16 +1719,6 @@ function normalizeSourceReference(reference, data) {
     };
 }
 
-function toRowReference(reference) {
-    return {
-        itemId: reference.itemId || '',
-        filePath: reference.filePath,
-        name: reference.name || path.basename(reference.filePath),
-        kind: reference.kind || 'source',
-        referenceId: reference.referenceId || null
-    };
-}
-
 function dedupeRowReferences(references) {
     const seen = new Set();
     return references.filter(reference => {
@@ -3188,7 +3178,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         const providerConfig = options.providerConfig || {};
         const apiKey = String(providerConfig.apiKey || process.env.FLOW_CANVAS_VIDEO_API_KEY || '').trim();
         const model = String(providerConfig.model || options.model || process.env.FLOW_CANVAS_VIDEO_MODEL || 'doubao-seedance-2-0').trim();
-        let endpoint = buildVideoGenerationEndpoint(
+        const endpoint = buildVideoGenerationEndpoint(
             providerConfig.endpoint || process.env.FLOW_CANVAS_VIDEO_ENDPOINT,
             model
         );

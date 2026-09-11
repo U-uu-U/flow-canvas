@@ -649,15 +649,6 @@ function normalizeSourceReference(reference) {
     };
 }
 
-function toRowReference(reference) {
-    return {
-        itemId: reference.itemId || '',
-        filePath: reference.filePath,
-        name: reference.name || path.basename(reference.filePath),
-        kind: reference.kind || 'source'
-    };
-}
-
 function dedupeReferences(references) {
     const seen = new Set();
     return references.filter(reference => {

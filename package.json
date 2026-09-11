@@ -6,12 +6,16 @@
     "scripts": {
         "dev": "vite",
         "test": "node scripts/run-tests.cjs",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "check": "npm run lint && npm test && npm run build",
         "sync:prompt-pack": "node scripts/sync-awesome-prompt-pack.mjs",
         "build": "vite build",
         "mcp": "node mcp/flow-canvas-mcp.mjs",
         "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",
         "electron:build": "vite build && electron-builder",
         "electron:build:mac": "vite build && electron-builder --mac",
+        "electron:build:win": "vite build && electron-builder --win",
         "test:agent:smoke": "node scripts/agent-smoke.cjs"
     },
     "dependencies": {
@@ -26,6 +30,8 @@
         "concurrently": "^8.2.2",
         "electron": "^28.3.3",
         "electron-builder": "^26.0.12",
+        "eslint": "^9.39.4",
+        "globals": "^15.15.0",
         "vite": "^5.4.0",
         "wait-on": "^7.2.0"
     },

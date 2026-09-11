@@ -1,5 +1,4 @@
 const { app, safeStorage } = require('electron');
-const path = require('node:path');
 const { ApiConfigStore } = require('../electron-main/api-config-store');
 const profile = process.env.FLOW_MCP_SMOKE_PROFILE;
 if (!profile) throw new Error('Isolated smoke profile required');

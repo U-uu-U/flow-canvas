@@ -1,0 +1,96 @@
+name: Build Windows
+
+# 仓库此前只有 macOS 工作流，Windows 安装包靠本地 `npm run electron:build` 手工构建，
+# 因此没有任何自动化验证能回答"这次改动还能不能打出 Windows 包"。
+#
+# 本工作流只做**构建验证**：确认 Windows 目标能构建成功。按团队约定，
+# 不上传产物、不自动发布 release（发布仍由同事在本地构建后人工上传）。
+#
+# 触发方式与 macOS 一致：tag 推送 / 手动触发。
+# 日常门禁（lint + 单元测试）由 lint-test.yml 在 ubuntu 上负责，不在此重复。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      # 与 build-macos.yml 保持一致：统一走官方源并替换镜像主机，
+      # 避免依赖 .npmrc 里已废弃的 electron_mirror 配置项。
+      ELECTRON_MIRROR: "https://github.com/electron/electron/releases/download/"
+      npm_config_electron_mirror: "https://github.com/electron/electron/releases/download/"
+      npm_config_registry: "https://registry.npmjs.org"
+      npm_config_replace_registry_host: "registry.npmmirror.com"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Cache Electron packaging downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: windows-electron-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            windows-electron-${{ runner.arch }}-
+
+      # tag 推送时先断言 tag 与 package.json 版本一致，避免打错版本号后才发现
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if ("v$($pkg.version)" -ne $env:RELEASE_TAG) {
+            Write-Error "tag $env:RELEASE_TAG 与 package.json 版本 $($pkg.version) 不一致"
+            exit 1
+          }
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+
+      - name: Test
+        run: npm test
+
+      # nsis + portable（见 package.json 的 build.win.target）
+      - name: Package Windows app
+        run: npx electron-builder --win --publish never
+
+      # 不做"打包后启动"冒烟：团队约定 Windows 产物的人工验证在本地进行。
+      # 这里只确认产物确实生成，避免 electron-builder 静默跳过某个目标。
+      - name: Verify artifacts exist
+        shell: pwsh
+        run: |
+          Get-ChildItem release -Filter *.exe -ErrorAction SilentlyContinue |
+            Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
+
+          $installer = Get-ChildItem release -Filter 'Flow.Canvas.Setup.*.exe' -ErrorAction SilentlyContinue
+          $portable  = Get-ChildItem release -Filter 'Flow.Canvas.*.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike 'Flow.Canvas.Setup.*' }
+
+          $missing = @()
+          if (-not $installer) { $missing += 'nsis 安装版 (Flow.Canvas.Setup.*.exe)' }
+          if (-not $portable)  { $missing += 'portable 便携版 (Flow.Canvas.*.exe)' }
+          if ($missing.Count -gt 0) {
+            Write-Error "缺少预期产物: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "产物齐全：$($installer.Name -join ', ') / $($portable.Name -join ', ')"

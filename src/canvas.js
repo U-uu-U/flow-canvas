@@ -3,7 +3,7 @@
 // ============================================================
 
 import Konva from 'konva';
-import { GraphView, viewportFixedScale } from './graph-view.js';
+import { GraphView } from './graph-view.js';
 import { collectUpstreamMediaAttachments, collectUpstreamPromptContext } from './agent-attachments.js';
 import { NODE_TYPES } from './node-types.js';
 import { nodeIconSvg } from './node-icons.js';
@@ -1105,11 +1105,11 @@ export class CanvasManager {
         const entries = [];
         this.items.forEach(entry => {
             const rect = this._getEntryCanvasRect(entry);
-            if (rect) entries.push({
+            if (rect) {entries.push({
                 ...rect,
                 kind: entry.data?.kind === 'op' ? entry.data.nodeType : this._getItemMediaType(entry.data),
                 selected: this.selectedItems.has(entry.data.id)
-            });
+            });}
         });
         this.plans.forEach(entry => {
             const rect = this._getEntryCanvasRect(entry);
@@ -3656,10 +3656,10 @@ export class CanvasManager {
         const movedNode = movedGroup.findOne('.displayNode') || movedGroup.findOne('.fallbackBg');
         if (!movedNode) return;
 
-        let mx = movedGroup.x();
-        let my = movedGroup.y();
-        let mw = movedNode.width();
-        let mh = movedNode.height();
+        const mx = movedGroup.x();
+        const my = movedGroup.y();
+        const mw = movedNode.width();
+        const mh = movedNode.height();
 
         let snappedX = mx;
         let snappedY = my;
@@ -3668,7 +3668,7 @@ export class CanvasManager {
         let snapped = false;
         let bestDist = SNAP_DIST;
 
-        for (let [itemId, item] of [...this.items.entries(), ...this.plans.entries()]) {
+        for (const item of [...this.items.values(), ...this.plans.values()]) {
             if (item.group === movedGroup) continue;
 
             const targetNode = item.group.findOne('.displayNode') || item.group.findOne('.fallbackBg') || item.group.findOne('.planHitArea');
@@ -4996,7 +4996,6 @@ export class CanvasManager {
         });
         group.on('mouseleave', () => {
             document.body.style.cursor = 'default';
-            const item = this.items.get(data.id);
             if (this._hoveredMediaItemId === data.id) this._setHoveredMediaItem(null);
             if (this._activePlanReferencePick) {
                 this._setItemReferenceHighlight(data.id, false);
@@ -10914,8 +10913,6 @@ export class CanvasManager {
             const anchorY = y + rowHeight / 2;
             const sourceReferences = this._getSourcePlanRowReferences(row);
             const outputReferences = this._getOutputPlanRowReferences(row);
-            const references = [...sourceReferences, ...outputReferences];
-            const isLinked = references.length > 0;
             const isRowActive = this._isPlanRowActive(plan.id, row.id);
             const shouldShowSourceLines = this._shouldShowPlanSourceConnections(plan.id, row.id, row);
             sourceReferences.forEach((reference, index) => {
@@ -15029,8 +15026,9 @@ export class CanvasManager {
     _loadVideo(item, token) {
         const group = item.group;
         const data = item.data;
+        // 注意：VIDEO_W 在下方 loadeddata 回调里被引用（闭包），
+        // 静态分析可能看不到，不要误删。
         const VIDEO_W = IMAGE_DEFAULT_WIDTH;
-        const VIDEO_H = VIDEO_W * 9 / 16; // 默认 16:9
 
         // 创建一个隐藏的 HTML video 元素
         const video = document.createElement('video');
@@ -15422,7 +15420,7 @@ export class CanvasManager {
     _findItemByFilePath(filePath) {
         const targetPath = normalizePathForCompare(resolveCanvasFilePath(filePath));
         if (!targetPath) return null;
-        for (let [id, item] of this.items.entries()) {
+        for (const item of this.items.values()) {
             if (normalizePathForCompare(resolveCanvasFilePath(item.data.filePath)) === targetPath) return item;
             if (item.data.kind === 'op' && getGeneratorResultEntries(item.data).some(result =>
                 normalizePathForCompare(resolveCanvasFilePath(result.filePath)) === targetPath
@@ -15714,7 +15712,7 @@ export class CanvasManager {
         const targetItems = this._getTargetItems();
         if (targetItems.length === 0) return;
 
-        let layoutItems = [];
+        const layoutItems = [];
         targetItems.forEach(item => {
             const node = item.group.findOne('.displayNode') || item.group.findOne('.fallbackIcon') || item.group.findOne('.planHitArea');
             const w = node ? Math.max(1, node.width()) : DOC_DEFAULT_SIZE;

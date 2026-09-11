@@ -1,6 +1,5 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { AgentRuntime } = require('./agent-runtime.cjs');
 const { AgentRunStore, redact } = require('./agent-run-store.cjs');
 const { AgentMedia } = require('./agent-media.cjs');
@@ -15,8 +14,8 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         if (window && !window.isDestroyed()) window.webContents.send('mcp:store-updated', payload);
     };
     const board = new AgentBoardService({ store, onChange: change => {
-        if (change.type !== 'mergeRendererSave') setImmediate(() => notify({ event: 'agent:board-updated',
-            projectIds: change.projectIds, data: store.load() }));
+        if (change.type !== 'mergeRendererSave') {setImmediate(() => notify({ event: 'agent:board-updated',
+            projectIds: change.projectIds, data: store.load() }));}
     } });
     const generation = new AgentGeneration({ board, bridge, loadConfig: () => apiConfigStore.load().config || {}, fallbackDir: getSaveDir() });
     const { installGenerationRecoveryBoard } = await import('./generation-recovery-board.mjs');
@@ -58,21 +57,21 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         listModels: () => generation.listModels(), readMedia: (...args) => media.read(...args),
         prepareGraph: (...args) => generation.prepare(...args), executeStep: (...args) => generation.execute(...args),
         onEvent: event => {
-            if (!/delta|token/i.test(event.type)) require('./diagnostics.cjs').diagnostic(
+            if (!/delta|token/i.test(event.type)) {require('./diagnostics.cjs').diagnostic(
                 event.data?.error ? 'error' : 'info', 'agent.event', {
                     runId: event.runId, projectId: event.projectId, conversationId: event.conversationId,
                     type: event.type, stepId: event.data?.stepId, status: event.data?.status,
                     toolName: event.data?.tool || event.data?.toolName, error: event.data?.error,
                     usage: event.type === 'usage' ? event.data : undefined
-                });
+                });}
             const window = getMainWindow();
             if (window && !window.isDestroyed()) window.webContents.send('agent:event', event);
             if (event.type === 'status' && ['failed', 'partial_failed', 'canceled'].includes(event.data.status)) {
                 void board.updateProject(event.projectId, project => {
-                    for (const node of project.items) if (node.metadata?.agentRunId === event.runId && node.runStatus === 'running') {
+                    for (const node of project.items) {if (node.metadata?.agentRunId === event.runId && node.runStatus === 'running') {
                         node.runStatus = event.data.status === 'canceled' ? 'canceled' : 'error';
                         node.runError = event.data.error || '任务已取消';
-                    }
+                    }}
                 }).catch(() => {});
             }
         }
@@ -122,8 +121,8 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
             if (!['start', 'get', 'list', 'cancel', 'resume', 'revise', 'retry'].includes(action)) throw new Error('Unknown runtime action');
             return runtime[action]({ ...input, projectId, conversationId: input.conversationId || 'external-harness' });
         }
-        if (['flow_canvas.graph.run', 'flow_canvas.memory.propose'].includes(name)) return runtime.propose({ projectId,
-            conversationId: 'external-harness', toolName: name, input });
+        if (['flow_canvas.graph.run', 'flow_canvas.memory.propose'].includes(name)) {return runtime.propose({ projectId,
+            conversationId: 'external-harness', toolName: name, input });}
         const context = { id: 'external-read', projectId, attachments: [], external: true };
         const result = await runtime.executeTool(context, name, input);
         if (name === 'flow_canvas.asset.read') {

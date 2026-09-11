@@ -1,0 +1,80 @@
+name: Lint & Test
+
+# 这是日常门禁：仓库此前 596 个测试只在打 tag 时才跑，PR 与日常提交完全没有校验。
+# 放在 ubuntu 上跑，反馈最快、不占用 macOS/Windows runner 额度；
+# 平台相关的打包验证仍由 build-macos.yml / build-windows.yml 负责。
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+# 同一分支的旧运行自动取消，避免连续 push 排队堆积
+concurrency:
+  group: lint-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      # 基线为 0 error / 0 warning。任何新增问题都会让这一步失败——
+      # 这是有意的：ESLint 配置已按本仓库既有约定分诊过（见 eslint.config.mjs 注释），
+      # 不存在"历史遗留一大堆、只能忽略"的情况。
+      - name: ESLint
+        run: npm run lint -- --max-warnings 0
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      - name: Run tests
+        run: npm test
+
+  build:
+    name: Build renderer
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      # 只构建渲染层（vite build）。它能抓到"改了 import 但模块不存在"
+      # 这类只在构建期暴露的问题——而单元测试跑的是源码树，发现不了。
+      - name: Vite build
+        run: npm run build

@@ -59,7 +59,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         assert.deepEqual(await pills.allTextContents(), ['图一', '图二']);
         assert.equal(await page.locator('.generation-composer-reference.citable').count(), 2);
         await page.evaluate(() => {
-            const { fixture, prompt } = window.citationFixture;
+            const { prompt } = window.citationFixture;
             const range = document.createRange();
             range.setStart(prompt.firstChild, 2);
             range.collapse(true);
