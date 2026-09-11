@@ -14,6 +14,7 @@ const BrowserSyncService = require('./browser-sync');
 const { handleLocalResourceRequest } = require('./local-resource');
 const { saveGenerationTrace } = require('./generation-trace-store');
 const { ApiConfigStore } = require('./api-config-store');
+const { fetchModelConfig } = require('./model-config-service.cjs');
 const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 
 const IS_MAC = process.platform === 'darwin';
@@ -1364,6 +1365,15 @@ ipcMain.handle('folder:select', async () => {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
+});
+
+ipcMain.handle('model-config:fetch', async (_, payload) => {
+    try {
+        return await fetchModelConfig({ url: payload?.url, fetchImpl: (url, init) => net.fetch(url, init) });
+    } catch (error) {
+        console.error('[ModelConfig] 拉取模型配置失败:', error);
+        return { success: false, error: error?.message || String(error) };
+    }
 });
 
 ipcMain.handle('ai:fetchModels', async (_, config) => {

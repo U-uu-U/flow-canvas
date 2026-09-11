@@ -2,6 +2,8 @@ import { CanvasManager } from './canvas.js';
 import './mcp-client-settings.js';
 import './diagnostics-settings.js';
 import './generation-recovery.css';
+import './model-config-settings.css';
+import { initModelConfigUi } from './model-config-ui.js';
 import { SidebarManager } from './sidebar.js';
 import { ContextMenu } from './context-menu.js';
 import { AgentSidebar } from './agent-sidebar.js';
@@ -49,6 +51,9 @@ async function bootstrap() {
 
         // 1. 加载数据
         storeData = await window.flowCanvas.store.load();
+        // 模型能力 CONFIG：内置默认立刻可用，随后按 1 小时周期从服务器静默更新。
+        // 不 await：拉取失败或网络慢都不能拖住启动，UI 先用内置/缓存配置渲染。
+        initModelConfigUi();
         storeData.items = (Array.isArray(storeData.items) ? storeData.items : [])
             .filter(item => item?.kind !== 'generation');
         delete storeData.generationNodes;

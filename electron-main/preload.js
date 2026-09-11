@@ -129,6 +129,11 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         getBoardUsage: () => ipcRenderer.invoke('metrics:getBoardUsage'),
     },
 
+    // 模型能力 CONFIG：渲染层不直接发请求，拉取与 schema 校验都在主进程完成。
+    modelConfig: {
+        fetch: (payload) => ipcRenderer.invoke('model-config:fetch', payload),
+    },
+
     // 网页图片摘取
     ai: {
         fetchModels: (config) => ipcRenderer.invoke('ai:fetchModels', config),

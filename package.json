@@ -10,13 +10,17 @@
         "lint:fix": "eslint . --fix",
         "check": "npm run lint && npm test && npm run build",
         "sync:prompt-pack": "node scripts/sync-awesome-prompt-pack.mjs",
+        "sync:model-config": "node scripts/sync-model-config.mjs --write",
+        "check:model-config": "node scripts/sync-model-config.mjs",
+        "pack:configserver": "node scripts/pack-configserver.mjs",
         "build": "vite build",
         "mcp": "node mcp/flow-canvas-mcp.mjs",
         "electron:dev": "concurrently \"vite --host 127.0.0.1 --port 15321\" \"wait-on http://127.0.0.1:15321 && electron .\"",
         "electron:build": "vite build && electron-builder",
         "electron:build:mac": "vite build && electron-builder --mac",
         "electron:build:win": "vite build && electron-builder --win",
-        "test:agent:smoke": "node scripts/agent-smoke.cjs"
+        "test:agent:smoke": "node scripts/agent-smoke.cjs",
+        "test:model-config:smoke": "electron scripts/model-config-smoke.cjs"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.30.0",

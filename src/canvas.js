@@ -63,6 +63,7 @@ import {
     hasGenerationRecord
 } from './generation-record.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
+import { checkModelRequest } from './model-config-ui.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
     composePromptFromTemplate,
@@ -10209,6 +10210,18 @@ export class CanvasManager {
         }
         if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
 
+        // CONFIG 前置校验：模型能力表判定「一定不行」的参数在提交前拦下，
+        // 避免把请求打到上游才失败（例如线路固定 30 秒、比例不在白名单、提示词超长）。
+        const guard = this._guardNodeModelConfig(data);
+        if (guard.errors.length) {
+            message.textContent = `当前模型参数不被支持：${guard.errors.map(item => item.message).join('；')}`;
+            message.dataset.state = 'error';
+            return;
+        }
+        if (guard.matched && guard.warnings.length) {
+            this._showCanvasStatus(guard.warnings.map(item => item.message).join('；'), 2600);
+        }
+
         if (data.nodeType === 'image'
             && this.options.getImageIntentPipelineMode?.() !== 'off'
             && typeof this.options.generateImageThroughAgent === 'function') {
@@ -10234,6 +10247,42 @@ export class CanvasManager {
         this._syncGenerationComposerStatus(nodeId, '正在提交生成任务…');
         await this.runFromNode(nodeId);
         this._syncGenerationComposerStatus(nodeId);
+    }
+
+    // CONFIG 前置校验：把模型能力表里「一定不行」的节点参数挑出来。
+    // 只报错误用于拦截；未收录模型 / 边界未知只作为提示，绝不阻止生成。
+    _guardNodeModelConfig(data) {
+        const config = data?.config || {};
+        const kind = data?.nodeType === 'video' ? 'video' : 'image';
+        const provider = (kind === 'video'
+            ? this.options.getVideoProvider?.(config)
+            : this.options.getImageProvider?.(config)) || {
+            model: config.model,
+            endpoint: config.endpoint,
+            name: config.providerName
+        };
+        const fields = kind === 'video'
+            ? { resolutionTier: config.resolution, ratio: config.ratio, duration: config.duration }
+            : {
+                resolutionTier: config.resolutionTier
+                    || (config.width && config.height ? `${config.width}x${config.height}` : undefined),
+                quality: config.quality
+            };
+        const features = kind === 'video'
+            ? {
+                cameraFixed: config.cameraFixed === true,
+                generateAudio: config.generateAudio === true,
+                webSearch: config.webSearch === true,
+                watermark: config.watermark === true
+            }
+            : {};
+        return checkModelRequest({
+            provider: { ...provider, kind },
+            kind,
+            fields,
+            features,
+            prompt: config.prompt || ''
+        });
     }
 
     _syncGenerationComposerStatus(nodeId, pendingMessage = '') {

@@ -36,6 +36,15 @@ import { reconcileApiConfig } from './api-config-recovery.js';
 import { CANCELED_IMAGE_REFERENCES } from './node-types.js';
 import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
 import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import { modelConfigStore } from './model-config.js';
+import {
+    mergeImageProfile,
+    mergeVideoProfile,
+    resolveModelConfigEntry,
+    toImageProfileOverrides,
+    toVideoProfileOverrides
+} from './model-config-capabilities.js';
+import { checkModelRequest, renderModelCapabilityPanel } from './model-config-ui.js';
 import {
     AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
     settleRuntimeConversation, formatAgentElapsed
@@ -251,6 +260,8 @@ export class AgentSidebar {
         this.textModelSelectEl = document.getElementById('agentTextModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
+        this.imageModelCapabilities = document.getElementById('imageModelCapabilities');
+        this.videoModelCapabilities = document.getElementById('videoModelCapabilities');
         this.modeTitle = document.getElementById('creationModeTitle');
         this.conversationMenuBtn = document.getElementById('agentConversationMenuBtn');
         this.conversationTitleBtn = document.getElementById('agentConversationTitleBtn');
@@ -443,6 +454,8 @@ export class AgentSidebar {
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
         this._pollBrowserSyncEvents();
         this.browserSyncTimer = setInterval(() => this._pollBrowserSyncEvents(), 4000);
+        // CONFIG 变化（首次拉取成功 / 手动刷新 / 恢复默认）后重画能力面板。
+        modelConfigStore.subscribe(() => this._refreshModelCapabilityPanels());
         this.options.subscribeCanvasSelection?.((entries) => {
             this.lastCanvasSelection = Array.isArray(entries) ? entries : [];
         });
@@ -3497,6 +3510,7 @@ export class AgentSidebar {
             }
             if (this.imageHistoryDisabled) this.imageHistoryDisabled.checked = this.imageHistoryDisabled.checked !== false;
         }
+        renderModelCapabilityPanel(this.imageModelCapabilities, provider || {}, 'image');
     }
 
     _getImageModelSizes(provider = this._getImageProvider()) {
@@ -3809,6 +3823,7 @@ export class AgentSidebar {
             }
             this._renderVideoRatios(DEFAULT_VIDEO_MODEL_PROFILE);
             this._renderVideoDuration(DEFAULT_VIDEO_MODEL_PROFILE);
+            renderModelCapabilityPanel(this.videoModelCapabilities, provider || {}, 'video');
             return;
         }
 
@@ -3836,6 +3851,8 @@ export class AgentSidebar {
             }
             this.videoWebSearch.dataset.modelKey = webSearchModelKey;
         }
+        // 「能做什么 / 不能做什么 / 参数限制」——直接来自 CONFIG，和上面的控件裁剪同一份数据。
+        renderModelCapabilityPanel(this.videoModelCapabilities, provider || {}, 'video');
     }
 
     _setWorkspaceMessage(element, type, message) {
@@ -4858,6 +4875,31 @@ export class AgentSidebar {
             videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
             audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
         };
+        // CONFIG 前置校验：把上游一定会拒绝的参数在提交前拦下来（未收录模型只提示不拦截）。
+        const modelCheck = this._checkModelRequestOrReport({
+            kind: 'video',
+            provider,
+            prompt,
+            fields: {
+                duration: videoParams.duration,
+                ratio: this.videoRatioSelect?.value === 'adaptive' ? 'adaptive' : ratio,
+                resolutionTier: videoParams.resolution
+            },
+            features: {
+                cameraFixed: videoParams.cameraFixed,
+                generateAudio: videoParams.generateAudio,
+                webSearch: videoParams.webSearch === true,
+                watermark: videoParams.watermark
+            },
+            references: {
+                image: { count: imageReferences.length },
+                video: { count: videoReferences.length },
+                audio: { count: audioReferences.length }
+            },
+            messageElement: this.videoGenerateMessage
+        });
+        if (modelCheck.blocked) return;
+
         const generationTask = this._createGenerationTask(
             'video',
             provider,
@@ -5161,6 +5203,18 @@ export class AgentSidebar {
             }
         }
         const sourcePaths = sourceReferences.map(reference => reference.filePath).filter(Boolean);
+
+        // CONFIG 前置校验：档位/质量/参考图数量在提交前拦下（未收录模型只提示不拦截）。
+        const modelCheck = this._checkModelRequestOrReport({
+            kind: 'image',
+            provider,
+            prompt,
+            fields: { resolutionTier: size || undefined, quality },
+            references: { image: { count: sourceReferences.length } },
+            messageElement: this.imageGenerateMessage
+        });
+        if (modelCheck.blocked) return;
+
         const generationTask = this._createGenerationTask('image', provider, prompt, {
             size: size || null,
             quality,
@@ -5697,11 +5751,14 @@ export class AgentSidebar {
             const match = /^(\d+)x(\d+)$/i.exec(String(size.value || ''));
             return match ? inferImageResolutionTier(Number(match[1]), Number(match[2])) : null;
         }).filter(Boolean));
-        return {
+        const base = {
             sizes,
             resolutionTiers: IMAGE_RESOLUTION_TIERS.filter(tier => availableTiers.has(tier)),
             defaultResolutionTier: availableTiers.has('1K') ? '1K' : ([...availableTiers][0] || '1K')
         };
+        // CONFIG 提供档位时以 CONFIG 为准（例如 mj_imagine 只有 1K/2K），未收录的模型保持原行为。
+        const resolution = resolveModelConfigEntry(modelConfigStore.getConfig(), { ...provider, kind: 'image' });
+        return mergeImageProfile(base, toImageProfileOverrides(modelConfigStore.getConfig(), resolution.entry));
     }
 
     getVideoProviderConfig(binding = null) {
@@ -5714,13 +5771,44 @@ export class AgentSidebar {
         const profile = this._getVideoModelProfile(provider);
         if (!profile) return null;
         const { match, ...plainProfile } = profile;
-        return {
+        const base = {
             ...plainProfile,
             ratios: [...(plainProfile.ratios || [])],
             resolutions: [...(plainProfile.resolutions || [])],
             durations: [...(plainProfile.durations || [])],
             referenceLimits: { ...VIDEO_REFERENCE_LIMITS, ...(plainProfile.referenceLimits || {}) }
         };
+        // CONFIG 接管能力与限制，线路元数据（routeLabel/routeGroup/price）仍由代码维护：
+        // 这样既让所有既有裁剪逻辑（控件隐藏、非法值回落、超额连线断开）自动跟随 CONFIG，
+        // 又不会破坏 Seedance 线路拆分与价格标签。
+        const resolution = resolveModelConfigEntry(modelConfigStore.getConfig(), { ...provider, kind: 'video' });
+        return mergeVideoProfile(base, toVideoProfileOverrides(modelConfigStore.getConfig(), resolution.entry));
+    }
+
+    // 提交前校验：把上游一定会拒绝的参数在 UI 层拦下来。返回 null 表示通过。
+    _checkModelRequestOrReport({ kind, provider, fields = {}, features = {}, references = {}, prompt = '', messageElement = null }) {
+        const result = checkModelRequest({ provider, kind, fields, features, references, prompt });
+        if (result.errors.length) {
+            const message = `当前模型参数不被支持：${result.errors.map(item => item.message).join('；')}`;
+            if (messageElement) this._setWorkspaceMessage(messageElement, 'error', message);
+            return { ...result, message, blocked: true };
+        }
+        // 未收录模型 / 边界未知等提示只在工作区内联展示，不阻塞生成。
+        if (result.warnings.length) {
+            const message = result.warnings.map(item => item.message).join('；');
+            if (messageElement) this._setWorkspaceMessage(messageElement, '', message);
+            return { ...result, message, blocked: false, warned: true };
+        }
+        return { ...result, message: '', blocked: false };
+    }
+
+    _refreshModelCapabilityPanels() {
+        if (this.videoModelCapabilities) {
+            renderModelCapabilityPanel(this.videoModelCapabilities, this._getVideoProvider() || {}, 'video');
+        }
+        if (this.imageModelCapabilities) {
+            renderModelCapabilityPanel(this.imageModelCapabilities, this._getImageProvider() || {}, 'image');
+        }
     }
 
     getClassificationProviderConfig() {
