@@ -4,6 +4,8 @@ Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作
 
 当前稳定版本：`v1.3.0`
 
+最新测试版本：[`v1.5.0-beta.8`](https://github.com/U-uu-U/flow-canvas/releases/tag/v1.5.0-beta.8)，提供 Windows 安装版 / 便携版和 macOS 通用 DMG。详见[本版更新内容](docs/releases/v1.5.0-beta.8.md)。
+
 ## v1.3.0 更新内容
 
 - 重构图片生成节点交互：从画布素材直接打开紧凑生成面板，支持文本与参考素材连线、生成数量和节点参数联动。
