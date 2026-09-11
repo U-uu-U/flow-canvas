@@ -9117,7 +9117,8 @@ export class CanvasManager {
             provider.id === data.config?.providerId
             || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model)
         );
-        label.textContent = selected?.model || data.config?.model || (providers.length ? '选择模型' : '请先添加 API');
+        label.textContent = [selected?.routeLabel, selected?.model || data.config?.model].filter(Boolean).join(' · ')
+            || (providers.length ? '选择模型' : '请先添加 API');
         button.title = selected
             ? `${selected.name || '未命名 API'} · ${selected.model || '未命名模型'}`
             : (providers.length ? '选择 API 和模型' : '请先在设置中添加 API');
@@ -9183,11 +9184,31 @@ export class CanvasManager {
         `;
         const search = popover.querySelector('input');
         const list = popover.querySelector('.generation-composer-model-options');
+        let selectedRoute = '';
+        const routes = [...new Set(providers.map(provider => provider.routeLabel).filter(Boolean))].sort();
+        const routePicker = document.createElement('div');
+        routePicker.className = 'generation-composer-segmented';
+        routePicker.setAttribute('aria-label', '选择视频路线');
+        if (routes.length) {
+            for (const route of ['', ...routes]) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = route || '全部';
+                button.dataset.route = route;
+                button.addEventListener('click', () => { selectedRoute = route; render(); });
+                routePicker.appendChild(button);
+            }
+            list.before(routePicker);
+        }
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            const matches = providers.filter(provider =>
-                !query || `${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)
-            );
+            routePicker.querySelectorAll('button').forEach(button => {
+                const selected = button.dataset.route === selectedRoute;
+                button.classList.toggle('selected', selected);
+                button.setAttribute('aria-pressed', String(selected));
+            });
+            const matches = providers.filter(provider => (!selectedRoute || provider.routeLabel === selectedRoute)
+                && (!query || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
                 const empty = document.createElement('div');
@@ -9209,7 +9230,7 @@ export class CanvasManager {
                 button.setAttribute('aria-selected', String(selected));
                 const copy = document.createElement('span');
                 const model = document.createElement('strong');
-                model.textContent = provider.model || '未命名模型';
+                model.textContent = [provider.routeLabel, provider.model || '未命名模型'].filter(Boolean).join(' · ');
                 const source = document.createElement('small');
                 source.textContent = provider.name || '未命名 API';
                 copy.append(model, source);

@@ -1234,6 +1234,7 @@ export class AgentSidebar {
             name.textContent = provider.model || provider.name || '未命名模型';
             const meta = document.createElement('small');
             const videoProfile = kind === 'video' ? this._getVideoModelProfile(provider) : null;
+            if (videoProfile?.routeLabel) name.textContent = `${videoProfile.routeLabel} · ${provider.model}`;
             meta.textContent = kind === 'video'
                 ? [provider.name || '未命名 API', formatVideoModelProfile(videoProfile)].filter(Boolean).join(' · ')
                 : (provider.name || '未命名 API');
@@ -3127,6 +3128,7 @@ export class AgentSidebar {
             copy.className = 'video-model-option-copy';
             const model = document.createElement('strong');
             model.textContent = provider.model || provider.name || '未命名模型';
+            if (profile?.routeLabel) model.textContent = `${profile.routeLabel} · ${provider.model}`;
             const meta = document.createElement('small');
             meta.textContent = [
                 provider.name || '未命名 API',
@@ -5500,6 +5502,7 @@ export class AgentSidebar {
                 id: provider.id,
                 sourceProviderId: provider.sourceProviderId || provider.id,
                 name: provider.name || '未命名 API',
+                routeLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.routeLabel || '' : '',
                 model: provider.model || ''
             }));
     }

@@ -4,6 +4,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+test('Seedance route alias retains fixed duration while preserving the relay model ID', () => {
+    const { buildSeedance25RequestBody, seedance25ReferenceImageLimit } = require('./video-provider-adapters');
+    const body = buildSeedance25RequestBody({ model: 'sd2.5-route1', prompt: 'test', duration: 30 });
+    assert.equal(body.model, 'sd2.5-route1');
+    assert.equal(body.seconds, 30);
+    assert.equal(body.resolution, '720p');
+    assert.equal(seedance25ReferenceImageLimit('sd2.5-route1'), 9);
+    assert.throws(() => buildSeedance25RequestBody({ model: 'sd2.5-route1', prompt: 'test', duration: 10 }), /30/);
+});
+
 const {
     appendMidjourneyParameters,
     buildMidjourneyCompatibilityPrompt,

@@ -1,8 +1,8 @@
 export const VIDEO_MODEL_PROFILES = [
     {
-        matchModel: /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i,
+        matchModel: /^sd2(?:\.5|_5|-5)(?:-route[12]|-haidiyue-face)?$/i,
         label: 'Seedance 2.5',
-        routeLabel: '备用路线',
+        routeLabel: '路线二',
         ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
         resolutions: ['720p'],
         durations: [30],
@@ -153,12 +153,16 @@ export function getVideoModelProfile(provider) {
     if (!provider?.model) return null;
     const model = String(provider.model).trim();
     const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
-    const profile = VIDEO_MODEL_PROFILES.find(entry => entry.matchModel?.test(model))
+    let profile = VIDEO_MODEL_PROFILES.find(entry => entry.matchModel?.test(model))
         || VIDEO_MODEL_PROFILES.find(entry => entry.match?.test(marker))
         || DEFAULT_VIDEO_MODEL_PROFILE;
     let host = '';
     try { host = new URL(provider.endpoint).hostname; } catch (_) { /* Unconfigured endpoint. */ }
-    if (profile === VIDEO_MODEL_PROFILES[0] && host === 'art.ravenhash.org') {
+    const fixedSeedance = profile === VIDEO_MODEL_PROFILES[0];
+    if (fixedSeedance) {
+        profile = { ...profile, routeLabel: /-route1$/i.test(model) ? '路线一' : '路线二' };
+    }
+    if (fixedSeedance && host === 'art.ravenhash.org') {
         return {
             ...profile,
             price: {
