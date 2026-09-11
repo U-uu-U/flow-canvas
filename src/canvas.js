@@ -13903,6 +13903,8 @@ export class CanvasManager {
         this._activeContentLoads = 0;
 
         this.items.forEach(item => {
+            // Generated previews own their media lifecycle and are not reloaded by _loadAllContent.
+            if (item.data?.kind === 'op') return;
             clearTimeout(item.hoverTimer);
             item.hoverTimer = null;
             item.hoverFull = false;
@@ -14575,6 +14577,7 @@ export class CanvasManager {
     _layoutVideoControlGroup(controls, width, height) {
         if (!controls) return;
         const layout = getVideoControlLayout(this.stage?.scaleX?.(), width, height);
+        controls.visible(layout.visible);
         const progressBg = controls.findOne('.videoProgressBg');
         const progressFg = controls.findOne('.videoProgressFg');
         const previousProgressWidth = Number(progressBg?.width?.()) || 0;

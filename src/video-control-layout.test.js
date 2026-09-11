@@ -27,3 +27,11 @@ test('video timeline shares the button center line and stays inside the video', 
     assert.ok(layout.progressWidth > 0);
     assert.ok(layout.progressX + layout.progressWidth <= 300);
 });
+
+test('video controls hide when the on-screen media cannot fit both buttons', () => {
+    assert.equal(getVideoControlLayout(0.1, 640, 360).visible, true);
+    assert.equal(getVideoControlLayout(0.09, 640, 360).visible, false);
+    assert.equal(getVideoControlLayout(1, 63, 100).visible, false);
+    assert.equal(getVideoControlLayout(1, 200, 35).visible, false);
+    assert.equal(getVideoControlLayout(0.25, 640, 360).visible, true);
+});
