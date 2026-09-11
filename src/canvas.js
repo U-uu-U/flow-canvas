@@ -9235,9 +9235,16 @@ export class CanvasManager {
         }
         rows.forEach(row => row.sort((a, b) => (a.routeLabel || '') < (b.routeLabel || '') ? -1
             : (a.routeLabel || '') > (b.routeLabel || '') ? 1 : 0));
+        const splitSeedanceSources = new Set(rows
+            .filter(row => row.length === 2 && row[0].routeGroup === 'seedance25-fixed'
+                && row[0].routeLabel !== row[1].routeLabel)
+            .map(row => row[0].sourceProviderId));
+        const visibleRows = rows.filter(row => !(row.length === 1
+            && row[0].model?.toLowerCase() === 'seedance_v2.5'
+            && splitSeedanceSources.has(row[0].sourceProviderId)));
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            const matches = rows.filter(row => row.some(provider => !query
+            const matches = visibleRows.filter(row => row.some(provider => !query
                 || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
@@ -9270,9 +9277,9 @@ export class CanvasManager {
                     button.title = [provider.routeLabel, provider.model, provider.name].filter(Boolean).join(' · ');
                     const copy = document.createElement('span');
                     const model = document.createElement('strong');
-                    model.textContent = (split ? provider.routeModelLabel : provider.model) || '未命名模型';
+                    model.textContent = (split ? provider.routeLabel : provider.model) || '未命名模型';
                     const source = document.createElement('small');
-                    source.textContent = split ? provider.routeLabel : provider.name || '未命名 API';
+                    source.textContent = provider.name || '未命名 API';
                     copy.append(model, source);
                     const marker = document.createElement('span');
                     marker.textContent = selected ? '当前' : '›';
