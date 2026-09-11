@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -64,6 +65,11 @@ const VIDEO_REFERENCE_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const TEMP_REFERENCE_CACHE_TTL_MS = 50 * 60 * 1000;
 const TEMP_REFERENCE_UPLOAD_ATTEMPTS_PER_PROVIDER = 2;
 const TEMP_REFERENCE_UPLOAD_CONCURRENCY = 2;
+const GENERATED_MEDIA_DOWNLOAD_ATTEMPTS = 5;
+const GENERATED_MEDIA_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024;
+const GENERATED_MEDIA_DOWNLOAD_RETRY_DELAY_MS = 1_000;
+const GENERATED_MEDIA_DOWNLOAD_HTTP1_TIMEOUT_MS = 90_000;
+const GENERATED_MEDIA_DOWNLOAD_REDIRECT_LIMIT = 5;
 const FALLBACK_TEMP_REFERENCE_UPLOAD_PROVIDERS = [
     {
         id: 'uguu',
@@ -714,6 +720,9 @@ class FlowCanvasBridge {
         const targetDir = targetInfo.targetDir;
 
         const sourceContext = collectImageSourceReferences(data, planService, body);
+        if (sourceContext.missing.length > 0 && body.provider !== 'builtin') {
+            throw missingImageEditReferencesError(sourceContext.missing);
+        }
         const generationOptions = await resolveImageGenerationOptions({
             ...body,
             sourceReferences: sourceContext.references
@@ -1402,6 +1411,15 @@ function collectImageSourceReferences(data, planService, body = {}) {
     return { references, missing };
 }
 
+function missingImageEditReferencesError(references = []) {
+    const names = references
+        .slice(0, 3)
+        .map(reference => String(reference?.name || path.basename(String(reference?.filePath || '')) || '未命名参考图'))
+        .filter(Boolean);
+    const label = names.length > 0 ? `：${names.join('、')}` : '';
+    return new Error(`参考图文件不存在或无法读取${label}。已阻止编辑请求，请重新选择参考图后再试。`);
+}
+
 async function resolveImageGenerationOptions(options = {}) {
     const requestedSize = String(options.size || '').trim().replace(/\u00d7/g, 'x');
     const requestedQuality = String(options.quality || '').trim().toLowerCase();
@@ -1575,6 +1593,62 @@ function decodeImageBase64(value) {
     return Buffer.from(source.replace(/\s+/g, ''), 'base64');
 }
 
+async function downloadGeneratedImageBuffer(imageUrl, requestHeaders, signal = null) {
+    let lastError;
+    let attemptsMade = 0;
+    let http1FallbackAttempts = 0;
+    for (let attempt = 0; attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS; attempt += 1) {
+        attemptsMade = attempt + 1;
+        throwIfGenerationCanceled(signal);
+        try {
+            const response = await net.fetch(imageUrl, {
+                headers: requestHeaders,
+                redirect: 'follow',
+                signal
+            });
+            if (!response.ok) {
+                const error = generatedMediaDownloadHttpError(response.status);
+                if (!isRetryableGeneratedMediaDownloadError(error)) throw error;
+                lastError = error;
+            } else {
+                const declaredLength = Number(response.headers.get('content-length'));
+                if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
+                    throw new Error('生成产物超过 512 MB 下载限制');
+                }
+                const buffer = Buffer.from(await response.arrayBuffer());
+                if (buffer.length === 0) throw new Error('服务器返回了空图片文件');
+                return buffer;
+            }
+        } catch (error) {
+            throwIfGenerationCanceled(signal);
+            lastError = error;
+            if (shouldFallbackToHttp1GeneratedMediaDownload(error)) {
+                http1FallbackAttempts += 1;
+                try {
+                    const fallback = await downloadRemoteBinaryOverHttp1(
+                        imageUrl,
+                        signal,
+                        'image/*,application/octet-stream;q=0.9,*/*;q=0.1'
+                    );
+                    if (fallback.buffer.length === 0) throw new Error('服务器返回了空图片文件');
+                    return fallback.buffer;
+                } catch (fallbackError) {
+                    throwIfGenerationCanceled(signal);
+                    lastError = fallbackError;
+                    if (!isRetryableGeneratedMediaDownloadError(fallbackError)) break;
+                }
+            } else if (!isRetryableGeneratedMediaDownloadError(error)) {
+                break;
+            }
+        }
+        if (attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS - 1) {
+            await sleep(GENERATED_MEDIA_DOWNLOAD_RETRY_DELAY_MS * (attempt + 1), signal);
+        }
+    }
+    const fallbackText = http1FallbackAttempts > 0 ? `，其中 HTTP/1.1 回退 ${http1FallbackAttempts} 次` : '';
+    throw new Error(`下载生成图片失败（${describeRemoteEndpoint(imageUrl)}，已尝试 ${attemptsMade} 次${fallbackText}）：${describeRemoteFailure(lastError)}`);
+}
+
 async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '', signal = null) {
     const base64Value = String(
         image?.b64_json
@@ -1619,13 +1693,7 @@ async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '', signal 
     } catch (_) {
         // Keep the download unauthenticated if either URL is malformed.
     }
-    const imageRes = await net.fetch(imageUrl, {
-        headers: requestHeaders,
-        redirect: 'follow',
-        signal
-    });
-    if (!imageRes.ok) throw new Error(`Image download failed: ${imageRes.status}`);
-    return Buffer.from(await imageRes.arrayBuffer());
+    return downloadGeneratedImageBuffer(imageUrl, requestHeaders, signal);
 }
 
 async function saveGeneratedImage(image, endpoint, targetDir, prompt, apiKey = '', signal = null) {
@@ -2641,7 +2709,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         }
         const payloadError = getVideoPayloadError(payload);
         if (payloadError && !getVideoResultUrl(payload)) {
-            throw new Error(`查询视频任务失败（${describeRemoteEndpoint(taskUrl)}）：${payloadError}`);
+            throw new Error(formatVideoTaskFailure(payloadError, describeRemoteEndpoint(taskUrl), '查询视频任务失败'));
         }
         const resolvedTaskId = getVideoTaskId(payload);
         if (resolvedTaskId && resolvedTaskId !== currentTaskId) {
@@ -2658,7 +2726,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         }
         if (isFailedVideoStatus(taskStatus)) {
             const reason = getVideoPayloadError(payload) || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
-            throw new Error(`\u89c6\u9891\u751f\u6210\u4efb\u52a1\u5931\u8d25\uff1a${reason}`);
+            throw new Error(formatVideoTaskFailure(reason));
         }
         options.onProgress?.({
             stage: videoTaskProgressStage(taskStatus),
@@ -2667,6 +2735,19 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         });
     }
     throw new Error('\u89c6\u9891\u751f\u6210\u8d85\u65f6\uff1a\u7b49\u5f85 60 \u5206\u949f\u540e\u4ecd\u672a\u5b8c\u6210');
+}
+
+function isVideoPromptModerationFailure(reason) {
+    return /提示词.*(?:审核|未通过|违规)|(?:审核|审核不通过|内容安全).*(?:提示词|prompt)|prompt.*(?:moderation|review|violation|safety)/i.test(String(reason || ''));
+}
+
+function formatVideoTaskFailure(reason, endpoint = '', stage = '视频生成任务失败') {
+    const detail = String(reason || '服务端未提供失败原因');
+    const endpointText = endpoint ? `（${endpoint}）` : '';
+    if (isVideoPromptModerationFailure(detail)) {
+        return `${stage}${endpointText}：提示词审核失败，${detail}。任务 ID 已保留，可继续恢复查询；修改提示词后可重新生成。`;
+    }
+    return `${stage}${endpointText}：${detail}`;
 }
 
 function videoExtensionFromUrl(url, contentType = '') {
@@ -2688,44 +2769,173 @@ function uniqueVideoName(prefix, prompt, ext = '.mp4') {
 }
 
 async function downloadVideo(url, targetDir, prompt, model = '', signal = null) {
-    let response;
     let buffer;
     let lastError;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    let contentType = '';
+    let downloadedUrl = url;
+    let http1FallbackAttempts = 0;
+    let attemptsMade = 0;
+    for (let attempt = 0; attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS; attempt += 1) {
+        attemptsMade = attempt + 1;
         throwIfGenerationCanceled(signal);
         try {
-            response = await net.fetch(url, { method: 'GET', redirect: 'follow', signal });
+            const response = await net.fetch(url, { method: 'GET', redirect: 'follow', signal });
+            if (!response.ok) {
+                const error = generatedMediaDownloadHttpError(response.status);
+                if (!isRetryableGeneratedMediaDownloadError(error)) throw error;
+                lastError = error;
+            } else {
+                const declaredLength = Number(response.headers.get('content-length'));
+                if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
+                    throw new Error('生成产物超过 512 MB 下载限制');
+                }
+                buffer = Buffer.from(await response.arrayBuffer());
+                contentType = response.headers.get('content-type') || '';
+                downloadedUrl = response.url || url;
+                break;
+            }
         } catch (error) {
             throwIfGenerationCanceled(signal);
             lastError = error;
-            if (attempt < 2) await sleep(750 * (attempt + 1), signal);
-            continue;
+            if (shouldFallbackToHttp1GeneratedMediaDownload(error)) {
+                http1FallbackAttempts += 1;
+                try {
+                    const fallback = await downloadRemoteBinaryOverHttp1(
+                        url,
+                        signal,
+                        'video/*,application/octet-stream;q=0.9,*/*;q=0.1'
+                    );
+                    buffer = fallback.buffer;
+                    contentType = fallback.contentType;
+                    downloadedUrl = fallback.url;
+                    break;
+                } catch (fallbackError) {
+                    throwIfGenerationCanceled(signal);
+                    lastError = fallbackError;
+                    if (!isRetryableGeneratedMediaDownloadError(fallbackError)) break;
+                }
+            } else if (!isRetryableGeneratedMediaDownloadError(error)) {
+                break;
+            }
         }
-        if (!response.ok) {
-            throw new Error(`\u4e0b\u8f7d\u751f\u6210\u89c6\u9891\u5931\u8d25\uff08${describeRemoteEndpoint(url)}\uff09\uff1aHTTP ${response.status}`);
-        }
-        const declaredLength = Number(response.headers.get('content-length'));
-        if (Number.isFinite(declaredLength) && declaredLength > 512 * 1024 * 1024) {
-            throw new Error('\u751f\u6210\u7684\u89c6\u9891\u8d85\u8fc7 512 MB \u4e0b\u8f7d\u9650\u5236');
-        }
-        try {
-            buffer = Buffer.from(await response.arrayBuffer());
-            break;
-        } catch (error) {
-            throwIfGenerationCanceled(signal);
-            lastError = error;
-            if (attempt < 2) await sleep(750 * (attempt + 1), signal);
+        if (attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS - 1) {
+            await sleep(GENERATED_MEDIA_DOWNLOAD_RETRY_DELAY_MS * (attempt + 1), signal);
         }
     }
-    if (!buffer) throw remoteConnectionError('\u4e0b\u8f7d\u751f\u6210\u89c6\u9891', url, lastError, 3);
-    if (buffer.length === 0) throw new Error('\u670d\u52a1\u5668\u8fd4\u56de\u4e86\u7a7a\u89c6\u9891\u6587\u4ef6');
+    if (!buffer) {
+        const fallbackText = http1FallbackAttempts > 0 ? `，其中 HTTP/1.1 回退 ${http1FallbackAttempts} 次` : '';
+        throw new Error(`下载生成视频失败（${describeRemoteEndpoint(url)}，已尝试 ${attemptsMade} 次${fallbackText}）：${describeRemoteFailure(lastError)}。可使用“继续下载”再次拉取产物。`);
+    }
+    if (buffer.length === 0) throw new Error('服务器返回了空视频文件');
     const filePath = path.join(targetDir, uniqueVideoName(
         videoModelFilePrefix(model),
         prompt,
-        videoExtensionFromUrl(url, response.headers.get('content-type'))
+        videoExtensionFromUrl(downloadedUrl, contentType)
     ));
     fs.writeFileSync(filePath, buffer);
     return filePath;
+}
+
+function generatedMediaDownloadHttpError(status) {
+    const error = new Error(`HTTP ${status}`);
+    error.status = Number(status);
+    return error;
+}
+
+function isRetryableGeneratedMediaDownloadError(error) {
+    const status = Number(error?.status);
+    if (Number.isFinite(status) && status > 0) {
+        return [408, 425, 429, 500, 502, 503, 504].includes(status);
+    }
+    const marker = `${error?.code || ''} ${error?.message || error || ''}`;
+    return !/产物超过 512 MB|不支持的产物下载协议|重定向超过/.test(marker);
+}
+
+function shouldFallbackToHttp1GeneratedMediaDownload(error) {
+    const marker = `${error?.code || ''} ${error?.message || error || ''}`;
+    return /quic|http.?2|ERR_HTTP2|ERR_QUIC_PROTOCOL_ERROR/i.test(marker);
+}
+
+async function downloadRemoteBinaryOverHttp1(rawUrl, signal = null, accept = 'application/octet-stream,*/*;q=0.1', redirects = 0) {
+    throwIfGenerationCanceled(signal);
+    const url = new URL(rawUrl);
+    const transport = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
+    if (!transport) throw new Error(`不支持的产物下载协议：${url.protocol}`);
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (handler, value) => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener?.('abort', abort);
+            handler(value);
+        };
+        const fail = error => finish(reject, error);
+        const abort = () => {
+            request.destroy(generationCanceledError());
+            fail(generationCanceledError());
+        };
+        const request = transport.get(url, {
+            headers: {
+                Accept: accept,
+                'Accept-Encoding': 'identity'
+            }
+        }, response => {
+            const status = Number(response.statusCode) || 0;
+            const location = response.headers.location;
+            if ([301, 302, 303, 307, 308].includes(status) && location) {
+                response.resume();
+                if (redirects >= GENERATED_MEDIA_DOWNLOAD_REDIRECT_LIMIT) {
+                    fail(new Error(`产物下载重定向超过 ${GENERATED_MEDIA_DOWNLOAD_REDIRECT_LIMIT} 次`));
+                    return;
+                }
+                downloadRemoteBinaryOverHttp1(new URL(location, url).toString(), signal, accept, redirects + 1)
+                    .then(value => finish(resolve, value), fail);
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                response.resume();
+                fail(generatedMediaDownloadHttpError(status));
+                return;
+            }
+
+            const declaredLength = Number(response.headers['content-length']);
+            if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
+                response.resume();
+                fail(new Error('生成产物超过 512 MB 下载限制'));
+                return;
+            }
+
+            const chunks = [];
+            let totalBytes = 0;
+            response.on('data', chunk => {
+                totalBytes += chunk.length;
+                if (totalBytes > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
+                    const error = new Error('生成产物超过 512 MB 下载限制');
+                    response.destroy(error);
+                    fail(error);
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            response.once('error', fail);
+            response.once('aborted', () => fail(new Error('视频下载连接被服务器中断')));
+            response.once('end', () => finish(resolve, {
+                buffer: Buffer.concat(chunks),
+                contentType: String(response.headers['content-type'] || ''),
+                url: url.toString()
+            }));
+        });
+        request.setTimeout(GENERATED_MEDIA_DOWNLOAD_HTTP1_TIMEOUT_MS, () => {
+            request.destroy(new Error('HTTP/1.1 产物下载超时'));
+        });
+        request.once('error', fail);
+        if (signal?.aborted) {
+            abort();
+        } else {
+            signal?.addEventListener?.('abort', abort, { once: true });
+        }
+    });
 }
 
 async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
@@ -2927,7 +3137,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
                 || '服务端没有返回任务 ID 或视频地址';
             return {
                 success: false,
-                error: `提交视频生成任务失败（${describeRemoteEndpoint(endpoint)}）：${reason}`
+                error: formatVideoTaskFailure(reason, describeRemoteEndpoint(endpoint), '提交视频生成任务失败')
             };
         }
         if (taskId) {

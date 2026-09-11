@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
 const FlowCanvasBridge = require('./mcp-bridge');
 
 function createBridge(options = {}) {
@@ -105,6 +107,26 @@ test('generation cancellation aborts active work and catches pre-registration ra
     await assert.rejects(
         bridge._runCancelableGeneration('task-before-start', async () => 'should not run'),
         error => error.code === 'GENERATION_CANCELED'
+    );
+});
+
+test('missing local image references block an external edit before the API request', async () => {
+    const { bridge } = createBridge();
+    const missingPath = path.join(os.tmpdir(), `flow-canvas-missing-${Date.now()}.png`);
+    await assert.rejects(
+        bridge._generateImageFromRenderer({
+            prompt: 'edit the reference image',
+            provider: 'openai',
+            providerConfig: {
+                apiKey: 'test-key',
+                endpoint: 'https://example.invalid/v1/images/generations',
+                model: 'gpt-image-1'
+            },
+            sourceReferences: [{ filePath: missingPath, name: 'missing-reference.png' }],
+            targetDir: os.tmpdir()
+        }),
+        error => /参考图文件不存在或无法读取/.test(error.message)
+            && /重新选择参考图/.test(error.message)
     );
 });
 

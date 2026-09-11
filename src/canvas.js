@@ -5998,12 +5998,15 @@ export class CanvasManager {
         const isDownloadRecovery = task?.status === 'failed'
             && task?.params?.syncStage === 'download'
             && Boolean(task?.taskId);
-        const isRetry = task?.status === 'failed' && !isDownloadRecovery;
+        const isPromptModerationRecovery = task?.status === 'failed'
+            && task?.params?.syncStage === 'prompt_moderation_failed'
+            && Boolean(task?.taskId);
+        const isRetry = task?.status === 'failed' && !isDownloadRecovery && !isPromptModerationRecovery;
         const label = new Konva.Text({
             x: 38,
             y: 8,
             width: controlWidth - 46,
-            text: isDownloadRecovery ? '继续下载' : (isRetry ? '重新生成' : '重新连接'),
+            text: isDownloadRecovery ? '继续下载' : (isRetry ? '重新生成' : '继续恢复'),
             fontSize: 12,
             fontStyle: 'bold',
             fill: '#e5e5e7',
@@ -6013,7 +6016,7 @@ export class CanvasManager {
             x: 38,
             y: 24,
             width: controlWidth - 46,
-            text: isDownloadRecovery ? '恢复到原节点' : (isRetry ? '使用原参数' : '继续原任务'),
+            text: isDownloadRecovery ? '恢复到原节点' : (isRetry ? '使用原参数' : '使用原任务 ID'),
             fontSize: 8,
             fill: '#999ca2',
             listening: false

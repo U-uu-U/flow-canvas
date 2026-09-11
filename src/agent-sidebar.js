@@ -3920,13 +3920,24 @@ export class AgentSidebar {
         return /network|fetch failed|failed to fetch|econn|etimedout|socket|connection|timeout|timed out|aborterror|断开|断连|连接失败|网络|超时/i.test(marker);
     }
 
+    _isVideoPromptModerationFailure(error) {
+        const marker = `${error?.message || error || ''}`;
+        return /提示词.*(?:审核|未通过|违规)|(?:审核|审核不通过|内容安全).*(?:提示词|prompt)|prompt.*(?:moderation|review|violation|safety)/i.test(marker);
+    }
+
     _recordGenerationError(taskId, error) {
         const current = this.generationTasks.find(task => task.id === taskId);
         if (current?.status === 'canceled') return current;
         const message = error?.message || String(error || '请求失败');
+        const promptModerationFailed = current?.kind === 'video'
+            && Boolean(current?.taskId)
+            && this._isVideoPromptModerationFailure(message);
         return this._updateGenerationTask(taskId, {
             status: this._isGenerationDisconnect(error) ? 'disconnected' : 'failed',
-            error: message
+            error: message,
+            ...(promptModerationFailed ? {
+                params: { syncStage: 'prompt_moderation_failed' }
+            } : {})
         });
     }
 
@@ -4074,6 +4085,8 @@ export class AgentSidebar {
                     ? '下载中'
                     : status === 'running' && task.params?.syncStage === 'recovering'
                         ? '\u6062\u590d\u8fde\u63a5\u4e2d'
+                        : status === 'failed' && task.params?.syncStage === 'prompt_moderation_failed'
+                            ? '提示词审核失败'
                         : statusLabels[status];
             if (status === 'running' && task.params?.syncStage === 'upload') {
                 syncStageLabel = '上传素材中';
@@ -4089,7 +4102,10 @@ export class AgentSidebar {
                 + (task.params?.videoSourcePaths?.length || 0)
                 + (task.params?.audioSourcePaths?.length || 0);
             const canRetry = status === 'failed' || status === 'disconnected';
-            const retryLabel = status === 'disconnected' ? '重新连接' : '重试';
+            const promptModerationFailed = task.kind === 'video'
+                && task.params?.syncStage === 'prompt_moderation_failed'
+                && Boolean(task.taskId);
+            const retryLabel = status === 'disconnected' || promptModerationFailed ? '继续恢复' : '重试';
             const errorCopy = status === 'disconnected'
                 ? '与生成服务断开，任务参数已保留。'
                 : task.error;
@@ -4116,7 +4132,7 @@ export class AgentSidebar {
                     ${errorCopy ? `<p class="agent-task-error">${this._escapeTaskText(errorCopy)}</p>` : ''}
                     ${canRetry ? `
                         <div class="agent-task-retry-row">
-                            <span>${status === 'disconnected' ? (task.taskId ? '使用任务 ID 恢复，不会重复提交' : '缺少任务 ID，只能重新提交') : `第 ${task.attempts || 1} 次请求未完成`}</span>
+                            <span>${status === 'disconnected' || promptModerationFailed ? (task.taskId ? '使用任务 ID 恢复，不会重复提交' : '缺少任务 ID，只能重新提交') : `第 ${task.attempts || 1} 次请求未完成`}</span>
                             <button type="button" data-retry-task="${this._escapeTaskText(task.id)}">
                                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"></path>
@@ -4166,7 +4182,9 @@ export class AgentSidebar {
             && typeof this.options.completeGenerationTaskOnNode === 'function';
         const shouldResumeVideo = task.kind === 'video'
             && Boolean(task.taskId)
-            && (task.status === 'disconnected' || task.params?.syncStage === 'download')
+            && (task.status === 'disconnected'
+                || task.params?.syncStage === 'download'
+                || task.params?.syncStage === 'prompt_moderation_failed')
             && Boolean(window.flowCanvas?.mcp?.resumeVideo);
         const sourceProviderId = String(task.providerId || '').split('::model:')[0];
         const currentProvider = this.providers.find(item => item.id === sourceProviderId);
