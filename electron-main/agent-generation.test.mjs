@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import sharp from 'sharp';
 import { AgentGeneration } from './agent-generation.mjs';
 import { AgentMedia } from './agent-media.cjs';
+import { getGenerationReuseConfig } from '../src/generation-record.js';
 
 const copy = value => structuredClone(value);
 const op = (id, nodeType = 'image', config = {}) => ({
@@ -227,6 +228,54 @@ describe('AgentGeneration planning', () => {
 });
 
 describe('AgentGeneration execution', () => {
+    test('capsules use upload order and keep raw drafts through Agent generation and reuse', async t => {
+        const h = await setup(t);
+        const first = await h.file('first.png'), second = await h.file('second.png');
+        h.projects.original.items.push({ id: 'first', kind: 'media', mediaType: 'image', filePath: first },
+            { id: 'second', kind: 'media', mediaType: 'image', filePath: second });
+        h.projects.original.connections = [edge('second', 'image'), edge('first', 'image')];
+        h.projects.original.items[0].config = { prompt: 'A B C', count: 1,
+            referenceCitationIds: ['first-image', 'second-image'], referenceCitationLabels: ['图一', '图二'],
+            referenceCitationOccurrences: [
+                { id: 'a', connectionId: 'first-image', sourceNodeId: 'first', offset: 0 },
+                { id: 'b', connectionId: 'second-image', sourceNodeId: 'second', offset: 2 },
+                { id: 'c', connectionId: 'first-image', sourceNodeId: 'first', offset: 4 }
+            ] };
+        const run = h.plan();
+        const result = await h.execute(run.steps[0], run);
+        const sent = h.requests[0].body;
+        assert.deepEqual(sent.sourceReferences.map(ref => ref.filePath), [second, first]);
+        assert.match(sent.prompt, /\n图二A 图一B 图二C$/);
+        assert.equal(sent.promptDraftConfig.prompt, 'A B C');
+        const output = h.projects.original.items.find(node => node.id === result.nodeIds[0]);
+        assert.equal(output.config.prompt, 'A B C');
+        assert.equal(getGenerationReuseConfig(output).referenceCitationOccurrences.length, 3);
+        assert.equal(output.generation.requestPrompt, sent.prompt);
+        const reused = h.plan(result.nodeIds);
+        assert.equal(reused.steps[0].prompt, sent.prompt);
+    });
+
+    test('references to newly generated upstream nodes keep stable output identities', async t => {
+        const h = await setup(t, { items: [op('a'), op('b', 'image', { prompt: 'use ',
+            referenceCitationIds: ['a-b'], referenceCitationLabels: ['图一'], referenceCitationOffsets: { 'a-b': 4 } })],
+        connections: [edge('a', 'b')] });
+        const run = h.plan(['b']);
+        const first = await h.execute(run.steps[0], run);
+        run.results = [first];
+        const second = await h.execute(run.steps[1], run);
+        const output = h.projects.original.items.find(node => node.id === second.nodeIds[0]);
+        assert.equal(output.generation.referenceBindings[0].sourceNodeId, first.nodeIds[0]);
+        assert.equal(output.generation.promptDraftConfig.referenceCitationOccurrences[0].sourceNodeId, first.nodeIds[0]);
+        assert.equal(h.plan(second.nodeIds).steps[0].prompt, run.steps[1].prompt);
+    });
+
+    test('missing stable capsules prevent Agent plan approval', async t => {
+        const h = await setup(t);
+        h.projects.original.items[0].config.referenceCitationOccurrences = [{ id: 'missing', missing: true }];
+        assert.throws(() => h.plan(), /失联/);
+        assert.equal(h.requests.length, 0);
+    });
+
     test('a downloaded checkpoint lands its saved output without a second provider call', async t => {
         const h = await setup(t);
         const run = h.plan();

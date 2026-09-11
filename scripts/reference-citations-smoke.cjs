@@ -9,6 +9,11 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
     let app;
     try {
         await fs.mkdir(path.join(profile, 'data'));
+        const previewPaths = ['first', 'second'].map(name => path.join(profile, `${name}.png`));
+        for (const [index, file] of previewPaths.entries()) {
+            await require('sharp')({ create: { width: 160, height: 100, channels: 3,
+                background: index ? '#bb7f50' : '#559b8c' } }).png().toFile(file);
+        }
         await fs.writeFile(path.join(profile, 'data/board.json'), JSON.stringify({ version: 1, items: [], folderGroups: [], mcp: { enabled: false } }));
         const env = { ...process.env, FLOW_MCP_SMOKE_PROFILE: profile };
         delete env.ELECTRON_RUN_AS_NODE;
@@ -18,13 +23,12 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         const source = await fs.readFile(path.join(__dirname, '../src/canvas.js'), 'utf8');
         // Exercise the production composer methods with real Electron selection/contenteditable behavior.
         const methods = source.slice(source.indexOf('    _generationComposerPromptValue('), source.indexOf('    _syncGenerationComposerModelButton('));
-        await page.evaluate(methods => {
+        await page.evaluate(({ methods, previewPaths }) => {
             const Fixture = new Function('resolveCanvasFilePath', `const GENERATION_COMPOSER_CARET_ANCHOR = '\\u200B'; return class { ${methods} }`)(value => value);
             const fixture = new Fixture();
             const data = { nodeType: 'image', config: { prompt: 'A B C' } };
             const references = ['first', 'second'].map(id => ({ connection: { id, transient: true }, source: { id: `source-${id}`, filePath: '', mediaType: 'image' } }));
-            // Use an inline preview so this test does not depend on any user files.
-            references.forEach(entry => { entry.source.filePath = 'fixture.png'; });
+            references.forEach((entry, index) => { entry.source.filePath = previewPaths[index]; });
             const element = document.createElement('section');
             element.className = 'generation-composer';
             element.style.cssText = 'position:fixed;left:120px;top:160px;width:540px;z-index:999999';
@@ -43,7 +47,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             fixture._setGenerationComposerPromptValue(prompt, data.config.prompt);
             fixture._renderGenerationComposerReferences('test');
             window.citationFixture = { fixture, data, prompt, references };
-        }, methods);
+        }, { methods, previewPaths });
         const pills = page.locator('.generation-composer-citation');
         const first = page.locator('.generation-composer-reference.citable').nth(0);
         const second = page.locator('.generation-composer-reference.citable').nth(1);
@@ -55,6 +59,14 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         await first.click();
         await second.click();
         assert.deepEqual(await pills.allTextContents(), ['图一', '图一', '图二']);
+        await pills.nth(0).hover();
+        await page.waitForFunction(() => {
+            const preview = document.querySelector('.generation-citation-preview');
+            return preview?.matches(':popover-open') && preview.complete && preview.naturalWidth === 160;
+        });
+        if (process.env.FLOW_CITATIONS_SCREENSHOT) await page.screenshot({ path: process.env.FLOW_CITATIONS_SCREENSHOT });
+        await page.mouse.move(30, 30);
+        assert.equal(await page.locator('.generation-citation-preview').count(), 0);
         await pills.nth(0).click();
         assert.deepEqual(await pills.allTextContents(), ['图一', '图二']);
         assert.equal(await page.locator('.generation-composer-reference.citable').count(), 2);
@@ -109,8 +121,23 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             references.shift();
             fixture._renderGenerationComposerReferences('test');
         });
-        assert.deepEqual(await pills.allTextContents(), ['图一']);
-        await pills.click();
+        assert.equal(await pills.count(), 3);
+        assert.equal(await page.locator('.generation-composer-citation.is-missing').count(), 2);
+        // Reconnection to the same stable node restores both occurrences; another node cannot hijack them.
+        await page.evaluate(firstPath => {
+            const { fixture, references } = window.citationFixture;
+            references.push({ connection: { id: 'reconnected', transient: true },
+                source: { id: 'source-first', filePath: firstPath, mediaType: 'image' } });
+            fixture._renderGenerationComposerReferences('test');
+        }, previewPaths[0]);
+        assert.equal(await page.locator('.generation-composer-citation.is-missing').count(), 0);
+        assert.deepEqual((await pills.allTextContents()).sort(), ['图一', '图二', '图二'].sort());
+        const preservedText = await page.evaluate(() => {
+            const { fixture, prompt } = window.citationFixture;
+            return fixture._generationComposerPromptValue(prompt);
+        });
+        assert.equal(preservedText, before.text);
+        while (await pills.count()) await pills.first().click();
         assert.equal(await pills.count(), 0);
         assert.deepEqual(await page.evaluate(() => window.citationFixture.data.config.referenceCitationOccurrences), []);
         // Legacy single-reference configurations migrate with their saved offsets.
@@ -123,7 +150,16 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         });
         assert.equal(await pills.count(), 1);
         assert.equal(await page.evaluate(() => window.citationFixture.data.config.referenceCitationOccurrences[0].offset), 2);
-        console.log('Reference citations smoke passed: append, remove one, caret, persistence, keyboard, disconnect, legacy migration.');
+        await page.evaluate(() => {
+            const { fixture, references } = window.citationFixture;
+            references.splice(0);
+            fixture._renderGenerationComposerReferences('test');
+        });
+        assert.deepEqual(await pills.allTextContents(), ['引用失联']);
+        await pills.click();
+        assert.equal(await pills.count(), 0);
+        assert.equal(await page.locator('.generation-citation-preview').count(), 0);
+        console.log('Reference citations smoke passed: repeat, remove, caret, persistence, preview, disconnect, reconnect, reorder, legacy migration.');
     } finally {
         await app?.close();
         await fs.rm(profile, { recursive: true, force: true });

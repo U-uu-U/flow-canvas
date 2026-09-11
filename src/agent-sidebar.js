@@ -2858,7 +2858,7 @@ export class AgentSidebar {
             }
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
             if (copyPromptButton) {
-                this._copyGenerationTaskPrompt(copyPromptButton.dataset.copyTaskPrompt, copyPromptButton);
+                this._copyGenerationTaskPrompt(copyPromptButton.dataset.copyTaskPrompt, copyPromptButton, copyPromptButton.dataset.copyTaskRequest === 'true');
                 return;
             }
             const retryButton = event.target.closest('[data-retry-task]');
@@ -4047,7 +4047,7 @@ export class AgentSidebar {
         this._renderGenerationTasks();
     }
 
-    _createGenerationTask(kind, provider, prompt, params = {}, sourcePaths = []) {
+    _createGenerationTask(kind, provider, prompt, params = {}, sourcePaths = [], promptInfo = {}) {
         const now = new Date().toISOString();
         const id = globalThis.crypto?.randomUUID?.()
             || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -4060,6 +4060,7 @@ export class AgentSidebar {
             providerName: this._providerLabel(provider),
             model: provider?.model || '',
             prompt: String(prompt || ''),
+            ...JSON.parse(JSON.stringify(promptInfo)),
             params: JSON.parse(JSON.stringify(params || {})),
             sourcePaths: sourcePaths.map(String).filter(Boolean),
             createdAt: now,
@@ -4076,8 +4077,8 @@ export class AgentSidebar {
         return task;
     }
 
-    createGenerationTask({ kind = 'image', provider = null, prompt = '', params = {}, sourcePaths = [] } = {}) {
-        return this._createGenerationTask(kind, provider, prompt, params, sourcePaths);
+    createGenerationTask({ kind = 'image', provider = null, prompt = '', params = {}, sourcePaths = [], promptDraftConfig, referenceBindings, userPrompt } = {}) {
+        return this._createGenerationTask(kind, provider, prompt, params, sourcePaths, { promptDraftConfig, referenceBindings, userPrompt });
     }
 
     _updateGenerationTask(id, patch = {}) {
@@ -4339,11 +4340,20 @@ export class AgentSidebar {
                         <time>${this._escapeTaskText(this._formatTaskTime(task.updatedAt || task.createdAt))}</time>
                     </div>
                     <div class="agent-task-prompt-row">
-                        <p class="agent-task-prompt" title="${this._escapeTaskText(task.prompt)}">${this._escapeTaskText(task.prompt)}</p>
+                        <p class="agent-task-prompt" title="${this._escapeTaskText(task.userPrompt ?? task.prompt)}">${this._escapeTaskText(task.userPrompt ?? task.prompt)}</p>
                         <button class="agent-task-copy-prompt" type="button" data-copy-task-prompt="${this._escapeTaskText(task.id)}" title="复制提示词" aria-label="复制提示词">
                             <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg>
                         </button>
                     </div>
+                    ${task.userPrompt !== undefined && task.userPrompt !== task.prompt ? `
+                        <details class="agent-task-request"><summary>实际提交内容</summary>
+                            <div class="agent-task-prompt-row">
+                                <pre>${this._escapeTaskText(task.prompt)}</pre>
+                                <button class="agent-task-copy-prompt" type="button" data-copy-task-prompt="${this._escapeTaskText(task.id)}" data-copy-task-request="true" title="复制实际提交内容" aria-label="复制实际提交内容">
+                                    <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-copy"></use></svg>
+                                </button>
+                            </div>
+                        </details>` : ''}
                     <div class="agent-task-meta">
                         <span title="${this._escapeTaskText(task.providerName)}">${this._escapeTaskText(task.providerName || 'API 已移除')}</span>
                         <span title="${this._escapeTaskText(task.model)}">${this._escapeTaskText(task.model || '未知模型')}</span>
@@ -4373,9 +4383,9 @@ export class AgentSidebar {
         }).join('');
     }
 
-    async _copyGenerationTaskPrompt(taskId, button) {
+    async _copyGenerationTaskPrompt(taskId, button, request = false) {
         const task = this.generationTasks.find(item => item.id === taskId);
-        const prompt = String(task?.prompt || '');
+        const prompt = String((request ? task?.prompt : task?.userPrompt ?? task?.prompt) || '');
         if (!prompt) return;
 
         try {
@@ -4397,8 +4407,8 @@ export class AgentSidebar {
         setTimeout(() => {
             if (!button.isConnected) return;
             button.classList.remove('copied', 'copy-failed');
-            button.title = '复制提示词';
-            button.setAttribute('aria-label', '复制提示词');
+            button.title = request ? '复制实际提交内容' : '复制提示词';
+            button.setAttribute('aria-label', button.title);
         }, 1400);
     }
 
@@ -4424,6 +4434,9 @@ export class AgentSidebar {
                 task.filePaths = record.filePaths?.length ? record.filePaths : task.filePaths;
                 task.params = { ...task.params, nodeId: task.params?.nodeId || record.nodeId,
                     targetDir: record.targetDir || task.params?.targetDir };
+                for (const key of ['promptDraftConfig', 'referenceBindings', 'userPrompt']) {
+                    if (record[key] !== undefined) task[key] = record[key];
+                }
             }
             this._saveGenerationTasks();
             this._renderGenerationTasks();
@@ -4454,6 +4467,7 @@ export class AgentSidebar {
                 clientTaskId: task.id, taskId: remoteTaskId, kind: task.kind,
                 projectId: task.projectId || this.options.getActiveProjectId?.(), nodeId: task.params?.nodeId,
                 prompt: task.prompt, params: task.params, sourcePaths: task.sourcePaths,
+                promptDraftConfig: task.promptDraftConfig, referenceBindings: task.referenceBindings, userPrompt: task.userPrompt,
                 targetDir: task.params?.targetDir,
                 providerConfig: { ...currentProvider, sourceProviderId, model: task.model || currentProvider?.model }
             });
@@ -4537,6 +4551,7 @@ export class AgentSidebar {
         });
         let placeholder = null;
         let result = null;
+        const promptInfo = { promptDraftConfig: task.promptDraftConfig, referenceBindings: task.referenceBindings, userPrompt: task.userPrompt };
         try {
             if (task.kind === 'image') {
                 placeholder = restoreOnOriginalNode ? null : this.options.beginImageGeneration?.({
@@ -4550,6 +4565,7 @@ export class AgentSidebar {
                     providerConfig: provider,
                     clientTaskId: task.id,
                     prompt: task.prompt,
+                    ...promptInfo,
                     size: task.params?.size || undefined,
                     quality: task.params?.quality || 'high',
                     responseFormat: task.params?.responseFormat || 'url',
@@ -4575,6 +4591,7 @@ export class AgentSidebar {
                         clientTaskId: task.id,
                         taskId: task.taskId,
                         prompt: task.prompt,
+                        ...promptInfo,
                         targetDir: task.params?.targetDir || undefined,
                         x: placeholder?.x,
                         y: placeholder?.y,
@@ -4587,6 +4604,7 @@ export class AgentSidebar {
                     providerConfig: provider,
                     clientTaskId: task.id,
                     prompt: task.prompt,
+                    ...promptInfo,
                     sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
                     videoReferences: (task.params?.videoSourcePaths || []).map(filePath => ({ filePath })),
                     audioReferences: (task.params?.audioSourcePaths || []).map(filePath => ({ filePath })),
