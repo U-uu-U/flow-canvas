@@ -1552,6 +1552,9 @@ ipcMain.handle('file:inspect', async (_, filePath) => {
 ipcMain.handle('thumb:get', async (_, filePath, maxDim) => {
     return thumbnailer.getThumbnail(filePath, maxDim);
 });
+ipcMain.handle('thumb:preview', async (_, filePath, maxDim, preferOriginal) => {
+    return thumbnailer.getPreview(filePath, maxDim, preferOriginal === true);
+});
 
 function psQuoted(value) {
     return `'${String(value).replace(/'/g, "''")}'`;

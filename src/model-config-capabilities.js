@@ -94,8 +94,8 @@ export function entryCapabilitySupported(config, entry, key) {
     if (declared && typeof declared.supported === 'boolean') return declared.supported;
     const vocabulary = config?.capabilities?.[key];
     const fields = Array.isArray(vocabulary?.fields) ? vocabulary.fields : [];
-    if (fields.some(field => entryAcceptsField(config, entry, field))) return true;
-    return false;
+    if (entry?.parameters?.accepts?.length && fields.some(field => entryAcceptsField(config, entry, field))) return true;
+    return null;
 }
 
 export function fieldLabel(config, field) {
@@ -220,7 +220,11 @@ export function describeModelCapabilities(config, entry, { originLabel = '' } = 
         const declared = entry.capabilities?.[key] || {};
         const supported = entryCapabilitySupported(config, entry, key);
         const label = normalizeText(definition.label) || key;
-        if (!supported) {
+        if (supported === null) {
+            notes.push(`${label}：尚未确认`);
+            continue;
+        }
+        if (supported === false) {
             const reason = normalizeText(declared.reason) || normalizeText(declared.note)
                 || normalizeText(definition.note) || '该线路不支持';
             cannot.push({ key, label, reason });
@@ -406,16 +410,16 @@ function resolveTierValue(config, field, value) {
 // 单条候选线路的校验结果。
 function collectEntryIssues(config, entry, request) {
     const issues = [];
-    const prompt = normalizeText(request.prompt);
+    const prompt = String(request.prompt ?? '').trim();
     const promptConfig = entry.prompt || {};
-    if (promptConfig.required && !prompt) {
+    if (request.promptResolved !== false && promptConfig.required && !prompt) {
         issues.push({
             code: MODEL_CONFIG_ISSUE_CODES.PROMPT_REQUIRED,
             field: 'prompt',
             message: '该模型必须填写提示词'
         });
     }
-    if (Number.isFinite(Number(promptConfig.maxLength)) && prompt.length > Number(promptConfig.maxLength)) {
+    if (request.promptResolved !== false && Number.isFinite(Number(promptConfig.maxLength)) && prompt.length > Number(promptConfig.maxLength)) {
         issues.push({
             code: MODEL_CONFIG_ISSUE_CODES.PROMPT_TOO_LONG,
             field: 'prompt',
@@ -429,9 +433,9 @@ function collectEntryIssues(config, entry, request) {
         const declared = Boolean(entry.options?.[field]);
         if (!declared && wireFields.has(field) && !entryAcceptsField(config, entry, field)) {
             issues.push({
-                code: MODEL_CONFIG_ISSUE_CODES.PARAM_UNSUPPORTED,
+                code: MODEL_CONFIG_ISSUE_CODES.PARAM_UNVERIFIED,
                 field,
-                message: `${fieldLabel(config, field)}：该模型不接受这个参数`
+                message: `${fieldLabel(config, field)}：当前渠道文档未确认此参数`
             });
             continue;
         }
@@ -441,7 +445,7 @@ function collectEntryIssues(config, entry, request) {
     for (const [feature, field] of Object.entries(FEATURE_FIELDS)) {
         const requested = feature === 'negativePrompt'
             ? Boolean(normalizeText(request.fields?.negativePrompt))
-            : request.features?.[feature] === true;
+            : (request.features?.[field] ?? request.features?.[feature]) === true;
         if (!requested) continue;
         const declared = entry.capabilities?.[feature];
         // 只有条目明确写了 supported:false 才拦截。未声明的能力一律放行——CONFIG 不可能
@@ -523,7 +527,7 @@ function collectEntryIssues(config, entry, request) {
  * @returns {{ ok:boolean, matched:boolean, errors:Array, warnings:Array, entry:object|null, candidates:Array, ambiguous:boolean }}
  */
 export function validateModelRequest(options = {}) {
-    const { config, provider = {}, fields = {}, features = {}, references = {}, prompt = '' } = options;
+    const { config, provider = {}, fields = {}, features = {}, references = {}, prompt = '', promptResolved = true } = options;
     const resolution = resolveModelConfigEntry(config, provider);
     if (!resolution.matched) {
         return {
@@ -541,8 +545,9 @@ export function validateModelRequest(options = {}) {
         };
     }
 
-    const request = { fields, features, references, prompt };
-    const perCandidate = resolution.candidates.map(entry => collectEntryIssues(config, entry, request));
+    const request = { fields, features, references, prompt, promptResolved };
+    const candidates = resolution.ambiguous ? resolution.candidates : [resolution.entry];
+    const perCandidate = candidates.map(entry => collectEntryIssues(config, entry, request));
 
     // 归并：所有候选都报 = 错误；只有部分候选报 = 警告（可能换了线路就不支持）。
     const tally = new Map();
@@ -589,12 +594,25 @@ export function toVideoProfileOverrides(config, entry) {
     const ratioOption = entry.options?.ratio;
     const durationOption = entry.options?.duration;
     const resolutionOption = entry.options?.resolutionTier;
-
-    const ratios = ratioOption && Array.isArray(ratioOption.values) ? [...ratioOption.values] : [];
-    const resolutions = resolutionValues(resolutionOption);
-
-    let durations = [];
-    let durationControl = null;
+    const overrides = {
+        label: normalizeText(entry.label) || entry.id,
+        capabilitySource: 'config',
+        configId: entry.id
+    };
+    // Missing or unknown constraints must not erase working controls or references.
+    if (['enum', 'fixed', 'unsupported'].includes(ratioOption?.type)) {
+        const ratios = resolutionValues(ratioOption);
+        Object.assign(overrides, {
+            ratios, defaultRatio: pickDefault(ratioOption, ratios),
+            resolveAdaptiveRatio: ratios.includes('adaptive'), adaptiveFallbackRatio: '16:9'
+        });
+    }
+    if (['enum', 'fixed', 'unsupported'].includes(resolutionOption?.type)) {
+        const resolutions = resolutionValues(resolutionOption);
+        Object.assign(overrides, { resolutions, defaultResolution: pickDefault(resolutionOption, resolutions) });
+    }
+    let durations = null;
+    let durationControl;
     if (durationOption?.type === 'fixed') {
         durations = [Number(durationOption.value)];
         durationControl = 'fixed';
@@ -607,40 +625,30 @@ export function toVideoProfileOverrides(config, entry) {
         durations = [];
         for (let value = min; value <= max && durations.length < 120; value += 1) durations.push(value);
         durationControl = 'slider';
+    } else if (durationOption?.type === 'unsupported') {
+        durations = [];
+        durationControl = null;
     }
-
-    const referenceLimit = key => {
-        const declared = entry.capabilities?.[key];
-        if (!entryCapabilitySupported(config, entry, key)) return 0;
-        const max = Number(declared?.max);
-        return Number.isFinite(max) ? max : DEFAULT_REFERENCE_LIMITS[REFERENCE_KINDS[key].input];
-    };
-
-    return {
-        label: normalizeText(entry.label) || entry.id,
-        ratios,
-        resolutions,
-        durations,
-        durationControl,
-        supportsWebSearch: entryCapabilitySupported(config, entry, 'webSearch'),
-        supportsCameraFixed: entryCapabilitySupported(config, entry, 'cameraFixed'),
-        supportsGeneratedAudio: entryCapabilitySupported(config, entry, 'generatedAudio'),
-        supportsWatermark: entryCapabilitySupported(config, entry, 'watermark'),
-        referenceLimits: {
-            image: referenceLimit('referenceImages'),
-            video: referenceLimit('referenceVideos'),
-            audio: referenceLimit('referenceAudios')
-        },
-        defaultRatio: pickDefault(ratioOption, ratios),
-        defaultResolution: pickDefault(resolutionOption, resolutions),
-        defaultDuration: durationOption?.type === 'fixed'
+    if (durations !== null) {
+        Object.assign(overrides, { durations, durationControl, defaultDuration: durationOption?.type === 'fixed'
             ? Number(durationOption.value)
-            : (Number.isFinite(Number(durationOption?.default)) ? Number(durationOption.default) : (durations[0] ?? null)),
-        resolveAdaptiveRatio: ratios.includes('adaptive'),
-        adaptiveFallbackRatio: '16:9',
-        capabilitySource: 'config',
-        configId: entry.id
-    };
+            : (Number.isFinite(Number(durationOption?.default)) ? Number(durationOption.default) : (durations[0] ?? null)) });
+    }
+    for (const [key, field] of Object.entries({
+        webSearch: 'supportsWebSearch', cameraFixed: 'supportsCameraFixed',
+        generatedAudio: 'supportsGeneratedAudio', watermark: 'supportsWatermark'
+    })) {
+        const supported = entryCapabilitySupported(config, entry, key);
+        if (supported !== null) overrides[field] = supported;
+    }
+    const referenceLimits = {};
+    for (const [key, { input }] of Object.entries(REFERENCE_KINDS)) {
+        const declared = entry.capabilities?.[key];
+        if (declared?.supported === false) referenceLimits[input] = 0;
+        else if (declared?.supported === true && Number.isFinite(declared.max)) referenceLimits[input] = declared.max;
+    }
+    if (Object.keys(referenceLimits).length) overrides.referenceLimits = referenceLimits;
+    return overrides;
 }
 
 function resolutionValues(option) {
@@ -682,6 +690,7 @@ export function mergeVideoProfile(baseProfile, overrides) {
     return {
         ...baseProfile,
         ...overrides,
+        referenceLimits: { ...baseProfile.referenceLimits, ...overrides.referenceLimits },
         label: baseProfile.label || overrides.label,
         routeLabel: baseProfile.routeLabel,
         routeGroup: baseProfile.routeGroup,

@@ -41,6 +41,19 @@ const remoteConfig = {
     }]
 };
 
+test('retired templates do not return from cached or remote config', async () => {
+    const retired = ['video-template.seedance-1.5', 'video-template.wan', 'video-template.kling', 'video-template.tencent-vidu'];
+    const legacy = structuredClone(DEFAULT_MODEL_CONFIG);
+    legacy.models.push(...retired.map(id => ({ id, kind: 'video', match: { model: ['^retired$'] } })));
+    const store = createModelConfigStore({
+        storage: createStorage({ [MODEL_CONFIG_CACHE_KEY]: JSON.stringify({ config: legacy, fetchedAt: 1 }) }),
+        loadRemote: async () => ({ ok: true, raw: legacy })
+    });
+    assert.equal(readModelConfig(legacy).models.some(entry => retired.includes(entry.id)), false);
+    await store.refresh({ force: true });
+    assert.equal(store.getConfig().models.some(entry => retired.includes(entry.id)), false);
+});
+
 test('默认更新源写死为 artconfig.ravenhash.org 的 /config', () => {
     // 回归守卫：这个地址是内置到客户端里的更新源，改动必须是有意的。
     assert.equal(DEFAULT_MODEL_CONFIG_URL, 'https://artconfig.ravenhash.org/config');

@@ -219,10 +219,10 @@ describe('AgentGeneration planning', () => {
         assert.equal(h.plan(['video']).plan.estimatedCost, null);
     });
 
-    test('known video models without a resolution selector accept their default parameters', async t => {
-        for (const model of ['kling', 'vidu']) {
+    test('unconnected video templates are not executable Agent models', async t => {
+        for (const model of ['seedance-1.5', 'wan', 'kling', 'vidu']) {
             const h = await setup(t, { providers: [provider('videos', 'video', model)], items: [op('video', 'video')] });
-            assert.doesNotThrow(() => h.plan(['video']));
+            assert.throws(() => h.plan(['video']), { code: 'MODEL_CAPABILITY_UNKNOWN' });
         }
     });
 });

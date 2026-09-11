@@ -17,7 +17,7 @@ test('CSV 每一行都被默认 CONFIG 恰好一个条目覆盖，且 notes 逐�
     const { readCsvRows, checkConfigAgainstCsv } = await import('../scripts/sync-model-config.mjs');
     const rows = readCsvRows();
     const config = readConfig();
-    assert.equal(rows.length, 16, 'CSV 行数变化时必须同步确认 CONFIG');
+    assert.equal(rows.length, 12, 'CSV 行数变化时必须同步确认 CONFIG');
     assert.deepEqual(checkConfigAgainstCsv({ rows, config }), []);
 });
 
@@ -47,13 +47,13 @@ test('src/model-config-default.js 与 JSON 完全一致（renderer 打包用的�
     assert.deepEqual(module.DEFAULT_MODEL_CONFIG, readConfig());
 });
 
-test('默认 CONFIG 的 refreshIntervalMs 是 1 小时，且不依赖远端即可给出 16 个模型', () => {
+test('默认 CONFIG 的 refreshIntervalMs 是 1 小时，且不依赖远端即可给出 12 个模型', () => {
     const config = readConfig();
     assert.equal(config.refreshIntervalMs, 60 * 60 * 1000);
-    assert.equal(config.models.length, 16);
+    assert.equal(config.models.length, 12);
     const kinds = config.models.reduce((acc, entry) => {
         acc[entry.kind] = (acc[entry.kind] || 0) + 1;
         return acc;
     }, {});
-    assert.deepEqual(kinds, { image: 3, video: 11, text: 2 });
+    assert.deepEqual(kinds, { image: 3, video: 7, text: 2 });
 });
