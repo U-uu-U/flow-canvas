@@ -358,6 +358,36 @@ test('runFrom: 批量生成结果逐个触发落地', async () => {
     delete NT.__test_batch_output;
 });
 
+test('two media references reach image submission in connection order with matching prompt labels', async () => {
+    const previousWindow = globalThis.window;
+    let submitted;
+    globalThis.window = { flowCanvas: { mcp: { generateImage: async body => {
+        submitted = body;
+        return { success: true, filePaths: ['result.png'] };
+    } } } };
+    try {
+        const items = [media('a', '/fixtures/person.png'), media('b', '/fixtures/ship.png'), op('g', 'image', {
+            prompt: '以的背景放入的人物',
+            referenceCitationIds: ['a->g', 'b->g'], referenceCitationLabels: ['图一', '图二'],
+            referenceCitationOccurrences: [
+                { id: 'one', connectionId: 'b->g', offset: 1 },
+                { id: 'two', connectionId: 'a->g', offset: 6 }
+            ]
+        })];
+        const ctx = makeCtx(items, [conn('a', 'out', 'g', 'source'), conn('b', 'out', 'g', 'source')]);
+        ctx.getImageProvider = () => ({ apiKey: 'fixture', model: 'gpt-image-2.5-sunburst' });
+        ctx.prepareImageReferences = async references => references.map(reference => ({ filePath: reference.filePath.replace('.png', '-small.png') }));
+        const result = await new R.GraphRunner(ctx).runFrom('g');
+        assert.equal(result.ok, true, result.reason);
+        assert.deepEqual(submitted.sourceReferences.map(reference => reference.filePath), ['/fixtures/person-small.png', '/fixtures/ship-small.png']);
+        assert.match(submitted.prompt, /图一=第1张，图二=第2张/);
+        assert.match(submitted.prompt, /以图二的背景放入图一的人物/);
+    } finally {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+    }
+});
+
 test('cancel: clicking an upstream node cancels its whole pending chain, not an independent run', async t => {
     const releases = new Map();
     NT.__audit_slow = { title: 'Slow', inputs: [], outputs: [{ name: 'out', dataType: 'string' }],

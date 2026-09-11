@@ -9,6 +9,7 @@
 - 关键 IPC 的 invocationId、开始结束时间、耗时、返回错误与取消状态。
 - 生成任务的 projectId、nodeId、clientTaskId、taskId；提交、下载、恢复和失败阶段。
 - 图片请求的 requestId、服务端响应编号、HTTP 状态、请求大小、参考数量和完整响应耗时。
+- 图片请求的 referenceManifest 按实际上传顺序记录每张图片的 SHA-256、字节数、MIME 和 multipart 字段名，不含图片内容。可据此与中转站核对是否收到全部文件；客户端记录不能证明上游模型采用了素材。
 - 视频进度按阶段和进度区间记录，避免每次轮询刷屏。
 - Agent 状态、步骤、工具名、用量与错误；不记录逐字输出。
 - 画布同步保存的 revision 冲突。

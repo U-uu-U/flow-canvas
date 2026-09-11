@@ -846,7 +846,7 @@ class FlowCanvasBridge {
         const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
         const targetDir = targetInfo.targetDir;
 
-        const sourceContext = collectImageSourceReferences(data, planService, body);
+        const sourceContext = collectImageSourceReferences(data, planService, body, { requireAll: true });
         const generationOptions = await resolveImageGenerationOptions({
             ...body,
             sourceReferences: sourceContext.references
@@ -1546,14 +1546,17 @@ function syncPlanReferencesForItemUpdate(planService, oldItem, nextItem) {
     return updated;
 }
 
-function collectImageSourceReferences(data, planService, body = {}) {
+function collectImageSourceReferences(data, planService, body = {}, { requireAll = false } = {}) {
     const requested = Array.isArray(body.sourceReferences) ? body.sourceReferences : [];
     const references = [];
     const missing = [];
     const pushReference = reference => {
         const normalized = normalizeSourceReference(reference, data);
-        if (!normalized) return;
-        if (references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
+        if (!normalized) {
+            if (requireAll) missing.push({ name: '未找到路径的参考素材' });
+            return;
+        }
+        if (!requireAll && references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
         if (isSupportedSourceImage(normalized.filePath) && fs.existsSync(normalized.filePath)) {
             references.push(normalized);
         } else {
@@ -1575,6 +1578,9 @@ function collectImageSourceReferences(data, planService, body = {}) {
         }
     }
 
+    if (requireAll && missing.length) {
+        throw new Error(`参考图未完整添加，已停止生成：${missing.map(reference => reference.name).join('、')}。请重接失联素材，或转为 PNG/JPEG/WebP 后重新添加；不会忽略参考图继续生成。`);
+    }
     return { references, missing };
 }
 
@@ -2034,7 +2040,12 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             const diagnostic = {
                 requestId: activeRequestId, startedAt,
                 clientTaskId: options.clientTaskId, projectId: options.projectId, nodeId: options.nodeId,
-                payloadBytes: Buffer.byteLength(requestPayload), imageCount: sourceImages.length
+                payloadBytes: Buffer.byteLength(requestPayload), imageCount: sourceImages.length,
+                referenceManifest: sourceImages.map((image, index) => ({
+                    uploadIndex: index + 1, bytes: image.buffer.length, mimeType: image.mimeType,
+                    sha256: crypto.createHash('sha256').update(image.buffer).digest('hex'),
+                    multipartField: openAiImageEdit ? (sourceImages.length === 1 ? 'image' : 'image[]') : null
+                }))
             };
             options.onRequestDiagnostic?.({ ...diagnostic, phase });
             recordDiagnostic('info', 'image.request', { ...diagnostic, endpoint, model });

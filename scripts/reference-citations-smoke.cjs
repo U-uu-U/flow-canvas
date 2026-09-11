@@ -22,7 +22,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             const Fixture = new Function('resolveCanvasFilePath', `const GENERATION_COMPOSER_CARET_ANCHOR = '\\u200B'; return class { ${methods} }`)(value => value);
             const fixture = new Fixture();
             const data = { nodeType: 'image', config: { prompt: 'A B C' } };
-            const references = ['first', 'second'].map(id => ({ connection: { id, transient: true }, source: { filePath: '', mediaType: 'image' } }));
+            const references = ['first', 'second'].map(id => ({ connection: { id, transient: true }, source: { id: `source-${id}`, filePath: '', mediaType: 'image' } }));
             // Use an inline preview so this test does not depend on any user files.
             references.forEach(entry => { entry.source.filePath = 'fixture.png'; });
             const element = document.createElement('section');
@@ -84,6 +84,15 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         });
         const after = await page.evaluate(() => window.citationFixture.data.config.referenceCitationOccurrences);
         assert.deepEqual(after, before.occurrences);
+        // Materialized/reopened composers have new connection IDs but the same source nodes.
+        await page.evaluate(() => {
+            const { fixture, references } = window.citationFixture;
+            references.forEach(reference => { reference.connection.id += '-materialized'; });
+            fixture._renderGenerationComposerReferences('test');
+        });
+        assert.deepEqual(await pills.allTextContents(), ['图一', '图一', '图二']);
+        assert.deepEqual(await page.evaluate(() => window.citationFixture.data.config.referenceCitationOccurrences.map(entry => entry.connectionId)),
+            ['first-materialized', 'first-materialized', 'second-materialized']);
         await first.focus();
         await page.keyboard.press('Enter');
         assert.equal(await pills.count(), 4);
@@ -107,7 +116,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         // Legacy single-reference configurations migrate with their saved offsets.
         await page.evaluate(() => {
             const { fixture, data, prompt } = window.citationFixture;
-            data.config = { prompt: 'A B C', referenceCitationIds: ['second'], referenceCitationOffsets: { second: 2 } };
+            data.config = { prompt: 'A B C', referenceCitationIds: ['second-materialized'], referenceCitationOffsets: { 'second-materialized': 2 } };
             prompt.replaceChildren();
             fixture._setGenerationComposerPromptValue(prompt, data.config.prompt);
             fixture._renderGenerationComposerReferences('test');

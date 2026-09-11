@@ -23,6 +23,7 @@ async function poll(read, test, timeout = 30000) {
 (async () => {
     const live = process.env.FLOW_CANVAS_SMOKE_LIVE === '1';
     const liveVideo = process.env.FLOW_CANVAS_SMOKE_LIVE_VIDEO === '1';
+    const multiReference = process.env.FLOW_CANVAS_SMOKE_MULTI_REFERENCE === '1' && !live;
     const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-agent-smoke-'));
     if (live) await fs.copyFile(path.join(process.env.APPDATA, 'flow-canvas', 'Local State'), path.join(profile, 'Local State'));
     const assets = path.join(profile, 'assets');
@@ -31,6 +32,11 @@ async function poll(read, test, timeout = 30000) {
     const image = await sharp({ create: { width: 400, height: 300, channels: 3, background: '#759da8' } }).png().toBuffer();
     const refPath = path.join(assets, 'reference.png');
     await fs.writeFile(refPath, image);
+    const secondImage = multiReference
+        ? await sharp({ create: { width: 160, height: 240, channels: 3, background: '#a85c39' } }).png().toBuffer() : null;
+    const secondRefPath = path.join(assets, 'second-reference.png');
+    if (multiReference) await fs.writeFile(secondRefPath, secondImage);
+    const receivedImages = [];
     const videoPath = path.join(assets, 'clip.mp4');
     const videoTest = process.env.FLOW_CANVAS_SMOKE_VIDEO === '1';
     if (videoTest) {
@@ -45,7 +51,15 @@ async function poll(read, test, timeout = 30000) {
         let body = {};
         try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { /* Image edit multipart. */ }
         res.setHeader('content-type', 'application/json');
-        if (req.url.includes('/images/')) { submissions++; res.end(JSON.stringify({ data: [{ b64_json: image.toString('base64') }] })); return; }
+        if (req.url.includes('/images/')) {
+            submissions++;
+            if (multiReference) {
+                const request = new Request('http://localhost' + req.url, { method: 'POST', headers: req.headers, body: Buffer.concat(chunks) });
+                const form = await request.formData();
+                for (const file of form.getAll('image[]')) receivedImages.push(Buffer.from(await file.arrayBuffer()));
+            }
+            res.end(JSON.stringify({ data: [{ b64_json: image.toString('base64') }] })); return;
+        }
         requests.push(body);
         const outputs = (body.messages || []).filter(m => m.role === 'tool').map(m => { try { return JSON.parse(m.content); } catch { return {}; } });
         let message = { role: 'assistant', content: '审阅通过：已检查画面，声音与完整运动未验证。' };
@@ -81,7 +95,11 @@ async function poll(read, test, timeout = 30000) {
         globalConfig: { textProviderId: 'text', imageProviderId: 'image', agentExecutionMode: 'auto' } }));
     const items = [{ id: 'reference', kind: 'media', mediaType: 'image', filePath: refPath, x: 100, y: 80, width: 240, height: 180 },
         { id: 'generate', kind: 'op', nodeType: 'image', title: '图片生成', config: { prompt: '保留参考图主体，改为干净背景', model: 'gpt-image-2', providerId: 'image', count: 1 }, x: 430, y: 80, width: 240, height: 180 }];
-    const connections = [{ id: 'input', from: { nodeId: 'reference', port: 'source' }, to: { nodeId: 'generate', port: 'source' } }];
+    const connections = [{ id: 'input', from: { nodeId: 'reference', port: 'out' }, to: { nodeId: 'generate', port: 'source' } }];
+    if (multiReference) {
+        items.push({ id: 'reference-2', kind: 'media', mediaType: 'image', filePath: secondRefPath, x: 100, y: 300, width: 160, height: 240 });
+        connections.push({ id: 'input-2', from: { nodeId: 'reference-2', port: 'out' }, to: { nodeId: 'generate', port: 'source' } });
+    }
     if (videoTest) items.push({ id: 'clip', kind: 'media', mediaType: 'video', filePath: videoPath, x: 80, y: 360, width: 240, height: 180 });
     await fs.writeFile(path.join(profile, 'data', 'board.json'), JSON.stringify({ version: 1, activeGroupId: 'smoke',
         folderGroups: [{ id: 'smoke', name: 'Agent 验收', folders: [assets], defaultSaveFolder: assets, savedItems: items, connections, boardRevision: 0 },
@@ -130,8 +148,15 @@ async function poll(read, test, timeout = 30000) {
             assert.equal(inspected.frames[0].time, 0.5);
         }
         if (!live) assert.equal(submissions, 1);
+        if (multiReference) {
+            assert.equal(receivedImages.length, 2, 'Both references must reach the HTTP server');
+            assert.deepEqual(receivedImages[0], image);
+            assert.deepEqual(receivedImages[1], secondImage);
+            // The file comparison above verifies the actual wire body, not just renderer attachments.
+            console.log('Two-reference HTTP check passed: both multipart files match their source bytes in upload order.');
+        }
         assert.equal(result.steps.filter(step => step.status === 'completed').length, 1);
-        if (!live) {
+        if (!live && !multiReference) {
             const workflowRun = await page.evaluate(id => window.flowCanvas.agent.start({ projectId: 'smoke', conversationId: 'workflow-conversation',
                 messages: [{ role: 'user', content: `SAVE:${id}` }] }), run.id);
             const workflow = await poll(() => page.evaluate(id => window.flowCanvas.agent.get({ runId: id }), workflowRun.id),
@@ -145,7 +170,7 @@ async function poll(read, test, timeout = 30000) {
         if (!live) {
             const project = board.folderGroups.find(g => g.id === 'smoke');
             assert.equal(project.plans[0].rows[0].id, 'shot-smoke');
-            assert.equal(project.agentWorkflows.length, 1);
+            if (!multiReference) assert.equal(project.agentWorkflows.length, 1);
         }
         assert.ok(board.folderGroups.find(g => g.id === 'smoke').savedItems.some(item => item.metadata?.agentRunId === run.id && item.filePath));
         if (!live) assert.ok(requests.some(request => (request.messages || []).some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'))));

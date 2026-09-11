@@ -2168,6 +2168,7 @@ export class CanvasManager {
         const entry = this.items.get(nodeId);
         const data = entry?.data;
         if (!entry || !data?.composerDraft) return data || null;
+        const citationOccurrences = this._generationComposerCitationState(data).occurrences.map(entry => ({ ...entry }));
         const sourceId = data.composerSourceItemId;
         const useSourceAsReference = data.composerUseSourceAsReference !== false;
         const referenceConnections = Array.isArray(data.composerReferenceConnections)
@@ -2234,12 +2235,14 @@ export class CanvasManager {
             this.items.set(nodeId, { group: draftGroup, data, loaded: true, loading: false });
             data.composerReferenceConnections = referenceConnections;
             data.composerReferenceItemIds = referenceConnections.map(reference => reference.nodeId);
+            data.config.referenceCitationOccurrences = citationOccurrences;
             this._showCanvasStatus('参考图连接失败，请重新选择图片', 3200);
             return null;
         }
         if (this._generationComposer?.nodeId === nodeId) {
             this._generationComposer.materialized = true;
         }
+        data.config.referenceCitationOccurrences = citationOccurrences;
         this._renderGenerationComposerReferences(nodeId);
         this._positionGenerationComposer();
         this.emit('change');
@@ -8870,7 +8873,12 @@ export class CanvasManager {
             : configuredIds.map(connectionId => ({
                 id: crypto.randomUUID(), connectionId,
                 offset: data.config.referenceCitationOffsets?.[connectionId]
-            }))).filter(entry => entry && validIds.has(entry.connectionId));
+            }))).map(entry => {
+                if (!entry) return null;
+                const reference = imageReferences.find(({ connection }) => connection.id === entry.connectionId)
+                    || imageReferences.find(({ source }) => source.id === entry.sourceNodeId);
+                return reference ? { ...entry, connectionId: reference.connection.id, sourceNodeId: reference.source.id } : null;
+            }).filter(Boolean);
         data.config.referenceCitationOccurrences = occurrences;
         const selectedIds = new Set(occurrences.map(entry => entry.connectionId));
         const orderedIds = imageReferences
@@ -8928,15 +8936,16 @@ export class CanvasManager {
             this._generationImageReferenceLabel(index)
         ]));
         const existingById = new Map();
-        const occurrenceIds = new Set(state.occurrences.map(entry => entry.id));
+        const occurrencesById = new Map(state.occurrences.map(entry => [entry.id, entry]));
         prompt.querySelectorAll('[data-citation-id]').forEach(citation => {
-            const citationId = citation.dataset.citationId;
             const occurrenceId = citation.dataset.citationOccurrenceId;
-            if (!occurrenceIds.has(occurrenceId) || existingById.has(occurrenceId)) {
+            const occurrence = occurrencesById.get(occurrenceId);
+            if (!occurrence || existingById.has(occurrenceId)) {
                 citation.remove();
                 return;
             }
-            const label = labelsById.get(citationId);
+            citation.dataset.citationId = occurrence.connectionId;
+            const label = labelsById.get(occurrence.connectionId);
             citation.textContent = label;
             citation.title = `取消引用${label}`;
             citation.setAttribute('aria-label', `取消引用${label}`);
@@ -9082,6 +9091,7 @@ export class CanvasManager {
             .map(citation => ({
                 id: citation.dataset.citationOccurrenceId,
                 connectionId: citation.dataset.citationId,
+                sourceNodeId: imageReferences.find(({ connection }) => connection.id === citation.dataset.citationId)?.source.id,
                 offset: measuredOffsets[citation.dataset.citationOccurrenceId]
             }));
         const state = this._generationComposerCitationState(data, references);
