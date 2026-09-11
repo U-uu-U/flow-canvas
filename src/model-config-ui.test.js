@@ -1,29 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkModelRequest, describeModelConfigStatus, formatModelRequestIssues, renderModelCapabilityPanel } from './model-config-ui.js';
-
-// 极简 DOM 桩：model-config-ui 只用到 createElement / append / replaceChildren / textContent。
-function installFakeDom() {
-    const createElement = tagName => ({
-        tagName,
-        children: [],
-        className: '',
-        textContent: '',
-        hidden: false,
-        dataset: {},
-        classList: { add() {}, toggle() {} },
-        append(...nodes) { this.children.push(...nodes); },
-        replaceChildren(...nodes) { this.children = nodes; },
-        querySelector() { return null; }
-    });
-    globalThis.document = { createElement };
-}
-
-function collectText(node) {
-    if (!node) return '';
-    if (node.children?.length) return node.children.map(collectText).join(' ');
-    return String(node.textContent || '');
-}
+import { checkModelRequest, describeModelConfigStatus, formatModelRequestIssues } from './model-config-ui.js';
 
 test('checkModelRequest 给出可展示的中文拦截文案', () => {
     const blocked = checkModelRequest({
@@ -57,34 +34,6 @@ test('未收录模型只提示不拦截', () => {
     assert.equal(result.ok, true);
     assert.equal(result.matched, false);
     assert.match(formatModelRequestIssues(result), /未收录在模型配置中/);
-});
-
-test('能力面板渲染「可以做 / 不能做 / 参数限制」与原表说明', () => {
-    installFakeDom();
-    const host = document.createElement('div');
-    const rendered = renderModelCapabilityPanel(host, { model: 'sd2.5-route1' }, 'video');
-    assert.equal(rendered, true);
-    assert.equal(host.hidden, false);
-    const text = collectText(host);
-    assert.match(text, /模型能力/);
-    assert.match(text, /可以做/);
-    assert.match(text, /不能做/);
-    assert.match(text, /参数限制/);
-    assert.match(text, /参考图/);
-    assert.match(text, /固定 30 秒/);
-    assert.match(text, /原表说明/);
-    assert.match(text, /通过率约90%/);
-    // 面板必须显示配置来源，让用户知道这条限制从哪来
-    assert.match(text, /内置默认配置|本地缓存|服务器/);
-});
-
-test('未收录模型的面板说明不做限制并提示配置来源', () => {
-    installFakeDom();
-    const host = document.createElement('div');
-    renderModelCapabilityPanel(host, { model: 'my-private-model' }, 'video');
-    const text = collectText(host);
-    assert.match(text, /未收录/);
-    assert.match(text, /不做参数限制/);
 });
 
 test('设置卡状态文案覆盖四种来源与错误态', () => {

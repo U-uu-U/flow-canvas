@@ -5,7 +5,7 @@
 //   1. 起真实 configserver（临时数据目录，播种内置默认配置 → r0）；
 //   2. 起真实 Electron 主进程 + 真实 dist 渲染层，窗口隐藏；
 //   3. 渲染层把自己指向这个本地服务（通过 localStorage，顺便验证持久化地址在启动时生效）；
-//   4. 断言能力面板真的画出了服务端配置里的内容（改一条 note 作为指纹）；
+//   4. 打开真实画布视频节点，断言时长和比例选项使用服务端配置；
 //   5. 用管理接口回滚到旧版本，再在界面上点「立即刷新」，断言客户端跟着回到旧版本；
 //   6. 直接走 IPC 验证远端拉取的三种结果：合法、404、非白名单地址。
 //
@@ -20,12 +20,20 @@ const { ApiConfigStore } = require('../electron-main/api-config-store');
 
 const HERE = path.dirname(__filename);
 const ADMIN_PASSWORD = 'smoke-admin-password';
-const FINGERPRINT = '流水线烟测指纹';
 const MODEL_COUNT = require('../shared/model-config.default.json').models.length;
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-model-config-smoke-'));
 fs.mkdirSync(path.join(profile, 'data', 'asset-library'), { recursive: true });
-fs.writeFileSync(path.join(profile, 'data/board.json'), JSON.stringify({ version: 1, items: [], folderGroups: [], mcp: { enabled: false } }));
+const items = [{
+    id: 'smoke-video-node', kind: 'op', nodeType: 'video',
+    x: 120, y: 100, width: 320, height: 180,
+    config: { providerId: 'smoke-video', model: 'sd2.5-route1', prompt: 'Smoke video', duration: 30, resolution: '720p', ratio: '16:9' }
+}];
+fs.writeFileSync(path.join(profile, 'data/board.json'), JSON.stringify({
+    version: 1, activeGroupId: 'model-smoke', items,
+    folderGroups: [{ id: 'model-smoke', name: 'Model config smoke', savedItems: items, connections: [], folders: [], boardRevision: 0 }],
+    mcp: { enabled: false }
+}));
 
 // 预置一个视频 provider，用来验证 CONFIG → 既有 video profile → UI 的完整链路：
 // sd2.5-route1 在默认 CONFIG 里是「固定 30 秒、最多 9 张参考图」。
@@ -124,16 +132,27 @@ const READ_DOM = `(() => {
         settingsSummary: text(settings && settings.querySelector('[data-config-summary]')),
         settingsState: text(settings && settings.querySelector('[data-config-state]')),
         bridgeAvailable: typeof window.flowCanvas?.modelConfig?.fetch === 'function',
-        videoPanel: text(document.getElementById('videoModelCapabilities')),
-        imagePanel: text(document.getElementById('imageModelCapabilities')),
-        videoPanelVisible: document.getElementById('videoModelCapabilities')?.hidden === false,
-        videoDurationControl: text(document.getElementById('videoDurationControl')),
-        ratioOptions: document.querySelectorAll('#videoRatioField .creation-ratio-grid button, #videoRatioField .creation-ratio-grid [role=radio]').length
+        legacyWorkspaceCount: document.querySelectorAll('#videoWorkspace, #imageWorkspace, #videoModelPicker, #videoPromptDock, #agentTextModelSelect, #agentImageModelSelect, #agentVideoModelSelect').length,
+        agentMounted: Boolean(document.getElementById('agentMessages') && document.getElementById('agentInput')),
+        canvasNodeMounted: Boolean(window.Konva?.stages[0]?.findOne('#smoke-video-node')),
+        videoDurationControl: text(document.querySelector('.generation-composer-duration-output')),
+        ratioOptions: document.querySelectorAll('.generation-composer-select-popover[aria-label="画面比例"] [role="option"]').length
     };
 })()`;
 
 async function readDom(win) {
     return win.webContents.executeJavaScript(READ_DOM);
+}
+
+async function openVideoParameters(win) {
+    await waitFor(win, dom => dom.canvasNodeMounted, { label: '画布视频节点加载' });
+    await win.webContents.executeJavaScript(`(() => {
+        window.Konva.stages[0].findOne('#smoke-video-node').fire('click', {
+            evt: { button: 0, ctrlKey: false, metaKey: false, shiftKey: false }
+        });
+        document.querySelector('.generation-composer-select-trigger[aria-label="画面比例"]').click();
+    })()`);
+    return readDom(win);
 }
 
 // 轮询到条件满足为止，避免把启动/刷新竞态当成失败。
@@ -213,20 +232,16 @@ app.on('browser-window-created', (_event, win) => {
             const expect = (ok, label) => { if (!ok) problems.push(label); };
 
             // ── 从服务器拉取并应用（启动时自动刷新）────────────────
-            const applied = await waitFor(win, dom => (/已从服务器获取最新配置/.test(dom.settingsState) && new RegExp(`r${seedRevision + 1}\\b`).test(dom.settingsSummary)),
+            await waitFor(win, dom => (/已从服务器获取最新配置/.test(dom.settingsState) && new RegExp(`r${seedRevision + 1}\\b`).test(dom.settingsSummary)),
                 { label: '客户端应用服务器配置 r1' });
+            const applied = await openVideoParameters(win);
             expect(applied.settingsMounted, '设置卡未挂载（initModelConfigUi 没跑到）');
             expect(applied.settingsSummary.includes(`${MODEL_COUNT} 个模型`), `内置配置模型数异常：${applied.settingsSummary}`);
             expect(/自定义地址/.test(applied.settingsSummary), `更新源应显示为自定义地址：${applied.settingsSummary}`);
             expect(applied.bridgeAvailable, 'preload 未暴露 flowCanvas.modelConfig.fetch');
-            expect(applied.videoPanelVisible, '视频能力面板没有显示');
-            expect(/模型能力/.test(applied.videoPanel), `能力面板未渲染：${applied.videoPanel}`);
-            expect(/RavenHash视频 · SD2.5线路一/.test(applied.videoPanel), '能力面板未显示命中线路');
-            expect(/固定 30 秒/.test(applied.videoPanel), '能力面板未反映 CONFIG 的固定时长');
-            expect(/最多 9 张参考图/.test(applied.videoPanel), '能力面板未反映参考图上限');
-            expect(applied.videoPanel.includes(FINGERPRINT), '服务端配置的内容没有进入能力面板（远端配置未真正生效）');
-            expect(/服务器/.test(applied.videoPanel), '能力面板来源未标为服务器');
-            expect(applied.videoDurationControl.includes('30'), `既有控件未跟随 CONFIG：${applied.videoDurationControl}`);
+            expect(applied.legacyWorkspaceCount === 0, '旧侧栏生成工作区仍有残留 DOM');
+            expect(applied.agentMounted, 'Agent 聊天入口未保留');
+            expect(applied.videoDurationControl === '30s', `画布节点时长未跟随 CONFIG：${applied.videoDurationControl}`);
             expect(applied.ratioOptions === 2, `比例控件没有跟随远端配置：${applied.ratioOptions}`);
             if (problems.length) return finish(1, `FAIL 客户端应用服务端配置：\n  - ${problems.join('\n  - ')}\nDOM: ${JSON.stringify(applied, null, 2)}`);
 
@@ -234,8 +249,9 @@ app.on('browser-window-created', (_event, win) => {
             const seedName = seedVersionName;
             await adminPost(serverUrl, '/admin/apply', { csrf: await adminCsrf(serverUrl, cookie), name: seedName }, cookie);
             await win.webContents.executeJavaScript(`document.querySelector('#modelConfigSettings [data-config="refresh"]').click();`);
-            const rolledBack = await waitFor(win, dom => (new RegExp(`r${seedRevision}\\b`).test(dom.settingsSummary) && !dom.videoPanel.includes(FINGERPRINT)),
+            await waitFor(win, dom => new RegExp(`r${seedRevision}\\b`).test(dom.settingsSummary),
                 { label: '回滚后客户端刷新到 r0' });
+            const rolledBack = await openVideoParameters(win);
             expect(/已从服务器获取最新配置/.test(rolledBack.settingsState), `回滚后状态异常：${rolledBack.settingsState}`);
             expect(rolledBack.ratioOptions === 6, `回滚后比例控件未恢复：${rolledBack.ratioOptions}`);
 
@@ -261,8 +277,9 @@ app.on('browser-window-created', (_event, win) => {
             finish(0, [
                 'PASS 模型 CONFIG 端到端烟测（真实 configserver + 真实 Electron 渲染层）',
                 `  服务端：${serverUrl}/config（版本 ${seedName} 已回滚为现行 r0）`,
-                `  首次拉取：r1 已应用到界面（能力面板出现指纹「${FINGERPRINT}」）`,
-                `  回滚后：r0 生效，指纹消失`,
+                '  首次拉取：r1 已应用到画布节点（固定 30 秒、2 个比例）',
+                '  回滚后：r0 生效，节点恢复 6 个比例',
+                '  旧侧栏生成 DOM 已移除，Agent 和 CONFIG 设置保留',
                 `  IPC 结果：${JSON.stringify(bridge)}`,
                 ''
             ].join('\n'));
@@ -282,7 +299,7 @@ let seedRevision = 0;
 const serverReady = (async () => {
     await startConfigServer();
 
-    // 通过管理接口发布 r1：只改一条 note 作为指纹，其余与内置默认一致。
+    // 通过管理接口发布 r1：缩小比例枚举，用真实节点控件验证配置生效。
     cookie = await adminLogin(serverUrl);
     const csrf = await adminCsrf(serverUrl, cookie);
     const baseline = await fetch(`${serverUrl}/config`).then(response => response.json());
@@ -292,8 +309,7 @@ const serverReady = (async () => {
     const route1 = edited.models.find(entry => entry.id === 'ravenhash-video.sd2.5-route1');
     route1.options.ratio.values = ['16:9', '9:16'];
     route1.options.ratio.default = '16:9';
-    route1.capabilities.face.note = `${route1.capabilities.face.note}（${FINGERPRINT}）`;
-    await adminPost(serverUrl, '/admin/save', { csrf, content: JSON.stringify(edited), note: '烟测指纹' }, cookie);
+    await adminPost(serverUrl, '/admin/save', { csrf, content: JSON.stringify(edited), note: '烟测比例选项' }, cookie);
     const published = await fetch(`${serverUrl}/config`).then(response => response.json());
     if (published.revision !== 1) throw new Error(`发布后 revision 应为 1，实际 ${published.revision}`);
     console.log(`[smoke] configserver 就绪：${serverUrl}（种子版本 ${seedVersionName}，已发布 r1）`);

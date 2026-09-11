@@ -62,7 +62,7 @@ test('fixed-route validation also guards graph execution without a composer', as
     assert.equal(requests.length, 0);
 });
 
-test('sidebar controls and canvas profile use the same model config', () => {
+test('canvas provider profiles preserve configured video options and MJ image sizes', () => {
     for (const model of ['sd2.5-route1', 'sd2.5', 'seedance_v2.5', 'minimax-h3']) {
         const provider = { model, endpoint: 'https://art.ravenhash.org/v1' };
         const sidebar = Object.create(AgentSidebar.prototype);

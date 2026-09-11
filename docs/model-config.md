@@ -197,15 +197,14 @@ GraphRunner 在引用绑定、提示词合并及图片意图编译后，对最�
 
 | 位置 | 行为 |
 | --- | --- |
-| 侧栏图像 / 视频工作区 | 模型卡片下方新增能力面板：`可以做` / `不能做` / `参数限制` / `原表说明`，并标注配置来源（服务器 r12 / 本地缓存 / 内置默认） |
 | 侧栏设置 → 「模型能力配置 CONFIG」 | 服务器地址、立即刷新、恢复内置默认、当前来源与版本、上次拉取、下次自动刷新、错误原因 |
 | 视频模型 profile（`agent-sidebar.getVideoModelProfile`） | 用 CONFIG 覆盖能力与限制，**保留** `routeLabel/routeGroup/price` 等线路元数据 → 既有的控件隐藏、非法值回落、超额连线断开全部自动跟随 CONFIG |
 | 图片模型 profile（`agent-sidebar.getImageModelProfile`） | 用 CONFIG 覆盖 `resolutionTiers/defaultResolutionTier`（例如 mj_imagine 只有 1K/2K） |
-| 侧栏「生成图片 / 生成视频」 | 提交前校验；有 error 则内联报错并中止 |
 | 画布生成器气泡「开始生成」 | 提交前校验；有 error 时在气泡内报错并中止，`unknown` 类警告走顶栏状态条 |
 
-CONFIG 变化（首次拉取成功 / 手动刷新 / 恢复默认）会通过 `modelConfigStore.subscribe` 同步更新能力面板、
-实际参数控件和选中模型卡片，不需要重启应用。侧栏与画布使用相同的 profile 覆盖逻辑。
+CONFIG 变化（首次拉取成功 / 手动刷新 / 恢复默认）会更新共享配置和 Agent 模型选择器，画布节点
+重新打开参数弹窗时使用最新 profile，不需要重启应用。生图、生视频只保留画布节点入口；旧侧栏工作区及其
+草稿缓存读写已移除，Agent 对话、API 设置、节点提示词预设和任务恢复继续保留。
 
 ## 8. 运维：更新流程
 
@@ -233,7 +232,7 @@ npm run test:model-config:smoke   # 真实 configserver + 真实 Electron 渲染
 
 烟测（`scripts/model-config-smoke.cjs`）不依赖 Playwright：它**以独立进程启动真实的
 `configserver`**，再起真实 Electron 主进程 + 真实 `dist` 产物，隐藏窗口后在渲染进程里断言 DOM。
-链路是完整的「管理面板写入 r1 → 客户端自动拉取并应用到能力面板 → 管理面板回滚 r0 → 界面点
+链路是完整的「管理面板写入 r1 → 客户端自动拉取并应用到画布视频节点参数 → 管理面板回滚 r0 → 界面点
 『立即刷新』跟着回退」，用来兜住单元测试覆盖不到的「打包后加载顺序 / 挂载点 / preload 桥 /
 CONFIG→既有 profile→控件 / 真机网络路径」这一层。
 
