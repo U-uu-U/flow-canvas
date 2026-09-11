@@ -30,11 +30,12 @@ test('profile lookup retains matching, defaults and capability constraints', () 
 });
 
 test('fixed-duration routes retain the same CNY sale and media capabilities', () => {
-    for (const [model, label] of [['sd2.5-route1', '路线一'], ['sd2.5', '路线二']]) {
+    for (const [model, label] of [['sd2.5-route1', '线路一'], ['sd2.5', '线路二']]) {
         const provider = { model, endpoint: 'https://art.ravenhash.org/v1' };
         const profile = getVideoModelProfile(provider);
         assert.equal(inferProviderCapability(provider), 'video');
         assert.equal(profile.routeLabel, label);
+        assert.equal(profile.routeGroup, 'seedance25-fixed');
         assert.deepEqual(profile.durations, [30]);
         assert.deepEqual(profile.resolutions, ['720p']);
         assert.equal(profile.referenceLimits.image, 9);

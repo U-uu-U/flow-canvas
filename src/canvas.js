@@ -9219,31 +9219,26 @@ export class CanvasManager {
         `;
         const search = popover.querySelector('input');
         const list = popover.querySelector('.generation-composer-model-options');
-        let selectedRoute = '';
-        const routes = [...new Set(providers.map(provider => provider.routeLabel).filter(Boolean))].sort();
-        const routePicker = document.createElement('div');
-        routePicker.className = 'generation-composer-segmented';
-        routePicker.setAttribute('aria-label', '选择视频路线');
-        if (routes.length) {
-            for (const route of ['', ...routes]) {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.textContent = route || '全部';
-                button.dataset.route = route;
-                button.addEventListener('click', () => { selectedRoute = route; render(); });
-                routePicker.appendChild(button);
+        const rows = [];
+        const groups = new Map();
+        for (const provider of providers) {
+            const sourceId = provider.sourceProviderId;
+            const key = sourceId && provider.routeGroup && provider.routeLabel
+                ? JSON.stringify([sourceId, provider.routeGroup]) : null;
+            let row = key && groups.get(key);
+            if (!row) {
+                row = [];
+                rows.push(row);
+                if (key) groups.set(key, row);
             }
-            list.before(routePicker);
+            row.push(provider);
         }
+        rows.forEach(row => row.sort((a, b) => (a.routeLabel || '') < (b.routeLabel || '') ? -1
+            : (a.routeLabel || '') > (b.routeLabel || '') ? 1 : 0));
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            routePicker.querySelectorAll('button').forEach(button => {
-                const selected = button.dataset.route === selectedRoute;
-                button.classList.toggle('selected', selected);
-                button.setAttribute('aria-pressed', String(selected));
-            });
-            const matches = providers.filter(provider => (!selectedRoute || provider.routeLabel === selectedRoute)
-                && (!query || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
+            const matches = rows.filter(row => row.some(provider => !query
+                || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
                 const empty = document.createElement('div');
@@ -9254,35 +9249,46 @@ export class CanvasManager {
                 list.appendChild(empty);
                 return;
             }
-            matches.forEach(provider => {
-                const selected = provider.id === data.config?.providerId
-                    || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'generation-composer-model-option';
-                button.classList.toggle('selected', selected);
-                button.setAttribute('role', 'option');
-                button.setAttribute('aria-selected', String(selected));
-                const copy = document.createElement('span');
-                const model = document.createElement('strong');
-                model.textContent = [provider.routeLabel, provider.model || '未命名模型'].filter(Boolean).join(' · ');
-                const source = document.createElement('small');
-                source.textContent = provider.name || '未命名 API';
-                copy.append(model, source);
-                const marker = document.createElement('span');
-                marker.textContent = selected ? '当前' : '›';
-                button.append(copy, marker);
-                button.addEventListener('click', () => {
-                    this._applyImageGenerationProviderSelection(data, provider);
-                    active.changed = true;
-                    this._closeGenerationComposerPopover(active);
-                    this._syncGenerationComposerModelButton(nodeId);
-                    this._renderGenerationComposerParameters(nodeId);
-                    this._syncGenerationComposerCount(nodeId);
-                    this.refreshOpNode(nodeId);
-                    this.emit('change');
+            matches.forEach(row => {
+                const split = row.length === 2 && row[0].routeLabel !== row[1].routeLabel;
+                const container = split ? document.createElement('div') : list;
+                if (split) {
+                    container.className = 'generation-composer-model-routes';
+                    container.setAttribute('role', 'group');
+                    container.setAttribute('aria-label', `${row[0].routeModelLabel} 线路选择`);
+                    list.appendChild(container);
+                }
+                row.forEach(provider => {
+                    const selected = provider.id === data.config?.providerId
+                        || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'generation-composer-model-option';
+                    button.classList.toggle('selected', selected);
+                    button.setAttribute('role', 'option');
+                    button.setAttribute('aria-selected', String(selected));
+                    button.title = [provider.routeLabel, provider.model, provider.name].filter(Boolean).join(' · ');
+                    const copy = document.createElement('span');
+                    const model = document.createElement('strong');
+                    model.textContent = (split ? provider.routeModelLabel : provider.model) || '未命名模型';
+                    const source = document.createElement('small');
+                    source.textContent = split ? provider.routeLabel : provider.name || '未命名 API';
+                    copy.append(model, source);
+                    const marker = document.createElement('span');
+                    marker.textContent = selected ? '当前' : '›';
+                    button.append(copy, marker);
+                    button.addEventListener('click', () => {
+                        this._applyImageGenerationProviderSelection(data, provider);
+                        active.changed = true;
+                        this._closeGenerationComposerPopover(active);
+                        this._syncGenerationComposerModelButton(nodeId);
+                        this._renderGenerationComposerParameters(nodeId);
+                        this._syncGenerationComposerCount(nodeId);
+                        this.refreshOpNode(nodeId);
+                        this.emit('change');
+                    });
+                    container.appendChild(button);
                 });
-                list.appendChild(button);
             });
         };
         search.addEventListener('input', render);

@@ -5568,6 +5568,8 @@ export class AgentSidebar {
                 sourceProviderId: provider.sourceProviderId || provider.id,
                 name: provider.name || '未命名 API',
                 routeLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.routeLabel || '' : '',
+                routeGroup: kind === 'video' ? this._getVideoModelProfile(provider)?.routeGroup || '' : '',
+                routeModelLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.routeModelLabel || '' : '',
                 model: provider.model || ''
             }));
     }

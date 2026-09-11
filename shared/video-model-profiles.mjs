@@ -2,7 +2,9 @@ export const VIDEO_MODEL_PROFILES = [
     {
         matchModel: /^sd2(?:\.5|_5|-5)(?:-route[12]|-haidiyue-face)?$/i,
         label: 'Seedance 2.5',
-        routeLabel: '路线二',
+        routeLabel: '线路二',
+        routeGroup: 'seedance25-fixed',
+        routeModelLabel: 'sd2.5',
         ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
         resolutions: ['720p'],
         durations: [30],
@@ -160,7 +162,7 @@ export function getVideoModelProfile(provider) {
     try { host = new URL(provider.endpoint).hostname; } catch (_) { /* Unconfigured endpoint. */ }
     const fixedSeedance = profile === VIDEO_MODEL_PROFILES[0];
     if (fixedSeedance) {
-        profile = { ...profile, routeLabel: /-route1$/i.test(model) ? '路线一' : '路线二' };
+        profile = { ...profile, routeLabel: /-route1$/i.test(model) ? '线路一' : '线路二' };
     }
     if (fixedSeedance && host === 'art.ravenhash.org') {
         return {
