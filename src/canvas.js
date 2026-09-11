@@ -9235,16 +9235,9 @@ export class CanvasManager {
         }
         rows.forEach(row => row.sort((a, b) => (a.routeLabel || '') < (b.routeLabel || '') ? -1
             : (a.routeLabel || '') > (b.routeLabel || '') ? 1 : 0));
-        const splitSeedanceSources = new Set(rows
-            .filter(row => row.length === 2 && row[0].routeGroup === 'seedance25-fixed'
-                && row[0].routeLabel !== row[1].routeLabel)
-            .map(row => row[0].sourceProviderId));
-        const visibleRows = rows.filter(row => !(row.length === 1
-            && row[0].model?.toLowerCase() === 'seedance_v2.5'
-            && splitSeedanceSources.has(row[0].sourceProviderId)));
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            const matches = visibleRows.filter(row => row.some(provider => !query
+            const matches = rows.filter(row => row.some(provider => !query
                 || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
@@ -9263,14 +9256,14 @@ export class CanvasManager {
                     const group = document.createElement('div');
                     group.className = 'generation-composer-model-routes';
                     group.setAttribute('role', 'group');
-                    group.setAttribute('aria-label', 'Seedance 2.5 线路选择');
+                    group.setAttribute('aria-label', 'Seedance 2.5 固定 30 秒线路选择');
                     const current = row.find(provider => provider.id === data.config?.providerId
                         || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model));
                     const trigger = document.createElement('button');
                     trigger.type = 'button';
                     trigger.className = 'generation-composer-route-trigger';
                     trigger.classList.toggle('selected', !!current);
-                    trigger.innerHTML = '<span><strong>Seedance 2.5</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
+                    trigger.innerHTML = '<span><strong>Seedance 2.5 · 固定 30 秒</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
                     trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
                     const panel = document.createElement('div');
                     panel.className = 'generation-composer-route-panel';
@@ -9347,7 +9340,7 @@ export class CanvasManager {
                         ? provider.routeLabel + (provider.routeLabel === '线路一' ? '（推荐）' : '')
                         : provider.model) || '未命名模型';
                     const source = document.createElement('small');
-                    source.textContent = provider.name || '未命名 API';
+                    source.textContent = (split ? provider.model : provider.name) || '未命名 API';
                     copy.append(model, source);
                     const marker = document.createElement('span');
                     marker.textContent = selected ? '当前' : '›';
