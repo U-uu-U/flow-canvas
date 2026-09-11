@@ -24,6 +24,17 @@ app.whenReady().then(async () => {
     console.log(JSON.stringify({ endpoint: provider.endpoint,
         routes: models.filter(model => /^sd2\.5/.test(model)) }));
     if (!models.includes('sd2.5-route1') || !models.includes('sd2.5')) throw new Error('Relay routes are not both visible');
+    const taskIndex = process.argv.indexOf('--task');
+    if (taskIndex >= 0) {
+        const taskId = process.argv[taskIndex + 1] || '';
+        if (!/^[A-Za-z0-9_-]{1,160}$/.test(taskId)) throw new Error('Invalid task ID');
+        const result = await net.fetch(`https://art.ravenhash.org/v1/tasks/${encodeURIComponent(taskId)}`, {
+            headers: { Authorization: `Bearer ${provider.apiKey}` }, signal: AbortSignal.timeout(30000)
+        });
+        const task = await result.json();
+        console.log(JSON.stringify({ taskId, httpStatus: result.status, status: task.status || task.data?.status,
+            error: task.error?.message || task.data?.error?.message, hasVideo: !!(task.video_url || task.data?.video_url) }));
+    }
     if (process.argv.includes('--apply')) {
         const current = Array.isArray(provider.models) ? provider.models : [provider.model];
         provider.models = [...new Set([...current, 'sd2.5-route1', 'sd2.5'].filter(Boolean))];

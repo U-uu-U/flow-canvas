@@ -1,0 +1,26 @@
+services:
+  seedance968-adapter:
+    image: docker.1ms.run/library/python:3.12-alpine
+    container_name: seedance968-adapter
+    working_dir: /app
+    command: [python, -B, adapter.py]
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    mem_limit: 192m
+    pids_limit: 96
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./adapter.py:/app/adapter.py:ro
+      - ./state:/state
+      - /opt/flow-canvas-upload/data:/media
+    networks: [tokensbyte-network]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3011/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  tokensbyte-network:
+    external: true
