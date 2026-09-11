@@ -15,6 +15,8 @@ export function getVideoControlLayout(stageScale, width, height) {
     const progressHeight = VIDEO_CONTROL_PROGRESS_HEIGHT / scale;
 
     return {
+        visible: contentWidth * scale >= VIDEO_CONTROL_BUTTON_WIDTH * 2 + 8
+            && contentHeight * scale >= VIDEO_CONTROL_HEIGHT + 8,
         groupY: contentHeight - controlHeight,
         controlHeight,
         backgroundY: (VIDEO_CONTROL_HEIGHT - VIDEO_CONTROL_VISIBLE_BG_HEIGHT) / scale,
