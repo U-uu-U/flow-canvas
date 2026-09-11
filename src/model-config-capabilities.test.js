@@ -73,9 +73,7 @@ test('字段别名双向可查，accepts 判定兼容别名', () => {
     assert.equal(entryAcceptsField(config, route1, 'referenceImages'), true);
     assert.equal(entryAcceptsField(config, route1, 'referenceVideos'), false);
 
-    const kling = findEntry('video-template.kling');
-    // Kling 的 CSV 入参里没有 resolution，UI 必须隐藏分辨率控件
-    assert.equal(entryAcceptsField(config, kling, 'resolutionTier'), false);
+    assert.equal(entryAcceptsField(config, route1, 'workflowId'), false);
 });
 
 test('能力描述把「能做/不能做/限制」拆开', () => {
@@ -153,11 +151,13 @@ test('提交校验：枚举、固定值、范围、数量、提示词', () => {
 });
 
 test('提交校验：不支持的能力开关、不支持的入参、未知边界降级为警告', () => {
-    const klingResolution = validateModelRequest({
-        config, provider: video('kling-v2'), prompt: 'a cat', fields: { resolutionTier: '1080p' }
+    const restricted = structuredClone(config);
+    restricted.models.find(entry => entry.id === 'ravenhash-video.sd2.5-route1').options.workflowId = { type: 'unsupported' };
+    const unsupportedParam = validateModelRequest({
+        config: restricted, provider: video('sd2.5-route1'), prompt: 'a cat', fields: { workflowId: 'unused' }
     });
-    assert.equal(klingResolution.ok, false);
-    assert.equal(klingResolution.errors[0].code, MODEL_CONFIG_ISSUE_CODES.PARAM_UNSUPPORTED);
+    assert.equal(unsupportedParam.ok, false);
+    assert.equal(unsupportedParam.errors[0].code, MODEL_CONFIG_ISSUE_CODES.PARAM_UNSUPPORTED);
 
     const unsupportedFeature = validateModelRequest({
         config, provider: video('sd2.5-route1'), prompt: 'a cat', features: { webSearch: true }
@@ -212,11 +212,11 @@ test('CONFIG 翻译成视频 profile：时长控件形态与既有实现一致',
     assert.equal(hm.durations.at(-1), 30);
     assert.deepEqual(hm.resolutions, ['720p']);
 
-    // seedance-1.5 的「自动」用 -1 表示，与既有 profile 的 select 形态一致
-    const seedance15 = toVideoProfileOverrides(config, findEntry('video-template.seedance-1.5'));
-    assert.deepEqual(seedance15.durations, [-1, 5, 10, 12]);
-    assert.equal(seedance15.durationControl, 'select');
-    assert.equal(seedance15.defaultResolution, '720p');
+    const automatic = toVideoProfileOverrides(config, {
+        kind: 'video', options: { duration: { type: 'enum', values: [5, 10, 12], allowAuto: true } }
+    });
+    assert.deepEqual(automatic.durations, [-1, 5, 10, 12]);
+    assert.equal(automatic.durationControl, 'select');
 
     const h3 = toVideoProfileOverrides(config, findEntry('ravenhash-video.minimax-h3'));
     assert.deepEqual(h3.durations[0], 4);
@@ -224,9 +224,10 @@ test('CONFIG 翻译成视频 profile：时长控件形态与既有实现一致',
     assert.deepEqual(h3.resolutions, ['480p', '768p', '1080p', '2k', '4k']);
     assert.equal(h3.referenceLimits.audio, 3);
 
-    const kling = toVideoProfileOverrides(config, findEntry('video-template.kling'));
-    assert.deepEqual(kling.resolutions, []);
-    assert.deepEqual(kling.durations, [3, 5, 10, 15]);
+    const noResolution = toVideoProfileOverrides(config, {
+        kind: 'video', options: { resolutionTier: { type: 'unsupported' } }
+    });
+    assert.deepEqual(noResolution.resolutions, []);
 
     assert.equal(toVideoProfileOverrides(config, findEntry('ravenhash-image.gpt-image-2')), null);
 });
@@ -253,7 +254,7 @@ test('CONFIG 覆盖 profile 能力但保留线路元数据', () => {
 test('CONFIG 翻译成图片 profile：档位来自 CONFIG，未收录返回 null', () => {
     const gpt = toImageProfileOverrides(config, findEntry('ravenhash-image.gpt-image-2'));
     assert.deepEqual(gpt.resolutionTiers, ['1K', '2K', '4K']);
-    assert.equal(gpt.defaultResolutionTier, '1K');
+    assert.equal(gpt.defaultResolutionTier, '4K');
 
     const mj = toImageProfileOverrides(config, findEntry('midjourney.mj-imagine'));
     assert.deepEqual(mj.resolutionTiers, ['1K', '2K']);
@@ -285,5 +286,67 @@ test('每条 CONFIG 条目都有可编译的正则与唯一 id', () => {
             assert.ok(matched.some(item => item.entry.id === entry.id), `${entry.id} 无法被探针 ${probe} 命中`);
         }
     }
-    assert.equal(config.models.length, 16);
+    assert.equal(config.models.length, 12);
+});
+
+test('live-probed image defaults remain accepted, including legacy incomplete allowlists', () => {
+    for (const model of ['gpt-image-2', 'gpt-image-2.5-sunburst', 'mj_imagine']) {
+        const result = validateModelRequest({ config, provider: image(model), prompt: 'probe', fields: { quality: 'high', resolutionTier: '1K', n: 1 } });
+        assert.equal(result.ok, true, JSON.stringify(result.errors));
+    }
+    const legacy = structuredClone(config);
+    const sunburst = legacy.models.find(entry => entry.id === 'ravenhash-image.gpt-image-2.5-sunburst');
+    sunburst.parameters.accepts = ['model', 'prompt', 'size'];
+    const result = validateModelRequest({ config: legacy, provider: image('gpt-image-2.5-sunburst'), prompt: 'probe', fields: { quality: 'high' } });
+    assert.equal(result.ok, true);
+    assert.equal(result.warnings[0].code, MODEL_CONFIG_ISSUE_CODES.PARAM_UNVERIFIED);
+});
+
+test('audio capabilities accept the node key and legacy capability key', () => {
+    for (const key of ['generateAudio', 'generatedAudio']) {
+        const result = validateModelRequest({ config, provider: video('sd2.5'), prompt: 'probe', features: { [key]: true } });
+        assert.equal(result.ok, false);
+        assert.equal(result.errors[0].field, 'generateAudio');
+    }
+});
+
+test('an explicitly matched endpoint enforces its own constraints only', () => {
+    const result = validateModelRequest({
+        config, provider: { ...video('minimax-h3'), endpoint: 'https://api.example.com/kyyReactApiServer/v2/model-center/tasks' },
+        prompt: 'probe', references: { video: { count: 1 } }
+    });
+    assert.equal(result.ambiguous, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.errors[0].field, 'referenceVideos');
+});
+
+test('partial and unknown config preserves existing video controls and reference limits', () => {
+    const base = {
+        ratios: ['adaptive', '16:9'], resolutions: ['2k', '4k'], durations: [4, 5, 6],
+        defaultResolution: '2k', defaultDuration: 4, supportsGeneratedAudio: true,
+        referenceLimits: { image: 9, video: 3, audio: 3 }
+    };
+    const overrides = toVideoProfileOverrides(config, {
+        kind: 'video', options: { resolutionTier: { type: 'unknown' } },
+        capabilities: { referenceImages: { supported: true, max: 5 } }
+    });
+    const merged = mergeVideoProfile(base, overrides);
+    for (const key of ['ratios', 'resolutions', 'durations', 'defaultResolution', 'defaultDuration', 'supportsGeneratedAudio']) {
+        assert.deepEqual(merged[key], base[key]);
+    }
+    assert.deepEqual(merged.referenceLimits, { image: 5, video: 3, audio: 3 });
+    const native = toVideoProfileOverrides(config, findEntry('minimax-video.minimax-h3-c1'));
+    assert.equal(native.resolutions, undefined, 'conflicting legacy H3 documentation must not force a new 720p limit');
+});
+
+test('both fixed routes stay at 30s and only the separate variable route accepts 4-30s', () => {
+    for (const model of ['sd2.5-route1', 'sd2.5']) {
+        for (const duration of [4, 29, 30, 31]) {
+            assert.equal(validateModelRequest({ config, provider: video(model), prompt: 'probe', fields: { duration } }).ok, duration === 30);
+        }
+    }
+    for (const duration of [3, 4, 15, 30, 31, 4.5]) {
+        assert.equal(validateModelRequest({ config, provider: video('seedance_v2.5'), prompt: 'probe', fields: { duration } }).ok,
+            Number.isInteger(duration) && duration >= 4 && duration <= 30);
+    }
 });

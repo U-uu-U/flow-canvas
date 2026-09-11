@@ -255,6 +255,7 @@ export class GraphRunner {
             getTextProvider: this.ctx.getTextProvider,
             getImageProvider: this.ctx.getImageProvider,
             getVideoProvider: this.ctx.getVideoProvider,
+            validateGenerationRequest: this.ctx.validateGenerationRequest,
             prepareImageReferences: this.ctx.prepareImageReferences,
             getImageIntentPipelineMode: this.ctx.getImageIntentPipelineMode,
             createGenerationTask: this.ctx.createGenerationTask,

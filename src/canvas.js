@@ -64,7 +64,7 @@ import {
 } from './generation-record.js';
 import { withoutReferenceCitationGuide } from './reference-citations.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
-import { checkModelRequest } from './model-config-ui.js';
+import { assertModelRequest, checkModelRequest } from './model-config-ui.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
     composePromptFromTemplate,
@@ -10311,7 +10311,8 @@ export class CanvasManager {
             kind,
             fields,
             features,
-            prompt: config.prompt || ''
+            prompt: config.prompt || '',
+            promptResolved: !this._hasUpstreamPrompt(data)
         });
     }
 
@@ -10861,6 +10862,7 @@ export class CanvasManager {
             getTextProvider: (binding) => this.options.getTextProvider?.(binding) || null,
             getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
             getVideoProvider: (binding) => this.options.getVideoProvider?.(binding) || null,
+            validateGenerationRequest: assertModelRequest,
             getImageIntentPipelineMode: () => this.options.getImageIntentPipelineMode?.() || 'compiled',
             // 同 main.js：不能用 `|| []` 兜底，否则「用户取消参考图处理」
             // 会被折叠成空数组，生成静默降级为纯文生图。

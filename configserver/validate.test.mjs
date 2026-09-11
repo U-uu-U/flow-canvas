@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createValidator, structuralValidate } from './lib/validate.mjs';
 
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA = path.join(HERE, 'schema', 'model-config.schema.json');
 const SEED = path.join(HERE, 'seed', 'model-config.default.json');
 

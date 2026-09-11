@@ -158,7 +158,8 @@ Schema 用 `additionalProperties: true`，服务端可以先加字段而不被�
 3. 计分：`priority` + endpoint 命中 40 + 线路名（渠道）与 API 名称互相包含 20；
 4. 取最高分为主条目；**没有 endpoint/线路名证据且命中多条**时标记 `ambiguous`。
 
-歧义时的校验语义是「**所有候选都禁止的才算错误**，只有部分候选禁止的降级为警告」。
+已通过 endpoint 或线路信息确定条目时，仅按该条目校验，不能被其它线路较宽松的限制放行。
+仍有歧义时，校验语义是「**所有候选都禁止的才算错误**，只有部分候选禁止的降级为警告」。
 典型例子：`minimax-h3` 同时存在于「兼容线路」和「按秒线路」，两条的 `workflow_id`、首尾帧支持情况
 不同——猜错线路就会误拦，所以按交集处理。
 
@@ -172,20 +173,25 @@ Schema 用 `additionalProperties: true`，服务端可以先加字段而不被�
 | 场景 | code |
 | --- | --- |
 | 必填提示词为空 / 超过 `prompt.maxLength` | `PROMPT_REQUIRED` / `PROMPT_TOO_LONG` |
-| 参数明确 `unsupported`，或该参数不在 `accepts` 里（仅限确实会发到上游的字段） | `PARAM_UNSUPPORTED` |
+| 参数明确声明 `unsupported` | `PARAM_UNSUPPORTED` |
 | 枚举不在白名单（含图片档位按 `WxH` 折算 tier 后判断） | `VALUE_NOT_ALLOWED` |
 | 范围越界 / 非整数 | `VALUE_OUT_OF_RANGE` |
 | 固定值不符（例：线路一固定 30 秒） | `VALUE_MUST_BE` |
 | 条目**明确声明** `supported:false` 的能力开关被打开 | `FEATURE_UNSUPPORTED` |
 | 参考素材数量 / 单张字节超限 | `REFERENCE_LIMIT` / `REFERENCE_TOO_LARGE` |
 
-判定为 **warning（放行 + 提示）**：`unknown` 边界（`PARAM_UNVERIFIED`）、部分候选限制、
+判定为 **warning（放行 + 提示）**：`unknown` 边界或仅未列入 `accepts`（`PARAM_UNVERIFIED`）、部分候选限制、
 未收录模型（`MODEL_NOT_IN_CONFIG`）。
 
-刻意不参与「不在 accepts 里就拦」判定的字段，因为它们并不是独立发出去的参数：图片的
-`ratio`（折算进 `size` 宽高）、`negativePrompt`（拼进提示词文本）、
-`responseFormat/historyDisabled/stream`（渲染层对所有图片模型都会带上，非 gpt-image-2 在适配层忽略）。
-把「未声明」一律当成「不支持」会造成大面积误拦，所以能力开关只按条目**明确写下的** `supported:false` 拦截。
+`accepts` 是当前渠道文档记录，不是完整的拒绝名单。图片 `ratio` 折算进 `size`，
+`negativePrompt` 由适配器拼入提示词，`responseFormat/historyDisabled/stream` 按适配器规则处理；
+这些字段不因 `accepts` 缺失而推断支持情况。能力开关只按条目**明确写下的** `supported:false` 拦截。
+未声明的能力显示「尚未确认」，不清空原有控件和参考素材额度；稀疏 CONFIG 只覆盖明确的约束。
+音频生成读取节点的 `generateAudio`，同时兼容旧 `generatedAudio` 字段。
+
+画布预检存在上游文本时传入 `promptResolved:false`，避免误拦只使用上游提示词的节点。
+GraphRunner 在引用绑定、提示词合并及图片意图编译后，对最终提示词和实际参数再次校验，
+通过后才创建生成任务和提交媒体请求。长度按最终文本计算，不折叠空白后再计数。
 
 ## 7. UI 接入点
 
@@ -198,8 +204,8 @@ Schema 用 `additionalProperties: true`，服务端可以先加字段而不被�
 | 侧栏「生成图片 / 生成视频」 | 提交前校验；有 error 则内联报错并中止 |
 | 画布生成器气泡「开始生成」 | 提交前校验；有 error 时在气泡内报错并中止，`unknown` 类警告走顶栏状态条 |
 
-CONFIG 变化（首次拉取成功 / 手动刷新 / 恢复默认）会通过 `modelConfigStore.subscribe` 触发能力面板重绘，
-不需要重启应用。
+CONFIG 变化（首次拉取成功 / 手动刷新 / 恢复默认）会通过 `modelConfigStore.subscribe` 同步更新能力面板、
+实际参数控件和选中模型卡片，不需要重启应用。侧栏与画布使用相同的 profile 覆盖逻辑。
 
 ## 8. 运维：更新流程
 
@@ -233,12 +239,27 @@ CONFIG→既有 profile→控件 / 真机网络路径」这一层。
 
 ## 10. 已知边界
 
-- **应用内既有的视频参数强约束仍以代码为准**：例如 `video-provider-adapters.js` 对
-  `sd2.5-route1/route2/haidiyue-face` 一律要求恰好 30 秒，而 CSV 写的是「线路二时长可调整，以上游为准」。
-  CONFIG 按**客户端实际约束**收敛（否则界面会放行一个必被自己代码拒绝的值），CSV 原文仍完整保留在
-  `notes` 里，条目里也写明了这处偏离的原因。
+- **已确认的 RavenHash 对外契约**：SD 线路一、线路二均固定 30 秒；独立的 `seedance_v2.5`
+  支持 4–30 秒。供应商其它接口的可调范围不能直接套给固定线路。CSV、CONFIG 和既有适配器保持一致，
+  详见 `docs/seedance-route-contract.md`。
+- **未接入模板已移除**：Seedance 1.5、Wan、Kling、Vidu 不再提供内置能力预设；旧缓存或旧远端配置中的
+  四个 `video-template.*` ID 也会过滤，不删除用户自定义 API、历史节点或生成记录。
 - **文字模型**目前没有维护上下文窗口/最大输出 Token，CONFIG 里以 `unknown` 记录并展示为「未维护」。
 - 参考素材的**字节**上限目前只有图片单张 50MB 进了 CONFIG；视频/音频的字节预算仍在
   `mcp-bridge.js` 的压缩流程里，尚未纳入 CONFIG。
-- `match.endpoint` 的条目（如 MiniMax H3 原生任务中心）只在 endpoint 命中时生效；只填模型名不填
-  endpoint 时不会套用它的「固定 720p、不支持参考视频」限制——宁可不限制，也不错限制。
+- **H3 原生任务中心分辨率仍待新文档确认**：现有适配器按 720p 提交，旧供应商文档曾列出 2K。
+  CONFIG 将这项记为 `unknown`，不把代码中的默认提交值宣称为上游的唯一能力；本轮未改变适配器，
+  不影响 H3 兼容线路已有的 2K 选项。
+
+## 11. 渠道实测记录（2026-09-12）
+
+以下为授权的小规模请求，未保存 API Key 或账户余额。成功表示这组参数被接收，不能据此证明
+每个可选字段都生效，也不能独立验证中转站底层模型身份。
+
+| 模型 | 实测 | 结果 |
+| --- | --- | --- |
+| `gpt-image-2.5-sunburst` | 文生图，`quality:high`，1024 方图，附带响应格式、历史和流式开关 | HTTP 200，1 张 1024×1024，约 46 秒 |
+| `gpt-image-2` | 两张参考图，multipart `image[]`，`quality:high` | HTTP 200，1 张 1024×1024，约 45 秒，人工检查布局符合请求 |
+| `mj_imagine` | 一次请求，沿用 `--ar 1:1 --v 8.2 --raw --sd` | HTTP 200，4 张独立 1024×1024，约 138 秒 |
+
+MJ 本次响应报告的单次费用为 `0.129888 CNY`，仅为该次计费结果，不作为固定售价或其它渠道报价。

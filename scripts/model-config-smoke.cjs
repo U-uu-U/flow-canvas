@@ -21,6 +21,7 @@ const { ApiConfigStore } = require('../electron-main/api-config-store');
 const HERE = path.dirname(__filename);
 const ADMIN_PASSWORD = 'smoke-admin-password';
 const FINGERPRINT = '流水线烟测指纹';
+const MODEL_COUNT = require('../shared/model-config.default.json').models.length;
 
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'flow-model-config-smoke-'));
 fs.mkdirSync(path.join(profile, 'data', 'asset-library'), { recursive: true });
@@ -212,10 +213,10 @@ app.on('browser-window-created', (_event, win) => {
             const expect = (ok, label) => { if (!ok) problems.push(label); };
 
             // ── 从服务器拉取并应用（启动时自动刷新）────────────────
-            const applied = await waitFor(win, dom => (/已从服务器获取最新配置/.test(dom.settingsState) && /r1\b/.test(dom.settingsSummary)),
+            const applied = await waitFor(win, dom => (/已从服务器获取最新配置/.test(dom.settingsState) && new RegExp(`r${seedRevision + 1}\\b`).test(dom.settingsSummary)),
                 { label: '客户端应用服务器配置 r1' });
             expect(applied.settingsMounted, '设置卡未挂载（initModelConfigUi 没跑到）');
-            expect(/16 个模型/.test(applied.settingsSummary), `内置配置模型数异常：${applied.settingsSummary}`);
+            expect(applied.settingsSummary.includes(`${MODEL_COUNT} 个模型`), `内置配置模型数异常：${applied.settingsSummary}`);
             expect(/自定义地址/.test(applied.settingsSummary), `更新源应显示为自定义地址：${applied.settingsSummary}`);
             expect(applied.bridgeAvailable, 'preload 未暴露 flowCanvas.modelConfig.fetch');
             expect(applied.videoPanelVisible, '视频能力面板没有显示');
@@ -226,16 +227,17 @@ app.on('browser-window-created', (_event, win) => {
             expect(applied.videoPanel.includes(FINGERPRINT), '服务端配置的内容没有进入能力面板（远端配置未真正生效）');
             expect(/服务器/.test(applied.videoPanel), '能力面板来源未标为服务器');
             expect(applied.videoDurationControl.includes('30'), `既有控件未跟随 CONFIG：${applied.videoDurationControl}`);
-            expect(applied.ratioOptions === 6, `比例控件数量异常：${applied.ratioOptions}`);
+            expect(applied.ratioOptions === 2, `比例控件没有跟随远端配置：${applied.ratioOptions}`);
             if (problems.length) return finish(1, `FAIL 客户端应用服务端配置：\n  - ${problems.join('\n  - ')}\nDOM: ${JSON.stringify(applied, null, 2)}`);
 
             // ── 回滚到旧版本 → 界面点「立即刷新」→ 客户端跟着回退 ──
             const seedName = seedVersionName;
             await adminPost(serverUrl, '/admin/apply', { csrf: await adminCsrf(serverUrl, cookie), name: seedName }, cookie);
             await win.webContents.executeJavaScript(`document.querySelector('#modelConfigSettings [data-config="refresh"]').click();`);
-            const rolledBack = await waitFor(win, dom => (/r0\b/.test(dom.settingsSummary) && !dom.videoPanel.includes(FINGERPRINT)),
+            const rolledBack = await waitFor(win, dom => (new RegExp(`r${seedRevision}\\b`).test(dom.settingsSummary) && !dom.videoPanel.includes(FINGERPRINT)),
                 { label: '回滚后客户端刷新到 r0' });
             expect(/已从服务器获取最新配置/.test(rolledBack.settingsState), `回滚后状态异常：${rolledBack.settingsState}`);
+            expect(rolledBack.ratioOptions === 6, `回滚后比例控件未恢复：${rolledBack.ratioOptions}`);
 
             // ── IPC 拉取的三种结果 ────────────────────────────────
             const bridge = await win.webContents.executeJavaScript(`(async () => {
@@ -249,8 +251,8 @@ app.on('browser-window-created', (_event, win) => {
                 };
             })()`);
             expect(bridge.goodSuccess === true, `合法配置未被接受：${JSON.stringify(bridge)}`);
-            expect(bridge.goodRevision === 0, `回滚后的 revision 未透传：${bridge.goodRevision}`);
-            expect(bridge.goodModels === 16, `模型数量异常：${bridge.goodModels}`);
+            expect(bridge.goodRevision === seedRevision, `回滚后的 revision 未透传：${bridge.goodRevision}`);
+            expect(bridge.goodModels === MODEL_COUNT, `模型数量异常：${bridge.goodModels}`);
             expect(bridge.missingSuccess === false && /HTTP 404/.test(String(bridge.missingError)), `404 未如实上报：${bridge.missingError}`);
             expect(bridge.blockedSuccess === false && /http:\/\/ 或 https:\/\//.test(String(bridge.blockedError)), `非 http(s) 地址未被拦下：${bridge.blockedError}`);
 
@@ -276,6 +278,7 @@ app.on('browser-window-created', (_event, win) => {
 //   2. 客户端重载前 configserver 必须已就绪并发布好 r1。
 // 所以：主进程同步 require；服务端在后台异步起，渲染层第一趟加载时 await 它的就绪 Promise。
 let seedVersionName = '';
+let seedRevision = 0;
 const serverReady = (async () => {
     await startConfigServer();
 
@@ -283,9 +286,12 @@ const serverReady = (async () => {
     cookie = await adminLogin(serverUrl);
     const csrf = await adminCsrf(serverUrl, cookie);
     const baseline = await fetch(`${serverUrl}/config`).then(response => response.json());
+    seedRevision = baseline.revision;
     seedVersionName = JSON.parse(await (await fetch(`${serverUrl}/health`)).text()).current;
     const edited = JSON.parse(JSON.stringify(baseline));
     const route1 = edited.models.find(entry => entry.id === 'ravenhash-video.sd2.5-route1');
+    route1.options.ratio.values = ['16:9', '9:16'];
+    route1.options.ratio.default = '16:9';
     route1.capabilities.face.note = `${route1.capabilities.face.note}（${FINGERPRINT}）`;
     await adminPost(serverUrl, '/admin/save', { csrf, content: JSON.stringify(edited), note: '烟测指纹' }, cookie);
     const published = await fetch(`${serverUrl}/config`).then(response => response.json());

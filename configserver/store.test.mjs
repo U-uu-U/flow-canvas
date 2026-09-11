@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createConfigStore, formatTimestamp, isVersionFileName } from './lib/store.mjs';
 
 const SILENT = { log() {}, warn() {}, error() {} };
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SEED = path.join(HERE, 'seed', 'model-config.default.json');
 
 function tempStore(options = {}) {
@@ -38,7 +39,7 @@ test('空仓库首次启动用种子配置播种，/config 立刻有内容', () 
         assert.equal(result.seeded, true);
         const active = store.current();
         assert.ok(active, 'current 应该指向播种出来的版本');
-        assert.equal(active.config.models.length, 16);
+        assert.equal(active.config.models.length, 12);
         assert.match(active.name, /^\d{8}T\d{6}-r0\.json$/);
         assert.equal(store.list().length, 1);
         assert.equal(store.list()[0].current, true);
@@ -86,7 +87,7 @@ test('一键应用老版本：只挪指针，文件内容逐字节不变', () =>
         assert.equal(applied.previous, saved.name);
         assert.equal(store.current().name, seedName);
         assert.equal(store.read(seedName).text, seedText, '回滚不应改写文件内容');
-        assert.equal(store.current().config.models.length, 16);
+        assert.equal(store.current().config.models.length, 12);
         assert.equal(store.history()[0].action, 'apply');
         assert.equal(store.history()[0].previous, saved.name);
     } finally {

@@ -37,6 +37,11 @@ const ORIGIN_LABELS = Object.freeze({
 });
 
 const VALID_KINDS = ['image', 'video', 'text'];
+// Retired, unconnected templates must not return through an older remote config.
+const RETIRED_TEMPLATE_IDS = new Set([
+    'video-template.seedance-1.5', 'video-template.wan',
+    'video-template.kling', 'video-template.tencent-vidu'
+]);
 
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -67,7 +72,7 @@ export function readModelConfig(raw) {
         if (!isPlainObject(entry)) continue;
         const id = typeof entry.id === 'string' ? entry.id.trim() : '';
         const kind = VALID_KINDS.includes(entry.kind) ? entry.kind : '';
-        if (!id || !kind || seen.has(id)) continue;
+        if (!id || !kind || seen.has(id) || RETIRED_TEMPLATE_IDS.has(id)) continue;
         const matchSources = compileMatchSources(entry);
         if (!matchSources.length) continue;
         seen.add(id);

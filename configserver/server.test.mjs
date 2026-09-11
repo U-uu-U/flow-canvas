@@ -5,11 +5,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createConfigServer, resolveServerConfig } from './server.mjs';
 import { hashPassword } from './lib/auth.mjs';
 
 const SILENT = { log() {}, warn() {}, error() {} };
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PASSWORD = 'smoke-admin-password';
 
 async function startServer(options = {}) {
@@ -81,7 +82,7 @@ test('/config：公开只读、带 ETag 与 CORS、首次启动就是播种版�
         assert.match(first.response.headers.get('content-type'), /application\/json/);
         assert.equal(first.response.headers.get('access-control-allow-origin'), '*');
         assert.match(first.response.headers.get('cache-control'), /no-cache/);
-        assert.equal(first.config.models.length, 16);
+        assert.equal(first.config.models.length, 12);
         assert.equal(first.config.revision, 0);
         assert.equal(first.config.refreshIntervalMs, 3600000);
 
@@ -167,7 +168,7 @@ test('保存 → 客户端可见 → 回滚，全链路走通', async () => {
         const afterSave = await fetchConfig(server.base);
         assert.equal(afterSave.config.revision, 1, '服务端要盖章递增 revision');
         assert.equal(afterSave.config.models[0].label, edited.models[0].label);
-        assert.equal(afterSave.config.models.length, 16);
+        assert.equal(afterSave.config.models.length, 12);
         assert.match(afterSave.config.source, /artconfig\.ravenhash\.org/);
 
         const listHtml = (await openAdmin(server.base, cookie)).html;
@@ -223,7 +224,7 @@ test('仅保存为版本：不动现行，但要能在列表里看到并之后�
         assert.equal(saved.status, 303);
         assert.match(decodeURIComponent(saved.headers.get('location')), /现行版本未改变/);
 
-        assert.equal((await fetchConfig(server.base)).config.models.length, 16, 'draft 不影响 /config');
+        assert.equal((await fetchConfig(server.base)).config.models.length, 12, 'draft 不影响 /config');
         const names = server.instance.store.listNames();
         assert.equal(names.length, 2);
         const draftName = names.at(-1);

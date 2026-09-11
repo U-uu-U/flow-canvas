@@ -3515,9 +3515,17 @@ export class AgentSidebar {
 
     _getImageModelSizes(provider = this._getImageProvider()) {
         const marker = `${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        return /ai\.ravenhash\.org|ravenhash/.test(marker)
+        const sizes = /ai\.ravenhash\.org|ravenhash/.test(marker)
             ? RAVENHASH_IMAGE_SIZES
             : DEFAULT_IMAGE_SIZES;
+        const config = modelConfigStore.getConfig();
+        const { entry } = resolveModelConfigEntry(config, { ...provider, kind: 'image' });
+        const overrides = toImageProfileOverrides(config, entry);
+        if (!overrides) return sizes;
+        return sizes.filter(size => {
+            const match = /^(\d+)x(\d+)$/i.exec(String(size.value || ''));
+            return !match || overrides.resolutionTiers.includes(inferImageResolutionTier(Number(match[1]), Number(match[2])));
+        });
     }
 
     _videoModelFavorites() {
@@ -3633,7 +3641,11 @@ export class AgentSidebar {
     }
 
     _getVideoModelProfile(provider) {
-        return getVideoModelProfile(provider);
+        const base = getVideoModelProfile(provider);
+        if (!base) return null;
+        const config = modelConfigStore.getConfig();
+        const { entry } = resolveModelConfigEntry(config, { ...provider, kind: 'video' });
+        return mergeVideoProfile(base, toVideoProfileOverrides(config, entry));
     }
 
     _getVideoReferenceLimits(profile) {
@@ -5789,18 +5801,13 @@ export class AgentSidebar {
         const profile = this._getVideoModelProfile(provider);
         if (!profile) return null;
         const { match, ...plainProfile } = profile;
-        const base = {
+        return {
             ...plainProfile,
             ratios: [...(plainProfile.ratios || [])],
             resolutions: [...(plainProfile.resolutions || [])],
             durations: [...(plainProfile.durations || [])],
             referenceLimits: { ...VIDEO_REFERENCE_LIMITS, ...(plainProfile.referenceLimits || {}) }
         };
-        // CONFIG 接管能力与限制，线路元数据（routeLabel/routeGroup/price）仍由代码维护：
-        // 这样既让所有既有裁剪逻辑（控件隐藏、非法值回落、超额连线断开）自动跟随 CONFIG，
-        // 又不会破坏 Seedance 线路拆分与价格标签。
-        const resolution = resolveModelConfigEntry(modelConfigStore.getConfig(), { ...provider, kind: 'video' });
-        return mergeVideoProfile(base, toVideoProfileOverrides(modelConfigStore.getConfig(), resolution.entry));
     }
 
     // 提交前校验：把上游一定会拒绝的参数在 UI 层拦下来。返回 null 表示通过。
@@ -5821,12 +5828,9 @@ export class AgentSidebar {
     }
 
     _refreshModelCapabilityPanels() {
-        if (this.videoModelCapabilities) {
-            renderModelCapabilityPanel(this.videoModelCapabilities, this._getVideoProvider() || {}, 'video');
-        }
-        if (this.imageModelCapabilities) {
-            renderModelCapabilityPanel(this.imageModelCapabilities, this._getImageProvider() || {}, 'image');
-        }
+        this._renderVideoModelCapabilities(this._getVideoProvider());
+        this._renderImageModelCapabilities(this._getImageProvider());
+        this._renderSelectedVideoModelCard(this._getVideoProvider());
     }
 
     getClassificationProviderConfig() {

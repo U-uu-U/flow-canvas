@@ -8,7 +8,7 @@
 export const DEFAULT_MODEL_CONFIG = {
     "schemaVersion": 1,
     "revision": 0,
-    "updatedAt": "2026-09-11T00:00:00.000Z",
+    "updatedAt": "2026-09-12T00:00:00.000Z",
     "source": "builtin:Flow-Canvas-模型渠道入参与限制-对外版.csv",
     "refreshIntervalMs": 3600000,
     "kinds": {
@@ -423,7 +423,7 @@ export const DEFAULT_MODEL_CONFIG = {
                         "2K",
                         "4K"
                     ],
-                    "default": "1K",
+                    "default": "4K",
                     "encode": "dimensions",
                     "note": "支持 1K/2K/4K 及常用比例"
                 },
@@ -443,7 +443,7 @@ export const DEFAULT_MODEL_CONFIG = {
                         "medium",
                         "high"
                     ],
-                    "default": "auto"
+                    "default": "high"
                 },
                 "responseFormat": {
                     "type": "enum",
@@ -493,6 +493,10 @@ export const DEFAULT_MODEL_CONFIG = {
                     "prompt",
                     "size",
                     "n",
+                    "quality",
+                    "response_format",
+                    "history_disabled",
+                    "stream",
                     "reference_images"
                 ],
                 "required": [
@@ -526,7 +530,7 @@ export const DEFAULT_MODEL_CONFIG = {
             "prompt": {
                 "required": true
             },
-            "notes": "已成功生成3840x2160并使用2张参考图；目前复用通用图片请求"
+            "notes": "已成功生成3840x2160并使用2张参考图；2026-09-12实测携带quality=high、response_format=b64_json、history_disabled=true、stream=false生成成功；接收参数不代表每项都已验证生效"
         },
         {
             "id": "midjourney.mj-imagine",
@@ -835,7 +839,7 @@ export const DEFAULT_MODEL_CONFIG = {
                     "type": "fixed",
                     "value": 30,
                     "unit": "second",
-                    "note": "CSV 记录线路二时长可调、以上游为准；但客户端 video-provider-adapters 对 route1/route2/haidiyue-face 一律要求恰好 30 秒，故此处按客户端强约束收敛"
+                    "note": "2026-09-12用户确认线路一、线路二均固定30秒"
                 },
                 "ratio": {
                     "type": "enum",
@@ -889,7 +893,7 @@ export const DEFAULT_MODEL_CONFIG = {
                 "concurrency": 1,
                 "passRateNote": "通过率较低"
             },
-            "notes": "时长可调整，具体范围以当前上游为准；通过率较低；分辨率、比例和素材数量以线路返回能力为准"
+            "notes": "2026-09-12用户确认：线路二固定30秒、720p、最多9张参考图；4-30秒仅属于独立的seedance_v2.5模型"
         },
         {
             "id": "ravenhash-video.seedance-v2.5",
@@ -1390,9 +1394,8 @@ export const DEFAULT_MODEL_CONFIG = {
                     "default": "16:9"
                 },
                 "resolutionTier": {
-                    "type": "fixed",
-                    "value": "720p",
-                    "note": "当前固定发送 720p"
+                    "type": "unknown",
+                    "reason": "旧接口原文写2k，当前适配器发送720p；未核对当前渠道前不新增分辨率限制"
                 }
             },
             "capabilities": {
@@ -1405,14 +1408,6 @@ export const DEFAULT_MODEL_CONFIG = {
                 },
                 "referenceAudios": {
                     "supported": true
-                },
-                "firstFrame": {
-                    "supported": false,
-                    "reason": "原生任务中心接口只接受通用参考图"
-                },
-                "lastFrame": {
-                    "supported": false,
-                    "reason": "原生任务中心接口只接受通用参考图"
                 },
                 "webSearch": {
                     "supported": false,
@@ -1439,353 +1434,6 @@ export const DEFAULT_MODEL_CONFIG = {
                 "concurrency": 1
             },
             "notes": "当前固定发送720p；支持参考图片和音频；不支持参考视频"
-        },
-        {
-            "id": "video-template.seedance-1.5",
-            "label": "seedance-1.5系列",
-            "kind": "video",
-            "channel": "其他视频能力模板",
-            "route": "Seedance 1.5",
-            "priority": 80,
-            "match": {
-                "model": [
-                    "seedance[^a-z0-9]*(?:1[._-]?5|1[._-]?0[-_]?pro)"
-                ]
-            },
-            "parameters": {
-                "accepts": [
-                    "model",
-                    "prompt",
-                    "duration",
-                    "resolution",
-                    "aspect_ratio",
-                    "reference_images"
-                ],
-                "required": [
-                    "model",
-                    "prompt"
-                ]
-            },
-            "options": {
-                "duration": {
-                    "type": "enum",
-                    "values": [
-                        5,
-                        10,
-                        12
-                    ],
-                    "allowAuto": true,
-                    "unit": "second",
-                    "default": 5,
-                    "note": "自动/5/10/12 秒"
-                },
-                "ratio": {
-                    "type": "enum",
-                    "values": [
-                        "21:9",
-                        "16:9",
-                        "4:3",
-                        "1:1",
-                        "3:4",
-                        "9:16",
-                        "adaptive"
-                    ],
-                    "default": "16:9",
-                    "allowAuto": true
-                },
-                "resolutionTier": {
-                    "type": "enum",
-                    "values": [
-                        "480p",
-                        "720p",
-                        "1080p"
-                    ],
-                    "default": "720p"
-                }
-            },
-            "capabilities": {
-                "referenceImages": {
-                    "supported": true
-                },
-                "webSearch": {
-                    "supported": false,
-                    "reason": "该线路不发送联网搜索参数（界面已隐藏）"
-                },
-                "cameraFixed": {
-                    "supported": false,
-                    "reason": "该线路不发送固定镜头参数（界面已隐藏）"
-                },
-                "generatedAudio": {
-                    "supported": false,
-                    "reason": "该线路不发送生成音频参数（界面已隐藏）"
-                },
-                "watermark": {
-                    "supported": false,
-                    "reason": "该线路不发送水印参数（界面已隐藏）"
-                }
-            },
-            "prompt": {
-                "required": true
-            },
-            "limits": {
-                "concurrency": 1
-            },
-            "notes": "自动/5/10/12秒；480p/720p/1080p；支持常用横竖屏比例"
-        },
-        {
-            "id": "video-template.wan",
-            "label": "Wan系列",
-            "kind": "video",
-            "channel": "其他视频能力模板",
-            "route": "DashScope/Wan",
-            "priority": 70,
-            "match": {
-                "model": [
-                    "dashscope",
-                    "wanx",
-                    "tongyi",
-                    "通义万相",
-                    "wan[^\\s]*(?:t2v|i2v)"
-                ]
-            },
-            "parameters": {
-                "accepts": [
-                    "model",
-                    "prompt",
-                    "duration",
-                    "resolution",
-                    "aspect_ratio",
-                    "reference_images"
-                ],
-                "required": [
-                    "model",
-                    "prompt"
-                ]
-            },
-            "options": {
-                "duration": {
-                    "type": "enum",
-                    "values": [
-                        3,
-                        5,
-                        10,
-                        15
-                    ],
-                    "unit": "second",
-                    "default": 5
-                },
-                "ratio": {
-                    "type": "enum",
-                    "values": [
-                        "1:1",
-                        "16:9",
-                        "9:16",
-                        "4:3",
-                        "3:4"
-                    ],
-                    "default": "1:1"
-                },
-                "resolutionTier": {
-                    "type": "enum",
-                    "values": [
-                        "720P",
-                        "1080P"
-                    ],
-                    "default": "720P"
-                }
-            },
-            "capabilities": {
-                "referenceImages": {
-                    "supported": true
-                },
-                "webSearch": {
-                    "supported": false,
-                    "reason": "该线路不发送联网搜索参数（界面已隐藏）"
-                },
-                "cameraFixed": {
-                    "supported": false,
-                    "reason": "该线路不发送固定镜头参数（界面已隐藏）"
-                },
-                "generatedAudio": {
-                    "supported": false,
-                    "reason": "该线路不发送生成音频参数（界面已隐藏）"
-                },
-                "watermark": {
-                    "supported": false,
-                    "reason": "该线路不发送水印参数（界面已隐藏）"
-                }
-            },
-            "prompt": {
-                "required": true
-            },
-            "limits": {
-                "concurrency": 1
-            },
-            "notes": "3/5/10/15秒；720P/1080P；比例1:1/16:9/9:16/4:3/3:4"
-        },
-        {
-            "id": "video-template.kling",
-            "label": "Kling系列",
-            "kind": "video",
-            "channel": "其他视频能力模板",
-            "route": "Kling",
-            "priority": 70,
-            "match": {
-                "model": [
-                    "kling",
-                    "可灵"
-                ]
-            },
-            "parameters": {
-                "accepts": [
-                    "model",
-                    "prompt",
-                    "duration",
-                    "aspect_ratio",
-                    "reference_images"
-                ],
-                "required": [
-                    "model",
-                    "prompt"
-                ]
-            },
-            "options": {
-                "duration": {
-                    "type": "enum",
-                    "values": [
-                        3,
-                        5,
-                        10,
-                        15
-                    ],
-                    "unit": "second",
-                    "default": 5
-                },
-                "ratio": {
-                    "type": "enum",
-                    "values": [
-                        "16:9",
-                        "9:16",
-                        "1:1"
-                    ],
-                    "default": "16:9"
-                },
-                "resolutionTier": {
-                    "type": "unsupported",
-                    "reason": "当前不发送独立分辨率参数"
-                }
-            },
-            "capabilities": {
-                "referenceImages": {
-                    "supported": true
-                },
-                "webSearch": {
-                    "supported": false,
-                    "reason": "该线路不发送联网搜索参数（界面已隐藏）"
-                },
-                "cameraFixed": {
-                    "supported": false,
-                    "reason": "该线路不发送固定镜头参数（界面已隐藏）"
-                },
-                "generatedAudio": {
-                    "supported": false,
-                    "reason": "该线路不发送生成音频参数（界面已隐藏）"
-                },
-                "watermark": {
-                    "supported": false,
-                    "reason": "该线路不发送水印参数（界面已隐藏）"
-                }
-            },
-            "prompt": {
-                "required": true
-            },
-            "limits": {
-                "concurrency": 1
-            },
-            "notes": "3/5/10/15秒；比例16:9/9:16/1:1；当前不发送独立分辨率参数"
-        },
-        {
-            "id": "video-template.tencent-vidu",
-            "label": "Tencent/Vidu系列",
-            "kind": "video",
-            "channel": "其他视频能力模板",
-            "route": "Tencent/Vidu",
-            "priority": 70,
-            "match": {
-                "model": [
-                    "tencent",
-                    "vidu",
-                    "腾讯"
-                ]
-            },
-            "parameters": {
-                "accepts": [
-                    "model",
-                    "prompt",
-                    "duration",
-                    "aspect_ratio",
-                    "reference_images"
-                ],
-                "required": [
-                    "model",
-                    "prompt"
-                ]
-            },
-            "options": {
-                "duration": {
-                    "type": "enum",
-                    "values": [
-                        5,
-                        10
-                    ],
-                    "unit": "second",
-                    "default": 5
-                },
-                "ratio": {
-                    "type": "enum",
-                    "values": [
-                        "1:1",
-                        "16:9",
-                        "9:16",
-                        "4:3",
-                        "3:4",
-                        "21:9"
-                    ],
-                    "default": "1:1"
-                },
-                "resolutionTier": {
-                    "type": "unsupported",
-                    "reason": "当前不发送独立分辨率参数"
-                }
-            },
-            "capabilities": {
-                "referenceImages": {
-                    "supported": true
-                },
-                "webSearch": {
-                    "supported": false,
-                    "reason": "该线路不发送联网搜索参数（界面已隐藏）"
-                },
-                "cameraFixed": {
-                    "supported": false,
-                    "reason": "该线路不发送固定镜头参数（界面已隐藏）"
-                },
-                "generatedAudio": {
-                    "supported": false,
-                    "reason": "该线路不发送生成音频参数（界面已隐藏）"
-                },
-                "watermark": {
-                    "supported": false,
-                    "reason": "该线路不发送水印参数（界面已隐藏）"
-                }
-            },
-            "prompt": {
-                "required": true
-            },
-            "limits": {
-                "concurrency": 1
-            },
-            "notes": "5/10秒；比例1:1/16:9/9:16/4:3/3:4/21:9；当前不发送独立分辨率参数"
         },
         {
             "id": "text.openai.gpt-5.6-terra",

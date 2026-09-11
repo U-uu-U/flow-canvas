@@ -149,14 +149,15 @@ export function renderModelCapabilityPanel(host, provider = {}, kind = 'image') 
  * 校验一次生成请求。返回值里的 `message` 已经是可直接展示的中文文案。
  * 未收录的模型 / 未知边界的警告也会带上，供 UI 以提示方式展示。
  */
-export function checkModelRequest({ provider = {}, kind = 'image', fields = {}, features = {}, references = {}, prompt = '' } = {}) {
+export function checkModelRequest({ provider = {}, kind = 'image', fields = {}, features = {}, references = {}, prompt = '', promptResolved = true } = {}) {
     const result = validateModelRequest({
         config: modelConfigStore.getConfig(),
         provider: { ...provider, kind },
         fields,
         features,
         references,
-        prompt
+        prompt,
+        promptResolved
     });
     return {
         ...result,
@@ -169,6 +170,14 @@ export function formatModelRequestIssues(result) {
     for (const item of result?.errors || []) parts.push(item.message);
     for (const item of result?.warnings || []) parts.push(item.message);
     return parts.join('；');
+}
+
+export function assertModelRequest(options) {
+    const result = checkModelRequest(options);
+    if (!result.ok) {
+        throw new Error(`当前模型参数不被支持：${result.errors.map(item => item.message).join('；')}`);
+    }
+    return result;
 }
 
 // ── 设置卡 ───────────────────────────────────────────────────
