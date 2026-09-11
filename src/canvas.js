@@ -9274,16 +9274,47 @@ export class CanvasManager {
                     trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
                     const panel = document.createElement('div');
                     panel.className = 'generation-composer-route-panel';
+                    panel.setAttribute('popover', 'manual');
                     container = document.createElement('div');
                     container.className = 'generation-composer-route-options';
                     panel.appendChild(container);
+                    let closeTimer;
                     const expand = open => {
+                        clearTimeout(closeTimer);
                         group.classList.toggle('expanded', open);
                         trigger.setAttribute('aria-expanded', String(open));
                         panel.inert = !open;
+                        if (open && group.isConnected) {
+                            const bounds = trigger.getBoundingClientRect();
+                            const menuBounds = popover.getBoundingClientRect();
+                            panel.style.width = `${Math.min(bounds.width, window.innerWidth - 20)}px`;
+                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - bounds.width - 10))}px`;
+                            panel.style.top = `${menuBounds.bottom + 5}px`;
+                            panel.showPopover();
+                            const height = panel.offsetHeight;
+                            const top = menuBounds.bottom + 5 + height <= window.innerHeight - 10
+                                ? menuBounds.bottom + 5 : Math.max(10, menuBounds.top - height - 5);
+                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - panel.offsetWidth - 10))}px`;
+                            panel.style.top = `${top}px`;
+                        } else if (panel.matches(':popover-open')) panel.hidePopover();
+                    };
+                    const deferClose = () => {
+                        clearTimeout(closeTimer);
+                        closeTimer = setTimeout(() => {
+                            if (!popover.matches(':hover') && !panel.matches(':hover')) expand(false);
+                        }, 120);
                     };
                     group.addEventListener('mouseenter', () => expand(true));
-                    group.addEventListener('mouseleave', () => expand(false));
+                    group.addEventListener('mouseleave', deferClose);
+                    panel.addEventListener('mouseenter', () => clearTimeout(closeTimer));
+                    panel.addEventListener('mouseleave', deferClose);
+                    popover.addEventListener('mouseleave', deferClose);
+                    list.addEventListener('scroll', () => {
+                        if (!panel.matches(':popover-open')) return;
+                        const bounds = trigger.getBoundingClientRect();
+                        const viewport = list.getBoundingClientRect();
+                        expand(bounds.bottom > viewport.top && bounds.top < viewport.bottom);
+                    });
                     group.addEventListener('focusin', () => expand(true));
                     group.addEventListener('focusout', event => {
                         if (!group.contains(event.relatedTarget)) expand(false);
@@ -9312,7 +9343,9 @@ export class CanvasManager {
                     button.title = [provider.routeLabel, provider.model, provider.name].filter(Boolean).join(' · ');
                     const copy = document.createElement('span');
                     const model = document.createElement('strong');
-                    model.textContent = (split ? provider.routeLabel : provider.model) || '未命名模型';
+                    model.textContent = (split
+                        ? provider.routeLabel + (provider.routeLabel === '线路一' ? '（推荐）' : '')
+                        : provider.model) || '未命名模型';
                     const source = document.createElement('small');
                     source.textContent = provider.name || '未命名 API';
                     copy.append(model, source);
