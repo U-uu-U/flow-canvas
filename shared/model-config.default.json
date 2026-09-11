@@ -1,0 +1,532 @@
+{
+    "schemaVersion": 1,
+    "revision": 0,
+    "updatedAt": "2026-09-12T00:00:00.000Z",
+    "source": "builtin:Flow-Canvas-模型渠道入参与限制-对外版.csv",
+    "refreshIntervalMs": 3600000,
+    "kinds": {
+        "image": "图片",
+        "video": "视频",
+        "text": "文字"
+    },
+    "fields": {
+        "model": { "label": "模型", "param": "model", "type": "text", "nodeKey": "model" },
+        "prompt": { "label": "提示词", "param": "prompt", "type": "text", "nodeKey": "prompt" },
+        "negativePrompt": { "label": "反向提示词", "param": ["negative_prompt", "no"], "type": "text", "nodeKey": "negativePrompt" },
+        "resolutionTier": { "label": "画质", "param": ["size", "resolution"], "type": "tier", "nodeKey": "resolutionTier" },
+        "ratio": { "label": "画面比例", "param": ["aspect_ratio", "ratio", "ar"], "type": "enum", "nodeKey": "ratio" },
+        "duration": { "label": "时长", "param": ["duration", "seconds"], "type": "duration", "nodeKey": "duration" },
+        "n": { "label": "单次张数", "param": "n", "type": "range", "nodeKey": "count" },
+        "quality": { "label": "生成质量", "param": "quality", "type": "enum", "nodeKey": "quality" },
+        "responseFormat": { "label": "返回格式", "param": "response_format", "type": "enum", "nodeKey": "responseFormat" },
+        "historyDisabled": { "label": "关闭历史记录", "param": "history_disabled", "type": "boolean", "nodeKey": "historyDisabled" },
+        "stream": { "label": "流式返回", "param": "stream", "type": "boolean", "nodeKey": "stream" },
+        "referenceImages": { "label": "参考图", "param": ["reference_images", "image_urls", "images"], "type": "references" },
+        "firstFrame": { "label": "首帧图", "param": "first_image", "type": "references" },
+        "lastFrame": { "label": "尾帧图", "param": "last_image", "type": "references" },
+        "referenceVideos": { "label": "参考视频", "param": "reference_videos", "type": "references" },
+        "referenceAudios": { "label": "参考音频", "param": "reference_audios", "type": "references" },
+        "webSearch": { "label": "联网搜索", "param": "web_search", "type": "boolean", "nodeKey": "webSearch" },
+        "cameraFixed": { "label": "固定镜头", "param": "camera_fixed", "type": "boolean", "nodeKey": "cameraFixed" },
+        "generatedAudio": { "label": "生成音频", "param": "generate_audio", "type": "boolean", "nodeKey": "generateAudio" },
+        "watermark": { "label": "水印", "param": "watermark", "type": "boolean", "nodeKey": "watermark" },
+        "messages": { "label": "对话消息", "param": "messages", "type": "text" },
+        "tools": { "label": "工具调用", "param": "tools", "type": "boolean" },
+        "workflowId": { "label": "工作流", "param": "workflow_id", "type": "text" },
+        "version": { "label": "MJ 版本", "param": "version", "type": "enum" },
+        "raw": { "label": "Raw 模式", "param": "raw", "type": "boolean" },
+        "stylize": { "label": "Stylize", "param": "stylize", "type": "range" },
+        "chaos": { "label": "Chaos", "param": "chaos", "type": "range" },
+        "weird": { "label": "Weird", "param": "weird", "type": "range" },
+        "imageWeight": { "label": "图片权重", "param": "image_weight", "type": "range" },
+        "styleReference": { "label": "风格参考", "param": "style_reference", "type": "references" },
+        "styleWeight": { "label": "风格权重", "param": "style_weight", "type": "range" },
+        "styleVersion": { "label": "风格版本", "param": "sv", "type": "range" },
+        "omniReference": { "label": "全能参考", "param": "omni_reference", "type": "references" },
+        "omniWeight": { "label": "全能参考权重", "param": "omni_weight", "type": "range" },
+        "profile": { "label": "个性化档案", "param": "profile", "type": "text" },
+        "seed": { "label": "随机种子", "param": "seed", "type": "range" },
+        "tile": { "label": "无缝拼贴", "param": "tile", "type": "boolean" },
+        "draft": { "label": "草稿模式", "param": "draft", "type": "boolean" },
+        "repeat": { "label": "重复次数", "param": "repeat", "type": "range" },
+        "speed": { "label": "出图速度", "param": "speed", "type": "enum" },
+        "visibility": { "label": "可见性", "param": "visibility", "type": "enum" },
+        "definition": { "label": "清晰度", "param": "hd", "type": "enum" }
+    },
+    "capabilities": {
+        "referenceImages": { "label": "参考图", "fields": ["referenceImages"], "kinds": ["image", "video"] },
+        "referenceVideos": { "label": "参考视频", "fields": ["referenceVideos"], "kinds": ["video"] },
+        "referenceAudios": { "label": "参考音频", "fields": ["referenceAudios"], "kinds": ["video"] },
+        "firstFrame": { "label": "首帧图", "fields": ["firstFrame"], "kinds": ["video"] },
+        "lastFrame": { "label": "尾帧图", "fields": ["lastFrame"], "kinds": ["video"] },
+        "webSearch": { "label": "联网搜索", "fields": ["webSearch"], "kinds": ["video", "image"] },
+        "cameraFixed": { "label": "固定镜头", "fields": ["cameraFixed"], "kinds": ["video"] },
+        "generatedAudio": { "label": "生成音频", "fields": ["generatedAudio"], "kinds": ["video"] },
+        "watermark": { "label": "水印", "fields": ["watermark"], "kinds": ["video"] },
+        "negativePrompt": { "label": "反向提示词", "fields": ["negativePrompt"], "kinds": ["image"] },
+        "stream": { "label": "流式返回", "fields": ["stream"], "kinds": ["image", "text"] },
+        "tools": { "label": "工具调用", "fields": ["tools"], "kinds": ["text"] },
+        "face": { "label": "人脸素材", "kinds": ["video"] },
+        "nsfw": { "label": "无内容审核 / NSFW", "kinds": ["video"] }
+    },
+    "models": [
+        {
+            "id": "ravenhash-image.gpt-image-2",
+            "label": "gpt-image-2",
+            "kind": "image",
+            "channel": "RavenHash图片",
+            "route": "图片线路",
+            "priority": 100,
+            "match": {
+                "model": ["^gpt-image-2$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "size", "n", "quality", "response_format", "history_disabled", "stream", "reference_images"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "resolutionTier": {
+                    "type": "tier",
+                    "values": ["1K", "2K", "4K"],
+                    "default": "4K",
+                    "encode": "dimensions",
+                    "note": "支持 1K/2K/4K 及常用比例"
+                },
+                "n": { "type": "range", "min": 1, "max": 8, "integer": true, "default": 1, "note": "单次 1-8 张" },
+                "quality": { "type": "enum", "values": ["auto", "low", "medium", "high"], "default": "high" },
+                "responseFormat": { "type": "enum", "values": ["url", "b64_json"], "default": "url" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "maxBytesPerImage": 52428800, "note": "参考图单张最大 50MB；有参考图时走 /images/edits" },
+                "negativePrompt": { "supported": true },
+                "stream": { "supported": true }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 3
+            },
+            "notes": "单次1-8张；参考图单张最大50MB；quality为auto/low/medium/high；支持1K/2K/4K及常用比例；有参考图时走/images/edits"
+        },
+        {
+            "id": "ravenhash-image.gpt-image-2.5-sunburst",
+            "label": "gpt-image-2.5-sunburst",
+            "kind": "image",
+            "channel": "RavenHash图片",
+            "route": "图片线路",
+            "priority": 110,
+            "match": {
+                "model": ["^gpt-image-2\\.5-sunburst$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "size", "n", "quality", "response_format", "history_disabled", "stream", "reference_images"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "resolutionTier": {
+                    "type": "tier",
+                    "values": ["1K", "2K", "4K"],
+                    "default": "4K",
+                    "encode": "dimensions",
+                    "note": "已实测 3840x2160；复用通用图片请求"
+                },
+                "n": { "type": "unknown", "reason": "复用通用图片请求，未单独维护单次张数上限" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "note": "已实测使用 2 张参考图；数量上限未单独维护" }
+            },
+            "prompt": { "required": true },
+            "notes": "已成功生成3840x2160并使用2张参考图；2026-09-12实测携带quality=high、response_format=b64_json、history_disabled=true、stream=false生成成功；接收参数不代表每项都已验证生效"
+        },
+        {
+            "id": "midjourney.mj-imagine",
+            "label": "mj_imagine",
+            "kind": "image",
+            "channel": "Midjourney",
+            "route": "MJ线路",
+            "priority": 100,
+            "match": {
+                "model": ["^mj_imagine$", "^midjourney$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "reference_images", "ar", "version", "raw", "stylize", "chaos", "weird", "quality", "image_weight", "style_reference", "style_weight", "omni_reference", "omni_weight", "profile", "seed", "tile", "draft", "repeat", "speed", "visibility", "negative_prompt"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "resolutionTier": { "type": "tier", "values": ["1K", "2K"], "default": "1K", "encode": "dimensions" },
+                "ratio": { "type": "unknown", "reason": "--ar 支持任意比例，界面提供常用比例" },
+                "version": { "type": "enum", "values": ["8.2", "8.1", "7", "6.1", "6", "niji-7"], "note": "仅这些版本会被编译成 --v/--niji" },
+                "stylize": { "type": "range", "min": 0, "max": 1000, "integer": true, "default": 100 },
+                "chaos": { "type": "range", "min": 0, "max": 100, "integer": true, "default": 0 },
+                "weird": { "type": "range", "min": 0, "max": 3000, "integer": true, "default": 0 },
+                "quality": { "type": "unknown", "reason": "MJ 线路不使用 OpenAI 兼容的 quality 字段；--q 只接受 0.5/1/2/4（界面用 midjourneyQuality=default 表示不发送该参数）" },
+                "imageWeight": { "type": "range", "min": 0, "max": 3, "default": 1, "note": "niji 版本上限为 2" },
+                "styleWeight": { "type": "range", "min": 0, "max": 1000, "integer": true, "default": 100 },
+                "styleVersion": { "type": "range", "min": 1, "max": 6, "integer": true },
+                "omniWeight": { "type": "range", "min": 1, "max": 1000, "integer": true, "default": 100 },
+                "seed": { "type": "range", "min": 0, "max": 4294967295, "integer": true },
+                "repeat": { "type": "range", "min": 1, "max": 4, "integer": true, "default": 1 },
+                "speed": { "type": "enum", "values": ["fast", "relax", "turbo"] },
+                "visibility": { "type": "enum", "values": ["public", "stealth"] },
+                "definition": { "type": "enum", "values": ["hd", "sd"], "note": "仅 V8.1/8.2 生效" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "note": "参考图必须是公网可访问的 HTTP(S) 地址，本地图会先上传" },
+                "negativePrompt": { "supported": true }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 1,
+                "resultsPerRequest": 4,
+                "resultsPerRequestNote": "每次返回四宫格",
+                "note": "单节点请求并发固定 1"
+            },
+            "notes": "每次返回四宫格；单节点请求并发固定1；Stylize 0-1000；Chaos 0-100；Weird 0-3000；Seed 0-4294967295；Repeat 1-4"
+        },
+        {
+            "id": "ravenhash-video.sd2.5-route1",
+            "label": "sd2.5-route1",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "SD2.5线路一（推荐）",
+            "priority": 120,
+            "match": {
+                "model": ["^sd2[._-]?5-route1$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "duration", "aspect_ratio", "reference_images"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "fixed", "value": 30, "unit": "second", "note": "固定 30 秒" },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": { "type": "fixed", "value": "720p", "note": "固定 720p" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "max": 9, "note": "最多 9 张参考图" },
+                "face": { "supported": true, "note": "支持人脸参考，通过率约 90%" },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" },
+                "firstFrame": { "supported": false, "reason": "该线路只接受通用参考图" },
+                "lastFrame": { "supported": false, "reason": "该线路只接受通用参考图" }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 1,
+                "passRate": 0.9,
+                "passRateNote": "通过率约 90%"
+            },
+            "notes": "固定30秒、720p；最多9张参考图；支持人脸，通过率约90%；比例支持adaptive/16:9/9:16/1:1/4:3/3:4"
+        },
+        {
+            "id": "ravenhash-video.sd2.5",
+            "label": "sd2.5",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "SD2.5线路二",
+            "priority": 110,
+            "match": {
+                "model": ["^sd2[._-]?5$", "^sd2[._-]?5-haidiyue-face$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "duration", "seconds", "aspect_ratio", "reference_images"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "fixed", "value": 30, "unit": "second", "note": "2026-09-12用户确认线路一、线路二均固定30秒" },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": { "type": "fixed", "value": "720p" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "max": 9, "note": "备用线路按 9 张参考图收敛" },
+                "face": { "supported": true, "note": "支持人脸参考" },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 1,
+                "passRateNote": "通过率较低"
+            },
+            "notes": "2026-09-12用户确认：线路二固定30秒、720p、最多9张参考图；4-30秒仅属于独立的seedance_v2.5模型"
+        },
+        {
+            "id": "ravenhash-video.seedance-v2.5",
+            "label": "seedance_v2.5",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "可调SD2.5兼容模型",
+            "priority": 115,
+            "match": {
+                "model": ["^seedance_v2\\.5$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "seconds", "ratio", "resolution", "image_urls"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "range", "min": 4, "max": 30, "integer": true, "unit": "second", "default": 30 },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": { "type": "enum", "values": ["720p"], "default": "720p", "note": "当前常用 720p" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "max": 10, "note": "最多 10 张参考图" },
+                "face": { "supported": true },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 1
+            },
+            "notes": "4-30秒整数；当前常用720p；最多10张参考图；比例支持adaptive/16:9/9:16/1:1/4:3/3:4"
+        },
+        {
+            "id": "ravenhash-video.seedance-2.0",
+            "label": "seedance-2.0",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "SD2.0；933满血版",
+            "priority": 105,
+            "match": {
+                "model": ["^seedance-2\\.0$", "^doubao-seedance-2-0$", "^artsdance2-0"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "resolution", "ratio", "aspect_ratio", "duration", "camera_fixed", "generate_audio", "web_search", "watermark", "reference_images", "reference_videos", "reference_audios"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "range", "min": 1, "max": 15, "integer": true, "unit": "second", "default": 5, "note": "技术参数范围仍以上游接口实际返回为准" },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"],
+                    "default": "16:9",
+                    "allowAuto": true
+                },
+                "resolutionTier": {
+                    "type": "enum",
+                    "values": ["480p", "720p", "1080p", "4K"],
+                    "default": "1080p",
+                    "note": "技术参数范围仍以上游接口实际返回为准"
+                }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true },
+                "referenceVideos": { "supported": true },
+                "referenceAudios": { "supported": true },
+                "webSearch": { "supported": true },
+                "cameraFixed": { "supported": true },
+                "generatedAudio": { "supported": true },
+                "watermark": { "supported": true },
+                "face": { "supported": true, "note": "支持人脸和 NSFW" },
+                "nsfw": { "supported": true, "note": "933 满血版没有内容审核限制" }
+            },
+            "prompt": { "required": true },
+            "limits": {
+                "concurrency": 1
+            },
+            "notes": "采用933满血版入参；没有内容审核限制；支持人脸和NSFW；技术参数范围仍以上游接口实际返回为准"
+        },
+        {
+            "id": "ravenhash-video.minimax-h3",
+            "label": "minimax-h3（兼容线路）",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "MiniMax H3兼容线路",
+            "priority": 130,
+            "match": {
+                "model": ["^minimax[._-]?h3$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "resolution", "duration", "aspect_ratio", "first_image", "last_image", "reference_images", "reference_videos", "reference_audios"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "range", "min": 4, "max": 15, "integer": true, "unit": "second", "default": 4 },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["adaptive", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "3:4", "21:9"],
+                    "default": "adaptive",
+                    "allowAuto": true,
+                    "note": "adaptive 按首张图匹配比例"
+                },
+                "resolutionTier": { "type": "enum", "values": ["480p", "768p", "1080p", "2k", "4k"], "default": "2k" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "max": 9 },
+                "referenceVideos": { "supported": true, "max": 3 },
+                "referenceAudios": { "supported": true, "max": 3 },
+                "firstFrame": { "supported": true },
+                "lastFrame": { "supported": true },
+                "face": { "supported": true, "note": "支持人脸参考" },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" }
+            },
+            "prompt": { "required": true, "maxLength": 5000 },
+            "limits": {
+                "concurrency": 1
+            },
+            "notes": "提示词必填且最多5000字；4-15秒；480p/768p/1080p/2K/4K；最多9图、3视频、3音频；adaptive按首张图匹配比例"
+        },
+        {
+            "id": "minimax-video.minimax-h3-seconds",
+            "label": "minimax-h3（按秒线路）",
+            "kind": "video",
+            "channel": "MiniMax视频",
+            "route": "H3按秒线路",
+            "priority": 125,
+            "match": {
+                "model": ["^minimax[._-]?h3$", "^minimax[._-]?h3-per[._-]?second$"]
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "seconds", "workflow_id", "size", "aspect_ratio", "images", "reference_videos", "reference_audios"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "range", "min": 4, "max": 15, "integer": true, "unit": "second", "default": 4 },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["adaptive", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "3:4", "21:9"],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": { "type": "enum", "values": ["480p", "768p", "1080p", "2k", "4k"], "default": "2k" },
+                "workflowId": { "type": "enum", "values": ["text-to-video", "fl2v", "cf-fl2v", "multi-reference", "cf-multi-reference"], "note": "由参考素材自动推导，一般无需手填" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true, "max": 9 },
+                "referenceVideos": { "supported": true, "max": 3 },
+                "referenceAudios": { "supported": true, "max": 3 },
+                "firstFrame": { "supported": true, "note": "1 张图按首帧处理，2 张图按首尾帧处理" },
+                "lastFrame": { "supported": true, "note": "2 张图时第二张按尾帧处理" },
+                "face": { "supported": true },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" }
+            },
+            "prompt": { "required": true, "maxLength": 5000 },
+            "limits": {
+                "concurrency": 1
+            },
+            "notes": "4-15秒；480p/768p/1080p/2K/4K；最多9图、3视频、3音频；自动选择文生视频、首尾帧或多参考工作流"
+        },
+        {
+            "id": "minimax-video.minimax-h3-c1",
+            "label": "MiniMax-H3-c1",
+            "kind": "video",
+            "channel": "MiniMax视频",
+            "route": "H3原生任务中心",
+            "priority": 140,
+            "match": {
+                "model": ["^minimax[._-]?h3[._-]?c1$", "^minimax[._-]?h3$"],
+                "endpoint": "kyyReactApiServer|model-center/tasks"
+            },
+            "parameters": {
+                "accepts": ["model", "prompt", "resolution", "duration", "aspect_ratio", "reference_images", "reference_audios"],
+                "required": ["model", "prompt"]
+            },
+            "options": {
+                "duration": { "type": "range", "min": 4, "max": 15, "integer": true, "unit": "second", "default": 4 },
+                "ratio": {
+                    "type": "enum",
+                    "values": ["16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "3:4", "21:9"],
+                    "default": "16:9"
+                },
+                "resolutionTier": { "type": "unknown", "reason": "旧接口原文写2k，当前适配器发送720p；未核对当前渠道前不新增分辨率限制" }
+            },
+            "capabilities": {
+                "referenceImages": { "supported": true },
+                "referenceVideos": { "supported": false, "reason": "该线路不支持参考视频" },
+                "referenceAudios": { "supported": true },
+                "webSearch": { "supported": false, "reason": "该线路不发送联网搜索参数（界面已隐藏）" },
+                "cameraFixed": { "supported": false, "reason": "该线路不发送固定镜头参数（界面已隐藏）" },
+                "generatedAudio": { "supported": false, "reason": "该线路不发送生成音频参数（界面已隐藏）" },
+                "watermark": { "supported": false, "reason": "该线路不发送水印参数（界面已隐藏）" }
+            },
+            "prompt": { "required": true, "maxLength": 5000 },
+            "limits": {
+                "concurrency": 1
+            },
+            "notes": "当前固定发送720p；支持参考图片和音频；不支持参考视频"
+        },
+        {
+            "id": "text.openai.gpt-5.6-terra",
+            "label": "gpt-5.6-terra / gpt-5.5",
+            "kind": "text",
+            "channel": "文字模型",
+            "route": "OpenAI兼容线路",
+            "priority": 60,
+            "match": {
+                "model": ["^gpt-5\\.6-terra$", "^gpt-5\\.5$"]
+            },
+            "parameters": {
+                "accepts": ["model", "messages", "tools", "stream"],
+                "required": ["model", "messages"]
+            },
+            "options": {
+                "tools": { "type": "unknown", "reason": "线路兼容 tools，未维护模型专属工具能力表" },
+                "stream": { "type": "unknown", "reason": "线路兼容 stream" }
+            },
+            "capabilities": {
+                "tools": { "supported": true },
+                "stream": { "supported": true }
+            },
+            "prompt": { "required": false },
+            "limits": {
+                "contextWindow": { "type": "unknown", "reason": "当前没有维护模型专属上下文窗口和最大输出 Token 限制表" }
+            },
+            "notes": "当前没有维护模型专属上下文窗口和最大输出Token限制表"
+        },
+        {
+            "id": "text.anthropic.claude-opus-5",
+            "label": "claude-opus-5",
+            "kind": "text",
+            "channel": "文字模型",
+            "route": "Anthropic线路",
+            "priority": 60,
+            "match": {
+                "model": ["^claude-opus-5$"]
+            },
+            "parameters": {
+                "accepts": ["model", "messages", "tools", "stream"],
+                "required": ["model", "messages"]
+            },
+            "options": {
+                "tools": { "type": "unknown", "reason": "线路兼容 tools，未维护模型专属工具能力表" },
+                "stream": { "type": "unknown", "reason": "线路兼容 stream" }
+            },
+            "capabilities": {
+                "tools": { "supported": true },
+                "stream": { "supported": true }
+            },
+            "prompt": { "required": false },
+            "limits": {
+                "contextWindow": { "type": "unknown", "reason": "当前没有维护模型专属上下文窗口和最大输出 Token 限制表" }
+            },
+            "notes": "当前没有维护模型专属上下文窗口和最大输出Token限制表"
+        }
+    ]
+}

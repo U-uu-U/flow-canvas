@@ -14,13 +14,11 @@ import {
 } from './shortcut-settings.js';
 import {
     IMAGE_RESOLUTION_TIERS,
-    inferClosestAspectRatio,
     inferImageResolutionTier
 } from './image-node-settings.js';
 import {
     inferProviderCapability,
-    providerHasCapability,
-    isGptImage2Model
+    providerHasCapability
 } from './provider-capabilities.js';
 import {
     getImageGenerationPreferences as readImageGenerationPreferences,
@@ -35,7 +33,15 @@ import {
 import { reconcileApiConfig } from './api-config-recovery.js';
 import { CANCELED_IMAGE_REFERENCES } from './node-types.js';
 import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
-import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import { getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import { modelConfigStore } from './model-config.js';
+import {
+    mergeImageProfile,
+    mergeVideoProfile,
+    resolveModelConfigEntry,
+    toImageProfileOverrides,
+    toVideoProfileOverrides
+} from './model-config-capabilities.js';
 import {
     AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
     settleRuntimeConversation, formatAgentElapsed
@@ -70,7 +76,6 @@ function normalizeRavenHashEndpoint(endpoint) {
     return value;
 }
 
-
 function formatVideoModelPrice(price) {
     if (price?.kind !== 'sale' || !price.source || price.currency !== 'CNY' || price.unit !== 'request') return '';
     const amount = Number(price.amount);
@@ -85,7 +90,6 @@ function formatVideoModelProfile(profile, includeLabel = true) {
         formatVideoModelPrice(profile?.price)
     ].filter(Boolean).join(' · ');
 }
-
 
 const DEFAULT_IMAGE_SIZES = [
     { value: '', label: '自动（匹配比例，优先最大）' },
@@ -103,12 +107,7 @@ const RAVENHASH_IMAGE_SIZES = [
 ];
 
 const VIDEO_REFERENCE_LIMITS = Object.freeze({ image: 9, video: 3, audio: 3 });
-const VIDEO_REFERENCE_LARGE_TOTAL_BYTES = 10 * 1024 * 1024;
 const IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES = 6 * 1024 * 1024;
-const IMAGE_REFERENCE_MANUAL_BUDGET_BYTES = 2 * 1024 * 1024;
-const IMAGE_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-image-prompt-height';
-const VIDEO_PROMPT_HEIGHT_STORAGE_KEY = 'flow-canvas-video-prompt-height';
-const PROJECT_COMPOSER_CACHE_STORAGE_KEY = 'flow-canvas-project-composer-cache-v1';
 const PROJECT_COMPOSER_DEFAULT_KEY = '__no_project__';
 const AGENT_CONVERSATION_STORAGE_KEY = 'flow-canvas-agent-conversations-v1';
 const AGENT_CONVERSATION_MESSAGE_LIMIT = 80;
@@ -201,15 +200,7 @@ export class AgentSidebar {
         this.localApiConfigPresent = false;
 
         this.editingProviderId = null;
-        this.imageGenerationMode = 'text';
-        this.imageReferenceSelections = [];
-        this.videoReferenceSelections = { image: [], video: [], audio: [] };
-        this.activeReferenceWorkspace = null;
-        this.activeVideoReferenceType = null;
         this.activeProjectCacheKey = this._projectCacheKey(this.options.getActiveProjectId?.());
-        this.projectComposerSaveTimer = null;
-        this.restoringProjectComposer = false;
-        this.selectedPromptPresetIds = { image: '', video: '' };
         this.activeConversationId = null;
         this.conversationFiles = [];
         this.messages = [];
@@ -248,9 +239,6 @@ export class AgentSidebar {
         this.apiForm = document.getElementById('agentApiForm');
         this.apiFormCloseBtn = document.getElementById('agentApiFormClose');
         this.apiFormTitle = document.getElementById('agentApiFormTitle');
-        this.textModelSelectEl = document.getElementById('agentTextModelSelect');
-        this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
-        this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
         this.modeTitle = document.getElementById('creationModeTitle');
         this.conversationMenuBtn = document.getElementById('agentConversationMenuBtn');
         this.conversationTitleBtn = document.getElementById('agentConversationTitleBtn');
@@ -312,83 +300,12 @@ export class AgentSidebar {
         this.taskHistoryList = document.getElementById('agentTaskHistoryList');
         this.taskHistorySummary = document.getElementById('agentTaskHistorySummary');
         this.agentSidebar = document.getElementById('agentSidebar');
-        this.videoModelPicker = document.getElementById('videoModelPicker');
-        this.videoModelSearchInput = document.getElementById('videoModelSearchInput');
-        this.videoModelList = document.getElementById('videoModelList');
-        this.videoModelEmpty = document.getElementById('videoModelEmpty');
-        this.videoSelectedModelName = document.getElementById('videoSelectedModelName');
-        this.videoSelectedModelId = document.getElementById('videoSelectedModelId');
-        this.videoSelectedModelProfile = document.getElementById('videoSelectedModelProfile');
-        this.videoSelectedModelRoute = document.getElementById('videoSelectedModelRoute');
-        this.videoSelectedModelPrice = document.getElementById('videoSelectedModelPrice');
-        this.videoSelectedModelProviderType = document.getElementById('videoSelectedModelProviderType');
-        this.videoSelectedModelResolutions = document.getElementById('videoSelectedModelResolutions');
-        this.videoSelectedModelDurations = document.getElementById('videoSelectedModelDurations');
-        this.videoSelectedModelRatios = document.getElementById('videoSelectedModelRatios');
-        this.videoModelFavoriteBtn = document.getElementById('videoModelFavoriteBtn');
-        this.videoModelCopyBtn = document.getElementById('videoModelCopyBtn');
-        this.videoWorkspace = document.getElementById('videoWorkspace');
-        this.videoPromptDock = document.getElementById('videoPromptDock');
-        this.videoPromptInput = document.getElementById('videoPromptInput');
-        this.videoPromptResizeHandle = document.getElementById('videoPromptResizeHandle');
-        this.videoRatioField = document.getElementById('videoRatioField');
-        this.videoRatioGrid = document.querySelector('.creation-ratio-grid');
-        this.videoResolutionField = document.getElementById('videoResolutionField');
-        this.videoResolutionSelect = document.getElementById('videoResolutionSelect');
-        this.videoRatioSelect = document.getElementById('videoRatioSelect');
-        this.videoDurationField = document.getElementById('videoDurationField');
-        this.videoDurationSelect = document.getElementById('videoDurationSelect');
-        this.videoDurationControl = document.getElementById('videoDurationControl');
-        this.videoCameraFixed = document.getElementById('videoCameraFixed');
-        this.videoGenerateAudio = document.getElementById('videoGenerateAudio');
-        this.videoWebSearchField = document.getElementById('videoWebSearchField');
-        this.videoWebSearch = document.getElementById('videoWebSearch');
-        this.videoWatermark = document.getElementById('videoWatermark');
-        this.videoAddMediaBtn = document.getElementById('videoAddMediaBtn');
-        this.videoClearSourcesBtn = document.getElementById('videoClearSourcesBtn');
-        this.videoWorkspaceStatus = document.getElementById('videoWorkspaceStatus');
-        this.videoGenerateBtn = document.getElementById('videoGenerateBtn');
-        this.videoGenerateMessage = document.getElementById('videoGenerateMessage');
-        this.videoPromptPresetSelect = document.getElementById('videoPromptPresetSelect');
-        this.videoPromptPresetName = document.getElementById('videoPromptPresetName');
-        this.videoPromptPresetSave = document.getElementById('videoPromptPresetSave');
-        this.videoPromptPresetDelete = document.getElementById('videoPromptPresetDelete');
-        this.videoPromptPresetCount = document.getElementById('videoPromptPresetCount');
-        this.videoPromptPresetStatus = document.getElementById('videoPromptPresetStatus');
-        this.videoPromptProviderChip = document.getElementById('videoPromptProviderChip');
-        this.videoPromptModelChip = document.getElementById('videoPromptModelChip');
-        this.imageWorkspace = document.getElementById('imageWorkspace');
-        this.imagePromptInput = document.getElementById('imagePromptInput');
-        this.imagePromptResizeHandle = document.getElementById('imagePromptResizeHandle');
-        this.imageGenerationModeControl = document.getElementById('imageGenerationModeControl');
-        this.imageReferencePanel = document.getElementById('imageReferencePanel');
-        this.imageReferenceCount = document.getElementById('imageReferenceCount');
-        this.imageReferenceList = document.getElementById('imageReferenceList');
-        this.imageAddReferenceBtn = document.getElementById('imageAddReferenceBtn');
-        this.imageCompressReferencesBtn = document.getElementById('imageCompressReferencesBtn');
-        this.imageClearReferencesBtn = document.getElementById('imageClearReferencesBtn');
-        this.imageSizeSelect = document.getElementById('imageSizeSelect');
-        this.imageQualitySelect = document.getElementById('imageQualitySelect');
-        this.imageApiOptions = document.getElementById('imageApiOptions');
-        this.imageResponseFormatSelect = document.getElementById('imageResponseFormatSelect');
-        this.imageHistoryDisabled = document.getElementById('imageHistoryDisabled');
-        this.imageStream = document.getElementById('imageStream');
-        this.imageWorkspaceStatus = document.getElementById('imageWorkspaceStatus');
-        this.imageGenerateBtn = document.getElementById('imageGenerateBtn');
-        this.imageGenerateMessage = document.getElementById('imageGenerateMessage');
-        this.imagePromptPresetSelect = document.getElementById('imagePromptPresetSelect');
-        this.imagePromptPresetName = document.getElementById('imagePromptPresetName');
-        this.imagePromptPresetSave = document.getElementById('imagePromptPresetSave');
-        this.imagePromptPresetDelete = document.getElementById('imagePromptPresetDelete');
-        this.imagePromptPresetCount = document.getElementById('imagePromptPresetCount');
-        this.imagePromptPresetStatus = document.getElementById('imagePromptPresetStatus');
         this.currentMode = 'canvas';
         this.taskHistoryOpen = false;
         this.taskHistoryFilter = 'all';
         this.generationTasks = [];
         this.processedBrowserSyncEventIds = new Set();
         this.browserSyncPolling = false;
-        this.activeVideoWorkspaceTaskId = null;
         this.lastCanvasSelection = this.options.getSelectedCanvasEntries?.() || [];
 
         // Form inputs
@@ -420,7 +337,7 @@ export class AgentSidebar {
 
         // 渲染 UI
         this._renderProviderList();
-        this._renderModelSelect();
+        this._renderAgentComposerModels();
         this._renderShortcutSettings();
         if (this.defaultTemporaryCompressionToggle) {
             this.defaultTemporaryCompressionToggle.checked = this.globalConfig.defaultTemporaryImageCompression === true;
@@ -428,8 +345,6 @@ export class AgentSidebar {
         this._renderAssetLibrarySettings();
         this._setSettingsTab(this.activeSettingsTab);
         this._renderGenerationTasks();
-        this._renderPromptPresets('image');
-        this._renderPromptPresets('video');
         this.apiConfigReady = this._restoreDurableApiConfig();
         this._restoreAgentConversation(this.activeProjectCacheKey);
         this._restorePendingAgentAttachments();
@@ -443,33 +358,10 @@ export class AgentSidebar {
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
         this._pollBrowserSyncEvents();
         this.browserSyncTimer = setInterval(() => this._pollBrowserSyncEvents(), 4000);
+        // CONFIG 更新后同步 Agent 模型选择器。
+        modelConfigStore.subscribe(() => this._renderAgentComposerModels());
         this.options.subscribeCanvasSelection?.((entries) => {
             this.lastCanvasSelection = Array.isArray(entries) ? entries : [];
-        });
-        this.options.subscribeInitialRenderComplete?.(() => {
-            this._restoreProjectComposerReferences(this.activeProjectCacheKey);
-        });
-        this.options.subscribeMediaReferenceSelection?.((payload) => {
-            const type = payload?.type;
-            if (this.activeReferenceWorkspace === 'image' && type === 'image') {
-                this.imageReferenceSelections = Array.isArray(payload.entries) ? payload.entries : [];
-                this._renderImageReferences();
-                return;
-            }
-            if (this.activeReferenceWorkspace !== 'video') return;
-            const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
-            const limits = this._getVideoReferenceLimits(profile);
-            if (!limits[type]) return;
-            this.videoReferenceSelections[type] = (Array.isArray(payload.entries) ? payload.entries : [])
-                .slice(0, limits[type]);
-            this._renderVideoSourcePreview();
-        });
-        this.options.subscribeMediaReferencePickState?.((payload) => {
-            const workspace = this.activeReferenceWorkspace;
-            if (!payload?.active) this.activeReferenceWorkspace = null;
-            this.activeVideoReferenceType = payload?.active && workspace === 'video' ? payload.type : null;
-            this._renderVideoReferencePickState();
-            this._renderImageReferences();
         });
         this.options.subscribeAssetLibrarySettings?.(() => this._renderAssetLibrarySettings());
     }
@@ -1988,154 +1880,9 @@ export class AgentSidebar {
         void this._sendAgentMessage(prompt);
     }
 
-    _loadProjectComposerCache() {
-        try {
-            const value = JSON.parse(localStorage.getItem(PROJECT_COMPOSER_CACHE_STORAGE_KEY) || '{}');
-            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-        } catch (_) {
-            return {};
-        }
-    }
-
-    _serializeReferenceEntries(entries = []) {
-        return (Array.isArray(entries) ? entries : []).map(entry => ({
-            id: entry?.id || entry?.itemId || null,
-            filePath: entry?.filePath || null,
-            width: Number(entry?.width) || null,
-            height: Number(entry?.height) || null
-        })).filter(entry => entry.id || entry.filePath);
-    }
-
-    _saveProjectComposer(key = this.activeProjectCacheKey) {
-        if (this.restoringProjectComposer || !key) return;
-        const cache = this._loadProjectComposerCache();
-        cache[key] = {
-            imagePrompt: this.imagePromptInput?.value || '',
-            videoPrompt: this.videoPromptInput?.value || '',
-            imageGenerationMode: this.imageGenerationMode,
-            imageSettings: {
-                size: this.imageSizeSelect?.value || '',
-                quality: this.imageQualitySelect?.value || '',
-                responseFormat: this.imageResponseFormatSelect?.value || 'url',
-                historyDisabled: this.imageHistoryDisabled?.checked !== false,
-                stream: Boolean(this.imageStream?.checked)
-            },
-            videoSettings: {
-                ratio: this.videoRatioSelect?.value || '',
-                ratioMode: this.videoRatioSelect?.value === 'adaptive' ? 'auto' : 'manual',
-                resolution: this.videoResolutionSelect?.value || '',
-                duration: this.videoDurationSelect?.value || '',
-                cameraFixed: Boolean(this.videoCameraFixed?.checked),
-                generateAudio: Boolean(this.videoGenerateAudio?.checked),
-                webSearch: Boolean(this.videoWebSearch?.checked),
-                watermark: Boolean(this.videoWatermark?.checked)
-            },
-            imageReferences: this._serializeReferenceEntries(this.imageReferenceSelections),
-            videoReferences: Object.fromEntries(['image', 'video', 'audio'].map(type => [
-                type,
-                this._serializeReferenceEntries(this.videoReferenceSelections[type])
-            ])),
-            updatedAt: new Date().toISOString()
-        };
-        try {
-            localStorage.setItem(PROJECT_COMPOSER_CACHE_STORAGE_KEY, JSON.stringify(cache));
-        } catch (error) {
-            console.warn('[AgentSidebar] Failed to save project composer cache:', error);
-        }
-    }
-
-    _scheduleProjectComposerSave() {
-        if (this.restoringProjectComposer) return;
-        clearTimeout(this.projectComposerSaveTimer);
-        this.projectComposerSaveTimer = setTimeout(() => {
-            this.projectComposerSaveTimer = null;
-            this._saveProjectComposer();
-        }, 180);
-    }
-
-    _restoreProjectComposerReferences(key = this.activeProjectCacheKey) {
-        if (key !== this.activeProjectCacheKey) return;
-        const state = this._loadProjectComposerCache()[key];
-        if (!state) return;
-        this.restoringProjectComposer = true;
-        try {
-            this.imageReferenceSelections = this.options.resolveMediaReferenceEntries?.(
-                state.imageReferences,
-                'image'
-            ) || [];
-            this.videoReferenceSelections = Object.fromEntries(['image', 'video', 'audio'].map(type => [
-                type,
-                this.options.resolveMediaReferenceEntries?.(state.videoReferences?.[type], type) || []
-            ]));
-            this.options.clearMediaReferenceSelections?.();
-            this._renderImageReferences();
-            this._renderVideoSourcePreview();
-        } finally {
-            this.restoringProjectComposer = false;
-        }
-    }
-
-    _restoreProjectComposerControls(state) {
-        const setSelectValue = (select, value) => {
-            if (!select || value == null) return;
-            if (Array.from(select.options || []).some(option => option.value === String(value))) {
-                select.value = String(value);
-            }
-        };
-        setSelectValue(this.imageSizeSelect, state?.imageSettings?.size);
-        setSelectValue(this.imageQualitySelect, state?.imageSettings?.quality);
-        setSelectValue(this.imageResponseFormatSelect, state?.imageSettings?.responseFormat);
-        if (this.imageHistoryDisabled && state?.imageSettings?.historyDisabled != null) {
-            this.imageHistoryDisabled.checked = Boolean(state.imageSettings.historyDisabled);
-        }
-        if (this.imageStream && state?.imageSettings?.stream != null) {
-            this.imageStream.checked = Boolean(state.imageSettings.stream);
-        }
-        setSelectValue(this.videoResolutionSelect, state?.videoSettings?.resolution);
-
-        const videoProfile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const legacyH3Ratio = videoProfile.resolveAdaptiveRatio === true && !state?.videoSettings?.ratioMode;
-        const ratio = legacyH3Ratio
-            ? 'adaptive'
-            : String(state?.videoSettings?.ratio || '');
-        if (ratio && this.videoRatioGrid?.querySelector(`[data-ratio="${CSS.escape(ratio)}"]`)) {
-            this.videoRatioSelect.value = ratio;
-            this.videoRatioGrid.querySelectorAll('[data-ratio]').forEach(button => {
-                button.classList.toggle('active', button.dataset.ratio === ratio);
-            });
-        }
-
-        const duration = String(state?.videoSettings?.duration || '');
-        if (duration) {
-            this._setVideoDurationValue(duration);
-            const durationInput = this.videoDurationControl?.querySelector('input[type="range"], select');
-            if (durationInput && Array.from(durationInput.options || []).every(option => option.value !== duration)) {
-                if (durationInput.type === 'range') durationInput.value = duration;
-            } else if (durationInput) {
-                durationInput.value = duration;
-            }
-            const output = this.videoDurationControl?.querySelector('output');
-            if (output) output.textContent = `${duration} 秒`;
-        }
-
-        [
-            [this.videoCameraFixed, state?.videoSettings?.cameraFixed],
-            [this.videoGenerateAudio, state?.videoSettings?.generateAudio],
-            [this.videoWebSearch, state?.videoSettings?.webSearch],
-            [this.videoWatermark, state?.videoSettings?.watermark]
-        ].forEach(([input, checked]) => {
-            if (input && checked != null && !input.closest('.creation-switch-control')?.hidden) {
-                input.checked = Boolean(checked);
-            }
-        });
-    }
-
     switchProjectContext(projectId, { saveCurrent = true } = {}) {
         const nextKey = this._projectCacheKey(projectId);
-        clearTimeout(this.projectComposerSaveTimer);
-        this.projectComposerSaveTimer = null;
         if (saveCurrent) {
-            this._saveProjectComposer(this.activeProjectCacheKey);
             this._saveAgentConversation(this.activeProjectCacheKey);
             this._savePendingAgentAttachments();
         }
@@ -2144,53 +1891,6 @@ export class AgentSidebar {
         this.activeRuntimeProjectId = projectId ?? null;
         this._restoreAgentConversation(nextKey);
         this._restorePendingAgentAttachments();
-
-        const state = this._loadProjectComposerCache()[nextKey] || null;
-        this.restoringProjectComposer = true;
-        try {
-            if (this.imagePromptInput) this.imagePromptInput.value = state?.imagePrompt || '';
-            if (this.videoPromptInput) this.videoPromptInput.value = state?.videoPrompt || '';
-            this.imageGenerationMode = state?.imageGenerationMode === 'reference' ? 'reference' : 'text';
-            this.imageReferenceSelections = [];
-            this.videoReferenceSelections = { image: [], video: [], audio: [] };
-            this.options.clearMediaReferenceSelections?.();
-            this._renderImageReferences();
-            this._renderVideoSourcePreview();
-            this._restoreProjectComposerControls(state);
-        } finally {
-            this.restoringProjectComposer = false;
-        }
-        this._restoreProjectComposerReferences(nextKey);
-        ['image', 'video'].forEach(kind => {
-            this.selectedPromptPresetIds[kind] = '';
-            const controls = this._promptPresetControls(kind);
-            if (controls.nameInput) controls.nameInput.value = '';
-            this._setPromptPresetStatus(kind, '');
-            this._renderPromptPresets(kind);
-        });
-    }
-
-    _promptPresetControls(kind) {
-        if (kind === 'video') {
-            return {
-                promptInput: this.videoPromptInput,
-                select: this.videoPromptPresetSelect,
-                nameInput: this.videoPromptPresetName,
-                saveButton: this.videoPromptPresetSave,
-                deleteButton: this.videoPromptPresetDelete,
-                count: this.videoPromptPresetCount,
-                status: this.videoPromptPresetStatus
-            };
-        }
-        return {
-            promptInput: this.imagePromptInput,
-            select: this.imagePromptPresetSelect,
-            nameInput: this.imagePromptPresetName,
-            saveButton: this.imagePromptPresetSave,
-            deleteButton: this.imagePromptPresetDelete,
-            count: this.imagePromptPresetCount,
-            status: this.imagePromptPresetStatus
-        };
     }
 
     _loadPromptPresetStore() {
@@ -2253,8 +1953,6 @@ export class AgentSidebar {
         };
         presets.unshift(preset);
         this._storePromptPresets(normalizedKind, presets);
-        this.selectedPromptPresetIds[normalizedKind] = preset.id;
-        this._renderPromptPresets(normalizedKind);
         return { ...preset };
     }
 
@@ -2268,131 +1966,7 @@ export class AgentSidebar {
             normalizedKind,
             presets.filter(preset => preset.id !== requestedId)
         );
-        if (this.selectedPromptPresetIds[normalizedKind] === requestedId) {
-            this.selectedPromptPresetIds[normalizedKind] = '';
-        }
-        this._renderPromptPresets(normalizedKind);
         return true;
-    }
-
-    _setPromptPresetStatus(kind, message, state = '') {
-        const status = this._promptPresetControls(kind).status;
-        if (!status) return;
-        status.textContent = message || '';
-        status.dataset.state = state || '';
-    }
-
-    _renderPromptPresets(kind) {
-        const controls = this._promptPresetControls(kind);
-        if (!controls.select) return;
-        const presets = this._getPromptPresets(kind)
-            .sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
-        const selectedId = this.selectedPromptPresetIds[kind];
-        controls.select.replaceChildren();
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = presets.length > 0 ? '新建或选择预设提示词' : '暂无预设，填写名称后保存';
-        controls.select.appendChild(placeholder);
-        presets.forEach(preset => {
-            const option = document.createElement('option');
-            option.value = preset.id;
-            option.textContent = preset.name;
-            controls.select.appendChild(option);
-        });
-        const hasSelectedPreset = presets.some(preset => preset.id === selectedId);
-        controls.select.value = hasSelectedPreset ? selectedId : '';
-        if (!hasSelectedPreset) this.selectedPromptPresetIds[kind] = '';
-        if (controls.count) controls.count.textContent = String(presets.length);
-        if (controls.deleteButton) controls.deleteButton.disabled = !hasSelectedPreset;
-        const saveLabel = controls.saveButton?.querySelector('span');
-        if (saveLabel) saveLabel.textContent = hasSelectedPreset ? '更新预设' : '保存预设';
-    }
-
-    _selectPromptPreset(kind, presetId) {
-        const controls = this._promptPresetControls(kind);
-        const preset = this._getPromptPresets(kind).find(entry => entry.id === presetId);
-        this.selectedPromptPresetIds[kind] = preset?.id || '';
-        if (!preset) {
-            if (controls.nameInput) controls.nameInput.value = '';
-            this._setPromptPresetStatus(kind, '填写名称，将当前提示词保存为新预设');
-            this._renderPromptPresets(kind);
-            return;
-        }
-        if (controls.promptInput) controls.promptInput.value = preset.prompt;
-        if (controls.nameInput) controls.nameInput.value = preset.name;
-        this._scheduleProjectComposerSave();
-        this._setPromptPresetStatus(kind, `已写入“${preset.name}”`, 'success');
-        this._renderPromptPresets(kind);
-    }
-
-    _savePromptPreset(kind) {
-        const controls = this._promptPresetControls(kind);
-        const name = String(controls.nameInput?.value || '').trim();
-        const prompt = String(controls.promptInput?.value || '').trim();
-        if (!name) {
-            this._setPromptPresetStatus(kind, '请先填写预设名称', 'error');
-            controls.nameInput?.focus();
-            return;
-        }
-        if (!prompt) {
-            this._setPromptPresetStatus(kind, '当前提示词为空，无法保存', 'error');
-            controls.promptInput?.focus();
-            return;
-        }
-
-        const now = new Date().toISOString();
-        const presets = this._getPromptPresets(kind);
-        const selectedId = this.selectedPromptPresetIds[kind];
-        let index = selectedId ? presets.findIndex(preset => preset.id === selectedId) : -1;
-        if (index < 0) {
-            index = presets.findIndex(preset => preset.name.trim().toLowerCase() === name.toLowerCase());
-        }
-        let preset;
-        let action;
-        if (index >= 0) {
-            preset = { ...presets[index], name, prompt, updatedAt: now };
-            presets.splice(index, 1);
-            action = '已更新';
-        } else {
-            preset = {
-                id: globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                name,
-                prompt,
-                createdAt: now,
-                updatedAt: now
-            };
-            action = '已保存';
-        }
-        presets.unshift(preset);
-        try {
-            this._storePromptPresets(kind, presets);
-        } catch (error) {
-            console.warn('[AgentSidebar] Failed to save prompt preset:', error);
-            this._setPromptPresetStatus(kind, '保存失败，本地存储空间可能已满', 'error');
-            return;
-        }
-        this.selectedPromptPresetIds[kind] = preset.id;
-        this._renderPromptPresets(kind);
-        this._setPromptPresetStatus(kind, `${action}“${preset.name}”`, 'success');
-    }
-
-    _deletePromptPreset(kind) {
-        const presetId = this.selectedPromptPresetIds[kind];
-        if (!presetId) return;
-        const presets = this._getPromptPresets(kind);
-        const preset = presets.find(entry => entry.id === presetId);
-        try {
-            this._storePromptPresets(kind, presets.filter(entry => entry.id !== presetId));
-        } catch (error) {
-            console.warn('[AgentSidebar] Failed to delete prompt preset:', error);
-            this._setPromptPresetStatus(kind, '删除失败，请稍后重试', 'error');
-            return;
-        }
-        this.selectedPromptPresetIds[kind] = '';
-        const controls = this._promptPresetControls(kind);
-        if (controls.nameInput) controls.nameInput.value = '';
-        this._renderPromptPresets(kind);
-        this._setPromptPresetStatus(kind, preset ? `已删除“${preset.name}”` : '预设已删除', 'success');
     }
 
     _setSettingsTab(tab = 'shortcuts') {
@@ -2886,66 +2460,6 @@ export class AgentSidebar {
                 this._closeAgentHeaderPopovers();
             }
         });
-        this.videoGenerateBtn?.addEventListener('click', () => this._generateVideoFromWorkspace());
-        ['image', 'video'].forEach(kind => {
-            const controls = this._promptPresetControls(kind);
-            controls.select?.addEventListener('change', event => this._selectPromptPreset(kind, event.target.value));
-            controls.saveButton?.addEventListener('click', () => this._savePromptPreset(kind));
-            controls.deleteButton?.addEventListener('click', () => this._deletePromptPreset(kind));
-            controls.nameInput?.addEventListener('keydown', event => {
-                if (event.key !== 'Enter' || event.isComposing) return;
-                event.preventDefault();
-                this._savePromptPreset(kind);
-            });
-        });
-        [this.videoPromptInput, this.imagePromptInput].forEach(input => {
-            input?.addEventListener('input', () => this._scheduleProjectComposerSave());
-        });
-        [
-            this.imageSizeSelect,
-            this.imageQualitySelect,
-            this.imageResponseFormatSelect,
-            this.imageHistoryDisabled,
-            this.imageStream,
-            this.videoResolutionSelect,
-            this.videoCameraFixed,
-            this.videoGenerateAudio,
-            this.videoWebSearch,
-            this.videoWatermark
-        ].forEach(control => control?.addEventListener('change', () => this._scheduleProjectComposerSave()));
-        this.videoRatioGrid?.addEventListener('click', () => this._scheduleProjectComposerSave());
-        this.videoDurationControl?.addEventListener('input', () => this._scheduleProjectComposerSave());
-        this.videoDurationControl?.addEventListener('change', () => this._scheduleProjectComposerSave());
-        this.videoAddMediaBtn?.addEventListener('click', () => this._toggleVideoReferencePick());
-        this.videoClearSourcesBtn?.addEventListener('click', () => this._clearVideoReferences());
-        document.addEventListener('canvas-add-generation-reference', event => {
-            this._addCanvasGenerationReference(event.detail?.entry);
-        });
-        this.agentSidebar?.addEventListener('pointerdown', (event) => {
-            if (!this.activeReferenceWorkspace || event.target.closest('.creation-source-add')) return;
-            this.options.endMediaReferencePick?.({ silent: true });
-        }, true);
-        this.imageGenerationModeControl?.addEventListener('click', (event) => {
-            const button = event.target.closest('[data-image-generation-mode]');
-            if (button) this._setImageGenerationMode(button.dataset.imageGenerationMode);
-        });
-        this.imageAddReferenceBtn?.addEventListener('click', () => this._toggleImageReferencePick());
-        this.imageCompressReferencesBtn?.addEventListener('click', () => this._compressSelectedImageReferences());
-        this.imageClearReferencesBtn?.addEventListener('click', () => this._clearImageReferences());
-        this.imageReferenceList?.addEventListener('click', (event) => {
-            const button = event.target.closest('[data-remove-image-reference]');
-            if (button) this._removeImageReference(button.dataset.removeImageReference);
-        });
-        this.imageGenerateBtn?.addEventListener('click', () => this._generateImageFromWorkspace());
-        this._bindImagePromptResize();
-        this._bindVideoPromptResize();
-        document.getElementById('videoChangeModelBtn')?.addEventListener('click', () => this._showVideoModelPicker());
-        this.videoModelFavoriteBtn?.addEventListener('click', () => this._toggleSelectedVideoModelFavorite());
-        this.videoModelCopyBtn?.addEventListener('click', () => this._copySelectedVideoModelId());
-        document.getElementById('videoPromptModelChip')?.addEventListener('click', () => this._showVideoModelPicker());
-        document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings', 'api'));
-        this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
-
         // 左侧工具栏中的齿轮切换设置面板。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
             this._closeAgentHeaderPopovers();
@@ -2993,28 +2507,6 @@ export class AgentSidebar {
             el?.addEventListener('change', () => this._resetFetchedModels());
         });
 
-        // 顶部下拉框切换
-        this.textModelSelectEl?.addEventListener('change', (e) => {
-            const id = e.target.value;
-            if (id) {
-                this._setTextProvider(id);
-            }
-        });
-
-        this.imageModelSelectEl?.addEventListener('change', (e) => {
-            const id = e.target.value;
-            if (id) {
-                this._setImageProvider(id);
-            }
-        });
-
-        this.videoModelSelectEl?.addEventListener('change', (e) => {
-            const id = e.target.value;
-            if (id) {
-                this._setVideoProvider(id);
-            }
-        });
-
     }
 
     setMode(mode = 'canvas', settingsTab = null) {
@@ -3039,15 +2531,11 @@ export class AgentSidebar {
             }[nextMode] || '';
         }
 
-        body.classList.remove('agent-mode', 'settings-mode', 'image-mode', 'video-mode');
+        body.classList.remove('agent-mode', 'settings-mode');
         if (nextMode === 'canvas') {
             body.classList.remove('creation-mode');
             this.close();
             this.settingsPanel?.classList.remove('show');
-            if (this.videoWorkspace) this.videoWorkspace.hidden = true;
-            if (this.videoModelPicker) this.videoModelPicker.hidden = true;
-            if (this.videoPromptDock) this.videoPromptDock.hidden = true;
-            if (this.imageWorkspace) this.imageWorkspace.hidden = true;
             return;
         }
 
@@ -3055,800 +2543,31 @@ export class AgentSidebar {
         body.classList.add('agent-open');
         this.settingsPanel?.classList.toggle('show', nextMode === 'settings');
         if (nextMode === 'settings') this._setSettingsTab(settingsTab || this.activeSettingsTab);
-        if (this.videoWorkspace) this.videoWorkspace.hidden = true;
-        if (this.videoModelPicker) this.videoModelPicker.hidden = true;
-        if (this.videoPromptDock) this.videoPromptDock.hidden = true;
-        if (this.imageWorkspace) this.imageWorkspace.hidden = true;
         this.open();
         if (nextMode === 'agent') setTimeout(() => this.inputEl?.focus(), 120);
     }
 
-    _selectedImagePaths() {
-        const selectedPaths = this.options.getSelectedFilePaths?.() || [];
-        return selectedPaths
-            .map(filePath => String(filePath || ''))
-            .filter(filePath => /\.(png|jpe?g|webp)$/i.test(filePath))
-            .slice(0, 2);
-    }
-
-    _hasSelectedVideoProvider() {
-        const provider = this._getVideoProvider();
-        return Boolean(provider && this._isVideoProvider(provider) && provider.model);
-    }
-
-    _renderVideoStage() {
-        const hasModel = this._hasSelectedVideoProvider();
-        if (this.videoModelPicker) this.videoModelPicker.hidden = hasModel;
-        if (this.videoWorkspace) this.videoWorkspace.hidden = !hasModel;
-        if (hasModel) {
-            this._renderVideoProviderContext();
-        } else {
-            this._renderVideoModelPicker();
-        }
-    }
-
-    _showVideoModelPicker() {
-        if (this.currentMode !== 'video') return;
-        if (this.videoWorkspace) this.videoWorkspace.hidden = true;
-        if (this.videoModelPicker) this.videoModelPicker.hidden = false;
-        if (this.videoModelSearchInput) this.videoModelSearchInput.value = '';
-        this._renderVideoModelPicker();
-        this.videoModelSearchInput?.focus();
-    }
-
-    _renderVideoModelPicker() {
-        if (!this.videoModelList || !this.videoModelEmpty) return;
-        const keyword = this.videoModelSearchInput?.value?.trim().toLowerCase() || '';
-        const providers = this._providerVariants().filter(provider => {
-            if (!this._isVideoProvider(provider)) return false;
-            const searchable = `${provider.name || ''} ${provider.model || ''} ${provider.endpoint || ''}`.toLowerCase();
-            return !keyword || searchable.includes(keyword);
-        });
-
-        this.videoModelList.innerHTML = '';
-        this.videoModelEmpty.hidden = providers.length > 0;
-        if (providers.length === 0) {
-            const title = this.videoModelEmpty.querySelector('strong');
-            const detail = this.videoModelEmpty.querySelector('span');
-            if (title) title.textContent = keyword ? '没有匹配的视频模型' : '没有可用的视频模型';
-            if (detail) {detail.textContent = keyword
-                ? '换一个关键词，或到设置中检查模型名称。'
-                : '请先在设置中添加 API，并填写视频模型名称。';}
-            return;
-        }
-
-        const selectedId = this.globalConfig.videoProviderId;
-        providers.forEach(provider => {
-            const profile = this._getVideoModelProfile(provider);
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = 'video-model-option';
-            button.classList.toggle('selected', provider.id === selectedId);
-
-            const icon = document.createElement('span');
-            icon.className = 'video-model-option-icon';
-            icon.innerHTML = '<svg class="flow-icon flow-icon-sm" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg>';
-
-            const copy = document.createElement('span');
-            copy.className = 'video-model-option-copy';
-            const model = document.createElement('strong');
-            model.textContent = provider.model || provider.name || '未命名模型';
-            if (profile?.routeLabel) model.textContent = `${profile.routeLabel} · ${provider.model}`;
-            const meta = document.createElement('small');
-            meta.textContent = [
-                provider.name || '未命名 API',
-                formatVideoModelProfile(profile)
-            ].filter(Boolean).join(' · ');
-            copy.append(model, meta);
-
-            const arrow = document.createElement('span');
-            arrow.className = 'video-model-option-arrow';
-            arrow.textContent = '›';
-            button.append(icon, copy, arrow);
-            button.addEventListener('click', () => this._setVideoProvider(provider.id));
-            this.videoModelList.appendChild(button);
-        });
-    }
-
-    _renderVideoSourcePreview() {
-        this._renderVideoReferencePickState();
-        this._scheduleProjectComposerSave();
-    }
-
-    _toggleVideoReferencePick() {
-        if (this.activeVideoReferenceType === 'mixed') {
-            this.options.endMediaReferencePick?.();
-            return;
-        }
-        const profile = this._getVideoModelProfile(this._getVideoProvider()) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const limits = this._getVideoReferenceLimits(profile);
-        if (!Object.values(limits).some(limit => limit > 0)) return;
-        this.options.endMediaReferencePick?.({ silent: true });
-        this.activeReferenceWorkspace = 'video';
-        this.options.beginMediaReferencePick?.(
-            'mixed',
-            [],
-            limits,
-            this.videoReferenceSelections
-        );
-    }
-
-    _addCanvasGenerationReference(entry) {
-        const feedback = message => document.dispatchEvent(new CustomEvent('canvas-reference-feedback', {
-            detail: { message }
-        }));
-        if (!['image', 'video', 'audio'].includes(entry?.mediaType) || !entry?.filePath) {
-            feedback('该素材不能作为创作参考');
-            return;
-        }
-        feedback('图片和视频创作已迁移到画布节点，请使用素材上方的“生成”菜单');
-    }
-
-    _removeVideoReference(type, id) {
-        this.videoReferenceSelections[type] = (this.videoReferenceSelections[type] || [])
-            .filter(entry => (entry.id || entry.itemId || entry.filePath) !== id);
-        this.options.updateMediaReferencePick?.(type, this.videoReferenceSelections[type]);
-        this._renderVideoSourcePreview();
-    }
-
-    _clearVideoReferences() {
-        this.videoReferenceSelections = { image: [], video: [], audio: [] };
-        this.options.clearMediaReferenceSelections?.();
-        this._renderVideoSourcePreview();
-    }
-
-    _renderVideoReferencePickState() {
-        if (!this.videoAddMediaBtn) return;
-        const active = this.activeVideoReferenceType === 'mixed';
-        const counts = ['image', 'video', 'audio'].map(type => this.videoReferenceSelections[type]?.length || 0);
-        const hasSelection = counts.some(Boolean);
-        this.videoAddMediaBtn.classList.toggle('active', active);
-        this.videoAddMediaBtn.setAttribute('aria-pressed', String(active));
-        this.videoAddMediaBtn.querySelector('span').textContent = active || hasSelection
-            ? `图片${counts[0]} / 视频${counts[1]} / 音频${counts[2]}`
-            : '添加素材';
-    }
-
-    _setImageGenerationMode(mode) {
-        this.imageGenerationMode = mode === 'reference' ? 'reference' : 'text';
-        if (this.imageGenerationMode !== 'reference' && this.activeReferenceWorkspace === 'image') {
-            this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
-        }
-        this._renderImageReferences();
-    }
-
-    _toggleImageReferencePick() {
-        if (this.activeReferenceWorkspace === 'image') {
-            this.options.endMediaReferencePick?.({ silent: true });
-            return;
-        }
-        this._setImageGenerationMode('reference');
-        this.options.endMediaReferencePick?.({ silent: true });
-        this.activeReferenceWorkspace = 'image';
-        this.options.beginMediaReferencePick?.(
-            'image',
-            this.imageReferenceSelections,
-            Number.MAX_SAFE_INTEGER,
-            { image: this.imageReferenceSelections }
-        );
-    }
-
-    _removeImageReference(id) {
-        this.imageReferenceSelections = this.imageReferenceSelections.filter(entry => (
-            String(entry.id || entry.itemId || entry.filePath) !== String(id)
-        ));
-        this.options.updateMediaReferencePick?.('image', this.imageReferenceSelections);
-        this._renderImageReferences();
-    }
-
-    _clearImageReferences() {
-        this.imageReferenceSelections = [];
-        if (this.activeReferenceWorkspace === 'image') {
-            this.options.endMediaReferencePick?.({ silent: true });
-        }
-        this.options.clearMediaReferenceSelections?.();
-        this._renderImageReferences();
-        this._scheduleProjectComposerSave();
-    }
-
-    _bindImagePromptResize() {
-        const input = this.imagePromptInput;
-        const handle = this.imagePromptResizeHandle;
-        if (!input || !handle) return;
-
-        const defaultHeight = 116;
-        const minHeight = 116;
-        const maxHeight = () => Math.max(240, Math.min(560, window.innerHeight - 260));
-        const clampHeight = value => Math.round(Math.max(minHeight, Math.min(maxHeight(), Number(value) || defaultHeight)));
-        const applyHeight = (value, persist = false) => {
-            const height = clampHeight(value);
-            input.style.height = `${height}px`;
-            handle.setAttribute('aria-valuemin', String(minHeight));
-            handle.setAttribute('aria-valuemax', String(maxHeight()));
-            handle.setAttribute('aria-valuenow', String(height));
-            if (persist) {
-                try {
-                    localStorage.setItem(IMAGE_PROMPT_HEIGHT_STORAGE_KEY, String(height));
-                } catch (_) {
-                    // Local storage may be unavailable in browser-only previews.
-                }
-            }
-            return height;
-        };
-
-        try {
-            const savedHeight = Number(localStorage.getItem(IMAGE_PROMPT_HEIGHT_STORAGE_KEY));
-            if (Number.isFinite(savedHeight)) applyHeight(savedHeight);
-            else applyHeight(input.getBoundingClientRect().height || defaultHeight);
-        } catch (_) {
-            applyHeight(defaultHeight);
-        }
-
-        let dragState = null;
-        const finishDrag = event => {
-            if (!dragState || (event?.pointerId != null && event.pointerId !== dragState.pointerId)) return;
-            const pointerId = dragState.pointerId;
-            dragState = null;
-            document.body.classList.remove('image-prompt-resizing');
-            handle.removeAttribute('aria-grabbed');
-            applyHeight(input.getBoundingClientRect().height, true);
-            if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
-        };
-
-        handle.addEventListener('pointerdown', event => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            event.stopPropagation();
-            dragState = {
-                pointerId: event.pointerId,
-                startY: event.clientY,
-                startHeight: input.getBoundingClientRect().height
-            };
-            handle.setPointerCapture?.(event.pointerId);
-            handle.setAttribute('aria-grabbed', 'true');
-            document.body.classList.add('image-prompt-resizing');
-        });
-        handle.addEventListener('pointermove', event => {
-            if (!dragState || event.pointerId !== dragState.pointerId) return;
-            event.preventDefault();
-            applyHeight(dragState.startHeight + event.clientY - dragState.startY);
-        });
-        handle.addEventListener('pointerup', finishDrag);
-        handle.addEventListener('pointercancel', finishDrag);
-        handle.addEventListener('lostpointercapture', finishDrag);
-        handle.addEventListener('dblclick', event => {
-            event.preventDefault();
-            applyHeight(defaultHeight, true);
-        });
-        handle.addEventListener('keydown', event => {
-            if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
-            event.preventDefault();
-            const currentHeight = input.getBoundingClientRect().height;
-            const nextHeight = event.key === 'Home'
-                ? defaultHeight
-                : currentHeight + (event.key === 'ArrowDown' ? 16 : -16);
-            applyHeight(nextHeight, true);
-        });
-    }
-
-    _bindVideoPromptResize() {
-        const input = this.videoPromptInput;
-        const handle = this.videoPromptResizeHandle;
-        if (!input || !handle) return;
-
-        const defaultHeight = 92;
-        const minHeight = 62;
-        const maxHeight = () => Math.max(180, Math.min(520, window.innerHeight - 220));
-        const clampHeight = value => Math.round(Math.max(minHeight, Math.min(maxHeight(), Number(value) || defaultHeight)));
-        const applyHeight = (value, persist = false) => {
-            const height = clampHeight(value);
-            input.style.height = `${height}px`;
-            handle.setAttribute('aria-valuemin', String(minHeight));
-            handle.setAttribute('aria-valuemax', String(maxHeight()));
-            handle.setAttribute('aria-valuenow', String(height));
-            if (persist) {
-                try {
-                    localStorage.setItem(VIDEO_PROMPT_HEIGHT_STORAGE_KEY, String(height));
-                } catch (_) {
-                    // Local storage may be unavailable in browser-only previews.
-                }
-            }
-            return height;
-        };
-
-        try {
-            const savedHeight = Number(localStorage.getItem(VIDEO_PROMPT_HEIGHT_STORAGE_KEY));
-            if (Number.isFinite(savedHeight) && savedHeight > 0) applyHeight(savedHeight);
-            else applyHeight(input.getBoundingClientRect().height || defaultHeight);
-        } catch (_) {
-            applyHeight(defaultHeight);
-        }
-
-        let dragState = null;
-        const finishDrag = event => {
-            if (!dragState || (event?.pointerId != null && event.pointerId !== dragState.pointerId)) return;
-            const pointerId = dragState.pointerId;
-            dragState = null;
-            document.body.classList.remove('video-prompt-resizing');
-            handle.removeAttribute('aria-grabbed');
-            applyHeight(input.getBoundingClientRect().height, true);
-            if (handle.hasPointerCapture?.(pointerId)) handle.releasePointerCapture(pointerId);
-        };
-
-        handle.addEventListener('pointerdown', event => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            event.stopPropagation();
-            dragState = {
-                pointerId: event.pointerId,
-                startY: event.clientY,
-                startHeight: input.getBoundingClientRect().height
-            };
-            handle.setPointerCapture?.(event.pointerId);
-            handle.setAttribute('aria-grabbed', 'true');
-            document.body.classList.add('video-prompt-resizing');
-        });
-        handle.addEventListener('pointermove', event => {
-            if (!dragState || event.pointerId !== dragState.pointerId) return;
-            event.preventDefault();
-            applyHeight(dragState.startHeight - (event.clientY - dragState.startY));
-        });
-        handle.addEventListener('pointerup', finishDrag);
-        handle.addEventListener('pointercancel', finishDrag);
-        handle.addEventListener('lostpointercapture', finishDrag);
-        handle.addEventListener('dblclick', event => {
-            event.preventDefault();
-            applyHeight(defaultHeight, true);
-        });
-        handle.addEventListener('keydown', event => {
-            if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return;
-            event.preventDefault();
-            const currentHeight = input.getBoundingClientRect().height;
-            const nextHeight = event.key === 'Home'
-                ? defaultHeight
-                : currentHeight + (event.key === 'ArrowUp' ? 16 : -16);
-            applyHeight(nextHeight, true);
-        });
-    }
-
-    _renderImageReferences() {
-        this._scheduleProjectComposerSave();
-        const isReferenceMode = this.imageGenerationMode === 'reference';
-        this.imageGenerationModeControl?.querySelectorAll('[data-image-generation-mode]').forEach(button => {
-            const active = button.dataset.imageGenerationMode === this.imageGenerationMode;
-            button.classList.toggle('active', active);
-            button.setAttribute('aria-pressed', String(active));
-        });
-        if (this.imageReferencePanel) this.imageReferencePanel.hidden = !isReferenceMode;
-        if (this.imageReferenceCount) this.imageReferenceCount.textContent = `已选 ${this.imageReferenceSelections.length} 张`;
-        if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.hidden = this.imageReferenceSelections.length === 0;
-        if (this.imageClearReferencesBtn) this.imageClearReferencesBtn.hidden = this.imageReferenceSelections.length === 0;
-        const selecting = this.activeReferenceWorkspace === 'image';
-        this.imageAddReferenceBtn?.classList.toggle('active', selecting);
-        this.imageAddReferenceBtn?.setAttribute('aria-pressed', String(selecting));
-        const addLabel = this.imageAddReferenceBtn?.querySelector('span');
-        if (addLabel) addLabel.textContent = selecting ? '选择图片中' : '添加参考图';
-        if (!this.imageReferenceList) return;
-        this.imageReferenceList.replaceChildren();
-        if (this.imageReferenceSelections.length === 0) {
-            const empty = document.createElement('span');
-            empty.className = 'creation-image-reference-empty';
-            empty.textContent = '点击“添加参考图”，再从画布中选择图片';
-            this.imageReferenceList.appendChild(empty);
-            return;
-        }
-        this.imageReferenceSelections.forEach((entry, index) => {
-            const item = document.createElement('div');
-            item.className = 'creation-image-reference-item';
-            const order = document.createElement('b');
-            order.textContent = String(index + 1);
-            const name = document.createElement('span');
-            name.textContent = String(entry.filePath || '').split(/[\\/]/).pop() || `参考图 ${index + 1}`;
-            name.title = entry.filePath || '';
-            const remove = document.createElement('button');
-            remove.type = 'button';
-            remove.dataset.removeImageReference = entry.id || entry.itemId || entry.filePath;
-            remove.title = '移除参考图';
-            remove.setAttribute('aria-label', `移除参考图 ${index + 1}`);
-            remove.innerHTML = '<svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-close"></use></svg>';
-            item.append(order, name, remove);
-            this.imageReferenceList.appendChild(item);
-        });
-    }
-
-    _renderVideoProviderContext() {
-        const provider = this._getVideoProvider();
-        const providerName = provider?.name || '\u672a\u914d\u7f6e\u89c6\u9891 API';
-        const model = provider?.model || '\u672a\u9009\u62e9\u6a21\u578b';
-        this._renderSelectedVideoModelCard(provider);
-        this._renderVideoModelCapabilities(provider);
-        if (this.videoPromptProviderChip) this.videoPromptProviderChip.textContent = providerName;
-        if (this.videoPromptModelChip) this.videoPromptModelChip.textContent = model;
-    }
-
-    _renderImageModelCapabilities(provider = this._getImageProvider()) {
-        if (!this.imageSizeSelect) return;
-        const gptImage2 = isGptImage2Model(provider?.model);
-        const sizes = this._getImageModelSizes(provider);
-        const previousValue = this.imageSizeSelect.value;
-        this.imageSizeSelect.innerHTML = '';
-        sizes.forEach(size => {
-            const option = document.createElement('option');
-            option.value = size.value;
-            option.textContent = size.label;
-            this.imageSizeSelect.appendChild(option);
-        });
-        const largestSize = sizes
-            .filter(size => /^\d+x\d+$/i.test(String(size.value || '')))
-            .sort((left, right) => {
-                const area = value => {
-                    const [width, height] = String(value.value).split('x').map(Number);
-                    return width * height;
-                };
-                return area(right) - area(left);
-            })[0]?.value || '';
-        this.imageSizeSelect.value = gptImage2
-            ? (previousValue && sizes.some(size => size.value === previousValue) ? previousValue : largestSize)
-            : (sizes.some(size => size.value === previousValue) ? previousValue : '');
-        if (this.imageApiOptions) this.imageApiOptions.hidden = !gptImage2;
-        if (gptImage2) {
-            if (this.imageResponseFormatSelect && !this.imageResponseFormatSelect.value) {
-                this.imageResponseFormatSelect.value = 'url';
-            }
-            if (this.imageHistoryDisabled) this.imageHistoryDisabled.checked = this.imageHistoryDisabled.checked !== false;
-        }
-    }
-
     _getImageModelSizes(provider = this._getImageProvider()) {
         const marker = `${provider?.endpoint || ''} ${provider?.name || ''}`.toLowerCase();
-        return /ai\.ravenhash\.org|ravenhash/.test(marker)
+        const sizes = /ai\.ravenhash\.org|ravenhash/.test(marker)
             ? RAVENHASH_IMAGE_SIZES
             : DEFAULT_IMAGE_SIZES;
-    }
-
-    _videoModelFavorites() {
-        try {
-            const saved = JSON.parse(localStorage.getItem('flow-canvas-video-model-favorites') || '[]');
-            return new Set(Array.isArray(saved) ? saved.map(String) : []);
-        } catch (error) {
-            return new Set();
-        }
-    }
-
-    _toggleSelectedVideoModelFavorite() {
-        const provider = this._getVideoProvider();
-        if (!provider?.id) return;
-        const favorites = this._videoModelFavorites();
-        if (favorites.has(String(provider.id))) {
-            favorites.delete(String(provider.id));
-        } else {
-            favorites.add(String(provider.id));
-        }
-        localStorage.setItem('flow-canvas-video-model-favorites', JSON.stringify([...favorites]));
-        this._renderSelectedVideoModelCard(provider);
-        this._renderVideoModelPicker();
-    }
-
-    async _copySelectedVideoModelId() {
-        const model = this._getVideoProvider()?.model;
-        if (!model) return;
-        try {
-            await navigator.clipboard.writeText(model);
-        } catch (error) {
-            const textarea = document.createElement('textarea');
-            textarea.value = model;
-            textarea.style.position = 'fixed';
-            textarea.style.opacity = '0';
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            textarea.remove();
-        }
-        if (this.videoModelCopyBtn) {
-            this.videoModelCopyBtn.classList.add('copied');
-            this.videoModelCopyBtn.title = '\u5df2\u590d\u5236';
-            setTimeout(() => {
-                this.videoModelCopyBtn?.classList.remove('copied');
-                if (this.videoModelCopyBtn) this.videoModelCopyBtn.title = '\u590d\u5236\u6a21\u578b ID';
-            }, 1200);
-        }
-    }
-
-    _formatResolution(value) {
-        const key = String(value || '').toLowerCase();
-        const dimensions = {
-            '480p': '854 \u00d7 480',
-            '720p': '1280 \u00d7 720',
-            '1080p': '1920 \u00d7 1080',
-            '2k': '2560 \u00d7 1440',
-            '4k': '3840 \u00d7 2160'
-        }[key];
-        return dimensions ? `${value} (${dimensions})` : String(value);
-    }
-
-    _renderSelectedVideoModelCard(provider) {
-        if (!provider) return;
-        const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const resolutions = profile.resolutions || [];
-        const durations = profile.durations || [];
-        const ratios = profile.ratios || [];
-        const providerTypes = {
-            openai: 'OpenAI \u517c\u5bb9',
-            google: 'Google Gemini',
-            anthropic: 'Anthropic'
-        };
-        const durationSummary = profile.durationControl === 'slider' && durations.length > 1
-            ? `${Math.min(...durations)}\u2013${Math.max(...durations)} \u79d2`
-            : durations.map(value => Number(value) === -1 ? '\u667a\u80fd' : `${value} \u79d2`).join(' / ');
-        const ratioSummary = ratios.map(value => value === 'adaptive' ? '\u81ea\u9002\u5e94' : value).join(' / ');
-
-        if (this.videoSelectedModelName) this.videoSelectedModelName.textContent = provider.name || provider.model;
-        if (this.videoSelectedModelId) this.videoSelectedModelId.textContent = provider.model;
-        if (this.videoSelectedModelProfile) this.videoSelectedModelProfile.textContent = profile.label || '\u89c6\u9891\u6a21\u578b';
-        if (this.videoSelectedModelRoute) {
-            this.videoSelectedModelRoute.textContent = profile.routeLabel || '';
-            this.videoSelectedModelRoute.hidden = !profile.routeLabel;
-        }
-        if (this.videoSelectedModelPrice) {
-            const priceText = formatVideoModelPrice(profile.price);
-            this.videoSelectedModelPrice.textContent = priceText;
-            this.videoSelectedModelPrice.hidden = !priceText;
-        }
-        if (this.videoSelectedModelProviderType) this.videoSelectedModelProviderType.textContent = providerTypes[provider.type] || '\u81ea\u5b9a\u4e49 API';
-        if (this.videoSelectedModelResolutions) {
-            const text = resolutions.length ? resolutions.map(value => this._formatResolution(value)).join(' / ') : '\u63a5\u53e3\u9ed8\u8ba4';
-            this.videoSelectedModelResolutions.textContent = text;
-            this.videoSelectedModelResolutions.title = text;
-        }
-        if (this.videoSelectedModelDurations) {
-            const text = durationSummary || '\u63a5\u53e3\u9ed8\u8ba4';
-            this.videoSelectedModelDurations.textContent = text;
-            this.videoSelectedModelDurations.title = text;
-        }
-        if (this.videoSelectedModelRatios) {
-            const text = ratioSummary || '\u63a5\u53e3\u9ed8\u8ba4';
-            this.videoSelectedModelRatios.textContent = text;
-            this.videoSelectedModelRatios.title = text;
-        }
-        if (this.videoModelFavoriteBtn) {
-            const favorite = this._videoModelFavorites().has(String(provider.id));
-            this.videoModelFavoriteBtn.classList.toggle('active', favorite);
-            this.videoModelFavoriteBtn.setAttribute('aria-pressed', String(favorite));
-            this.videoModelFavoriteBtn.title = favorite ? '\u53d6\u6d88\u6536\u85cf' : '\u6536\u85cf\u6a21\u578b';
-        }
+        const config = modelConfigStore.getConfig();
+        const { entry } = resolveModelConfigEntry(config, { ...provider, kind: 'image' });
+        const overrides = toImageProfileOverrides(config, entry);
+        if (!overrides) return sizes;
+        return sizes.filter(size => {
+            const match = /^(\d+)x(\d+)$/i.exec(String(size.value || ''));
+            return !match || overrides.resolutionTiers.includes(inferImageResolutionTier(Number(match[1]), Number(match[2])));
+        });
     }
 
     _getVideoModelProfile(provider) {
-        return getVideoModelProfile(provider);
-    }
-
-    _getVideoReferenceLimits(profile) {
-        return {
-            ...VIDEO_REFERENCE_LIMITS,
-            ...(profile?.referenceLimits || {})
-        };
-    }
-
-    _applyVideoModelControls(profile) {
-        const limits = this._getVideoReferenceLimits(profile);
-        if (this.activeVideoReferenceType === 'mixed' && !Object.values(limits).some(limit => limit > 0)) {
-            this.options.endMediaReferencePick?.();
-        }
-        ['image', 'video', 'audio'].forEach(type => {
-            const entries = this.videoReferenceSelections[type] || [];
-            const trimmed = entries.slice(0, Math.max(0, limits[type]));
-            if (trimmed.length !== entries.length) {
-                this.videoReferenceSelections[type] = trimmed;
-                this.options.updateMediaReferencePick?.(type, trimmed);
-            }
-        });
-        if (this.videoAddMediaBtn) {
-            this.videoAddMediaBtn.hidden = !Object.values(limits).some(limit => limit > 0);
-        }
-
-        const toggleControls = [
-            [this.videoCameraFixed, profile?.supportsCameraFixed !== false],
-            [this.videoGenerateAudio, profile?.supportsGeneratedAudio !== false],
-            [this.videoWatermark, profile?.supportsWatermark !== false]
-        ];
-        toggleControls.forEach(([input, supported]) => {
-            if (!input) return;
-            const field = input.closest('.creation-switch-control');
-            if (field) field.hidden = !supported;
-            if (!supported) input.checked = false;
-        });
-        this._renderVideoReferencePickState();
-    }
-
-    _replaceSelectOptions(select, values, preferredValue, formatter) {
-        if (!select) return;
-        const previousValue = select.value;
-        select.innerHTML = '';
-        values.forEach(value => {
-            const option = document.createElement('option');
-            option.value = String(value);
-            option.textContent = formatter(value);
-            select.appendChild(option);
-        });
-        const supportedValues = values.map(String);
-        select.value = supportedValues.includes(previousValue)
-            ? previousValue
-            : supportedValues.includes(String(preferredValue))
-                ? String(preferredValue)
-                : (supportedValues[0] || '');
-        select.disabled = values.length === 0;
-    }
-
-    _renderVideoRatios(profile) {
-        if (!this.videoRatioGrid || !this.videoRatioSelect) return;
-        const ratios = profile?.ratios || [];
-        const previousValue = this.videoRatioSelect.value;
-        const selectedValue = ratios.includes(previousValue)
-            ? previousValue
-            : ratios.includes(profile?.defaultRatio)
-                ? profile.defaultRatio
-                : (ratios[0] || '');
-        this.videoRatioSelect.value = selectedValue;
-        this.videoRatioGrid.innerHTML = '';
-
-        ratios.forEach(ratio => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.dataset.ratio = ratio;
-            button.classList.toggle('active', ratio === selectedValue);
-
-            const shape = document.createElement('span');
-            shape.className = `ratio-shape ratio-${ratio.replace(':', '-')}`;
-            if (ratio === 'adaptive') shape.textContent = 'A';
-            button.append(shape, document.createTextNode(ratio === 'adaptive' ? '自适应' : ratio));
-            button.addEventListener('click', () => {
-                this.videoRatioSelect.value = ratio;
-                this.videoRatioGrid.querySelectorAll('[data-ratio]').forEach(item => {
-                    item.classList.toggle('active', item === button);
-                });
-            });
-            this.videoRatioGrid.appendChild(button);
-        });
-    }
-
-    _resolveVideoRequestRatio(profile, imageReferences = []) {
-        const selected = this.videoRatioSelect?.value || profile?.defaultRatio || '16:9';
-        if (selected !== 'adaptive' || profile?.resolveAdaptiveRatio !== true) return selected;
-        const first = imageReferences[0] || null;
-        return inferClosestAspectRatio(
-            first?.width,
-            first?.height,
-            profile?.ratios,
-            profile?.adaptiveFallbackRatio || '16:9'
-        );
-    }
-
-    _setVideoDurationValue(value) {
-        if (this.videoDurationSelect) this.videoDurationSelect.value = String(value);
-    }
-
-    _renderVideoDuration(profile) {
-        if (!this.videoDurationControl || !this.videoDurationSelect) return;
-        const durations = profile?.durations || [];
-        const previousValue = this.videoDurationSelect.value;
-        const selectedValue = durations.map(String).includes(previousValue)
-            ? Number(previousValue)
-            : durations.includes(profile?.defaultDuration)
-                ? profile.defaultDuration
-                : durations[0];
-
-        this.videoDurationControl.innerHTML = '';
-        this._setVideoDurationValue(selectedValue ?? '');
-        if (durations.length === 0) return;
-
-        if (profile.durationControl === 'slider') {
-            const row = document.createElement('div');
-            row.className = 'creation-duration-slider';
-            const range = document.createElement('input');
-            range.type = 'range';
-            range.min = String(Math.min(...durations));
-            range.max = String(Math.max(...durations));
-            range.step = '1';
-            range.value = String(selectedValue);
-            range.setAttribute('aria-label', '视频时长');
-            const output = document.createElement('output');
-            output.textContent = `${selectedValue} 秒`;
-            range.addEventListener('input', () => {
-                this._setVideoDurationValue(range.value);
-                output.textContent = `${range.value} 秒`;
-            });
-            row.append(range, output);
-            this.videoDurationControl.appendChild(row);
-            return;
-        }
-
-        if (profile.durationControl === 'select') {
-            const select = document.createElement('select');
-            select.className = 'creation-duration-select';
-            durations.forEach(value => {
-                const option = document.createElement('option');
-                option.value = String(value);
-                option.textContent = Number(value) === -1 ? '智能选择 (-1)' : `${value} 秒`;
-                select.appendChild(option);
-            });
-            select.value = String(selectedValue);
-            select.addEventListener('change', () => this._setVideoDurationValue(select.value));
-            this.videoDurationControl.appendChild(select);
-            return;
-        }
-
-        const segmented = document.createElement('div');
-        segmented.className = 'creation-duration-segmented';
-        durations.forEach(value => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.textContent = `${value} 秒`;
-            button.classList.toggle('active', value === selectedValue);
-            button.addEventListener('click', () => {
-                this._setVideoDurationValue(value);
-                segmented.querySelectorAll('button').forEach(item => item.classList.toggle('active', item === button));
-            });
-            segmented.appendChild(button);
-        });
-        this.videoDurationControl.appendChild(segmented);
-    }
-
-    _renderVideoModelCapabilities(provider) {
-        const profile = this._getVideoModelProfile(provider);
-        const webSearchModelKey = provider ? `${provider.id || ''}:${provider.model || ''}` : '';
-        if (!profile) {
-            this._replaceSelectOptions(this.videoResolutionSelect, [''], '', () => '\u8bf7\u5148\u9009\u62e9\u89c6\u9891\u6a21\u578b');
-            if (this.videoResolutionSelect) this.videoResolutionSelect.disabled = true;
-            if (this.videoRatioField) this.videoRatioField.hidden = true;
-            if (this.videoResolutionField) this.videoResolutionField.hidden = true;
-            if (this.videoDurationField) this.videoDurationField.hidden = true;
-            if (this.videoWebSearchField) this.videoWebSearchField.hidden = true;
-            if (this.videoWebSearch) {
-                this.videoWebSearch.checked = false;
-                this.videoWebSearch.dataset.modelKey = '';
-            }
-            this._renderVideoRatios(DEFAULT_VIDEO_MODEL_PROFILE);
-            this._renderVideoDuration(DEFAULT_VIDEO_MODEL_PROFILE);
-            return;
-        }
-
-        const resolutions = profile.resolutions || [];
-        const durations = profile.durations || [];
-        const ratios = profile.ratios || [];
-        this._applyVideoModelControls(profile);
-        this._renderVideoRatios(profile);
-        this._replaceSelectOptions(
-            this.videoResolutionSelect,
-            resolutions,
-            profile.defaultResolution,
-            value => this._formatResolution(value)
-        );
-        this._renderVideoDuration(profile);
-        if (this.videoRatioField) this.videoRatioField.hidden = ratios.length === 0;
-        if (this.videoResolutionField) this.videoResolutionField.hidden = resolutions.length === 0;
-        if (this.videoDurationField) this.videoDurationField.hidden = durations.length === 0;
-        if (this.videoWebSearchField) this.videoWebSearchField.hidden = !profile.supportsWebSearch;
-        if (this.videoWebSearch) {
-            if (!profile.supportsWebSearch) {
-                this.videoWebSearch.checked = false;
-            } else if (this.videoWebSearch.dataset.modelKey !== webSearchModelKey) {
-                this.videoWebSearch.checked = false;
-            }
-            this.videoWebSearch.dataset.modelKey = webSearchModelKey;
-        }
-    }
-
-    _setWorkspaceMessage(element, type, message) {
-        if (!element) return;
-        element.className = 'creation-workspace-message';
-        if (type) element.classList.add(type);
-        element.textContent = message || '';
-    }
-
-    _setImageWorkspaceStatus(status, label) {
-        if (!this.imageWorkspaceStatus) return;
-        this.imageWorkspaceStatus.dataset.status = status || 'idle';
-        this.imageWorkspaceStatus.textContent = label || '待机';
+        const base = getVideoModelProfile(provider);
+        if (!base) return null;
+        const config = modelConfigStore.getConfig();
+        const { entry } = resolveModelConfigEntry(config, { ...provider, kind: 'video' });
+        return mergeVideoProfile(base, toVideoProfileOverrides(config, entry));
     }
 
     _loadGenerationTasks() {
@@ -3928,15 +2647,6 @@ export class AgentSidebar {
                 targetDir: event.targetDir || task.params?.targetDir || null
             }
         });
-        if (event.recovering === true) {
-            this._setWorkspaceMessage(
-                this.videoGenerateMessage,
-                '',
-                '\u670d\u52a1\u5668\u5df2\u63a5\u6536\u4efb\u52a1\uff0c\u6b63\u5728\u6062\u590d\u4efb\u52a1\u8fde\u63a5...'
-            );
-        } else if (event.recovered === true) {
-            this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u4efb\u52a1\u8fde\u63a5\u5df2\u6062\u590d\uff0c\u6b63\u5728\u751f\u6210...');
-        }
     }
 
     _handleTaskCompleted(event = {}) {
@@ -4183,7 +2893,6 @@ export class AgentSidebar {
             error: null,
             params: { syncStage: 'canceled', progress: null }
         });
-        if (this.activeVideoWorkspaceTaskId === taskId) this.activeVideoWorkspaceTaskId = null;
         try {
             await window.flowCanvas?.mcp?.cancelGeneration?.(taskId);
         } catch (error) {
@@ -4652,7 +3361,7 @@ export class AgentSidebar {
         }
     }
 
-    async _inspectLargeReferenceImages(references, thresholdBytes = VIDEO_REFERENCE_LARGE_TOTAL_BYTES) {
+    async _inspectLargeReferenceImages(references, thresholdBytes = IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES) {
         if (!window.flowCanvas?.file?.inspect || references.length === 0) return null;
         const entries = (await Promise.all(references.map(async reference => {
             try {
@@ -4682,19 +3391,8 @@ export class AgentSidebar {
         return `${(value / (1024 * 1024)).toFixed(2)} MB`;
     }
 
-    _showReferenceCompressionDialog(summary, mode = 'video', { manual = false } = {}) {
-        const isImageMode = mode === 'image';
-        const note = isImageMode
-            ? '批量转小会生成压缩副本并替换当前参考选择，原图不会被修改。你可以选择是否把副本放入画板。'
-            : '压缩会生成新图片并放到画板上，原图不会被修改。压缩完成后不会自动生成视频。';
-        const confirmLabel = isImageMode
-            ? (manual ? '转小并放入画板' : '转小到画板并继续')
-            : '压缩到画板';
-        // 同一时刻只允许存在一个参考图处理弹层。若已经有一个（例如侧栏提交
-        // 挂起时用户又按了 Ctrl+Enter 从画布触发了同一条准备流程），必须先让它
-        // 正常结束：直接 remove 掉 DOM 会留下一个永不 settle 的 Promise，
-        // 调用方的 await 永久挂起、finally 不执行 → 「生成」按钮永久 disabled
-        // 且没有任何提示，另外还会残留一个 document keydown 监听器。
+    _showReferenceCompressionDialog(summary) {
+        // 顶替弹层前先结束旧 Promise，避免并发节点的生成流程永久等待。
         const previous = this._activeCompressionDialog;
         this._activeCompressionDialog = null;
         if (previous) {
@@ -4717,7 +3415,7 @@ export class AgentSidebar {
             };
 
             const overlay = document.createElement('div');
-            overlay.className = `video-compression-dialog-overlay${isImageMode ? ' image-reference-compression' : ''}`;
+            overlay.className = 'video-compression-dialog-overlay image-reference-compression';
             overlay.innerHTML = `
                 <div class="video-compression-dialog" role="dialog" aria-modal="true" aria-labelledby="videoCompressionDialogTitle">
                     <div class="video-compression-dialog-header">
@@ -4728,12 +3426,12 @@ export class AgentSidebar {
                         <button class="video-compression-dialog-close" type="button" aria-label="\u5173\u95ed">\u00d7</button>
                     </div>
                     <div class="video-compression-file-list"></div>
-                    <p class="video-compression-dialog-note">${note}</p>
+                    <p class="video-compression-dialog-note">批量转小会生成压缩副本并替换当前参考选择，原图不会被修改。你可以选择是否把副本放入画板。</p>
                     <div class="video-compression-dialog-actions">
                         <button class="video-compression-cancel" type="button">\u53d6\u6d88</button>
-                        ${isImageMode ? '<button class="video-compression-temporary" type="button">转小但不放画板</button>' : ''}
-                        ${manual ? '' : '<button class="video-compression-original" type="button">使用原图继续生成</button>'}
-                        <button class="video-compression-confirm" type="button">${confirmLabel}</button>
+                        <button class="video-compression-temporary" type="button">转小但不放画板</button>
+                        <button class="video-compression-original" type="button">使用原图继续生成</button>
+                        <button class="video-compression-confirm" type="button">转小到画板并继续</button>
                     </div>
                 </div>
             `;
@@ -4770,214 +3468,11 @@ export class AgentSidebar {
         });
     }
 
-    async _generateVideoFromWorkspace() {
-        if (this.videoGenerateBtn?.disabled) return;
-        const provider = this._getVideoProvider();
-        const prompt = this.videoPromptInput?.value?.trim() || '';
-        if (!prompt) {
-            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u8bf7\u5148\u8f93\u5165\u89c6\u9891\u63d0\u793a\u8bcd');
-            return;
-        }
-        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
-            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u8bf7\u5148\u5728\u8bbe\u7f6e\u6a21\u5f0f\u914d\u7f6e\u89c6\u9891 API');
-            return;
-        }
-        if (!window.flowCanvas?.mcp?.generateVideo) {
-            this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u672c\u5730\u89c6\u9891\u63a5\u53e3\u4e0d\u53ef\u7528');
-            return;
-        }
-
-        const imageReferences = this.videoReferenceSelections.image.map(entry => ({
-            itemId: entry.itemId || entry.id,
-            filePath: entry.filePath,
-            width: Number(entry.width) || null,
-            height: Number(entry.height) || null
-        }));
-        const videoReferences = this.videoReferenceSelections.video.map(entry => ({
-            itemId: entry.itemId || entry.id,
-            filePath: entry.filePath
-        }));
-        const audioReferences = this.videoReferenceSelections.audio.map(entry => ({
-            itemId: entry.itemId || entry.id,
-            filePath: entry.filePath
-        }));
-        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = true;
-        const compressionSummary = await this._inspectLargeReferenceImages(imageReferences);
-        if (compressionSummary) {
-            const compressionChoice = await this._showReferenceCompressionDialog(compressionSummary, 'video');
-            if (compressionChoice === 'cancel') {
-                if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
-                this._setWorkspaceMessage(this.videoGenerateMessage, '', '');
-                return;
-            }
-            if (compressionChoice === 'compress') {
-                if (!window.flowCanvas?.mcp?.compressVideoReferences) {
-                    if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
-                    this._setWorkspaceMessage(this.videoGenerateMessage, 'error', '\u538b\u7f29\u63a5\u53e3\u4e0d\u53ef\u7528\uff0c\u8bf7\u5b8c\u5168\u9000\u51fa\u5e76\u91cd\u65b0\u542f\u52a8 Flow Canvas');
-                    return;
-                }
-                this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u538b\u7f29\u53c2\u8003\u56fe...');
-                try {
-                    const compressionResult = await window.flowCanvas.mcp.compressVideoReferences({
-                        sourceReferences: imageReferences
-                    });
-                    if (compressionResult?.success === false) {
-                        throw new Error(compressionResult.error || '\u53c2\u8003\u56fe\u538b\u7f29\u5931\u8d25');
-                    }
-                    const replacements = new Map((compressionResult?.outputs || []).map(output => [
-                        String(output.sourceItemId || output.sourceFilePath),
-                        output
-                    ]));
-                    this.videoReferenceSelections.image = this.videoReferenceSelections.image.map(entry => {
-                        const replacement = replacements.get(String(entry.itemId || entry.id))
-                            || replacements.get(String(entry.filePath));
-                        if (!replacement?.item) return entry;
-                        return {
-                            id: replacement.item.id,
-                            itemId: replacement.item.id,
-                            filePath: replacement.filePath,
-                            mediaType: 'image',
-                            width: Number(replacement.item.width) || null,
-                            height: Number(replacement.item.height) || null
-                        };
-                    });
-                    this.options.clearMediaReferenceSelections?.();
-                    this._renderVideoSourcePreview();
-                    const count = compressionResult?.outputs?.length || 0;
-                    this._setWorkspaceMessage(
-                        this.videoGenerateMessage,
-                        'success',
-                        `\u5df2\u5c06 ${count} \u5f20\u538b\u7f29\u56fe\u6dfb\u52a0\u5230\u753b\u677f\uff0c\u8bf7\u68c0\u67e5\u540e\u518d\u70b9\u51fb\u751f\u6210\u89c6\u9891`
-                    );
-                } catch (error) {
-                    this._setWorkspaceMessage(this.videoGenerateMessage, 'error', error?.message || String(error));
-                } finally {
-                    if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
-                }
-                return;
-            }
-        }
-        // The expensive generation request is independent per task. Only the optional
-        // compression preflight keeps the button locked; submissions may run in parallel.
-        if (this.videoGenerateBtn) this.videoGenerateBtn.disabled = false;
-        const durationValue = this.videoDurationSelect?.value;
-        const profile = this._getVideoModelProfile(provider) || DEFAULT_VIDEO_MODEL_PROFILE;
-        const ratio = this._resolveVideoRequestRatio(profile, imageReferences);
-        const videoParams = {
-            resolution: this.videoResolutionSelect?.value || null,
-            ratio,
-            ratioMode: this.videoRatioSelect?.value === 'adaptive' ? 'auto' : 'manual',
-            duration: durationValue === '' || durationValue == null ? null : Number(durationValue),
-            cameraFixed: Boolean(this.videoCameraFixed?.checked),
-            generateAudio: Boolean(this.videoGenerateAudio?.checked),
-            webSearch: profile.supportsWebSearch ? Boolean(this.videoWebSearch?.checked) : null,
-            watermark: Boolean(this.videoWatermark?.checked),
-            compressReferenceImages: false,
-            videoSourcePaths: videoReferences.map(reference => reference.filePath).filter(Boolean),
-            audioSourcePaths: audioReferences.map(reference => reference.filePath).filter(Boolean)
-        };
-        const generationTask = this._createGenerationTask(
-            'video',
-            provider,
-            prompt,
-            videoParams,
-            imageReferences.map(reference => reference.filePath).filter(Boolean)
-        );
-        this.activeVideoWorkspaceTaskId = generationTask.id;
-        if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u751f\u6210\u4e2d';
-        this._setWorkspaceMessage(this.videoGenerateMessage, '', '\u6b63\u5728\u63d0\u4ea4\u4efb\u52a1...');
-        const placeholder = this.options.beginVideoGeneration?.({
-            ratio,
-            sourceReferences: imageReferences,
-            onCancel: () => this._cancelGenerationTask(generationTask.id)
-        }) || null;
-        let result = null;
-
-        try {
-            result = await window.flowCanvas.mcp.generateVideo({
-                provider: 'openai-video',
-                providerConfig: provider,
-                clientTaskId: generationTask.id,
-                prompt,
-                sourceReferences: imageReferences,
-                videoReferences,
-                audioReferences,
-                resolution: videoParams.resolution || undefined,
-                ratio: videoParams.ratio || undefined,
-                duration: videoParams.duration ?? undefined,
-                cameraFixed: videoParams.cameraFixed,
-                generateAudio: videoParams.generateAudio,
-                webSearch: videoParams.webSearch ?? undefined,
-                watermark: videoParams.watermark,
-                compressReferenceImages: videoParams.compressReferenceImages,
-                x: placeholder?.x,
-                y: placeholder?.y,
-                canvasWidth: placeholder?.width,
-                canvasHeight: placeholder?.height,
-                addToCanvas: true
-            });
-            if (this._isGenerationTaskCanceled(generationTask.id) || result?.canceled) {
-                throw this._generationCancellationError();
-            }
-            if (result?.success === false) throw new Error(result.error || '\u89c6\u9891\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
-            this._updateGenerationTask(generationTask.id, {
-                status: 'success',
-                error: null,
-                filePath: result?.filePath || null,
-                taskId: result?.taskId || null
-            });
-            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = '\u5df2\u5b8c\u6210';
-            this._setWorkspaceMessage(
-                this.videoGenerateMessage,
-                'success',
-                result?.filePath ? '\u5df2\u6dfb\u52a0\u5230\u753b\u677f\uff1a' + result.filePath : '\u89c6\u9891\u5df2\u751f\u6210'
-            );
-        } catch (error) {
-            this._recordGenerationError(generationTask.id, error);
-            const canceled = this._isGenerationTaskCanceled(generationTask.id);
-            if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = canceled ? '已中断' : '\u5931\u8d25';
-            this._setWorkspaceMessage(
-                this.videoGenerateMessage,
-                canceled ? '' : 'error',
-                canceled ? '生成任务已中断' : (error?.message || String(error))
-            );
-        } finally {
-            if (placeholder?.id) this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);
-        }
-    }
-
     _referencePathKey(filePath) {
         return String(filePath || '').replaceAll('/', '\\').toLowerCase();
     }
 
-    _applyCompressedImageReferences(outputs = []) {
-        const replacements = new Map();
-        outputs.forEach(output => {
-            if (output?.sourceItemId) replacements.set(`id:${output.sourceItemId}`, output);
-            if (output?.sourceFilePath) replacements.set(`path:${this._referencePathKey(output.sourceFilePath)}`, output);
-        });
-        this.imageReferenceSelections = this.imageReferenceSelections.map(entry => {
-            const replacement = replacements.get(`id:${entry.itemId || entry.id}`)
-                || replacements.get(`path:${this._referencePathKey(entry.filePath)}`);
-            if (!replacement?.filePath) return entry;
-            const replacementItemId = replacement.item?.id || entry.itemId || entry.id;
-            return {
-                ...entry,
-                id: replacementItemId,
-                itemId: replacementItemId,
-                filePath: replacement.filePath,
-                mediaType: 'image',
-                temporary: !replacement.item,
-                referenceId: replacement.referenceId || entry.referenceId || null,
-                cacheReused: replacement.cacheReused === true
-            };
-        });
-        this.options.updateMediaReferencePick?.('image', this.imageReferenceSelections);
-        this._renderImageReferences();
-    }
-
     async _compressImageReferences(references, {
-        updateSelection = false,
         uploadBudgetBytes = IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES,
         addToCanvas = true
     } = {}) {
@@ -5009,11 +3504,10 @@ export class AgentSidebar {
                 }
                 : reference;
         });
-        if (updateSelection) this._applyCompressedImageReferences(outputs);
         return { references: nextReferences, outputs, addToCanvas };
     }
 
-    async _prepareImageReferencesForGeneration(references, { updateSelection = false } = {}) {
+    async _prepareImageReferencesForGeneration(references) {
         const summary = await this._inspectLargeReferenceImages(
             references,
             IMAGE_REFERENCE_UPLOAD_BUDGET_BYTES
@@ -5021,50 +3515,15 @@ export class AgentSidebar {
         if (!summary) return { references, outputs: [] };
         if (this.globalConfig.defaultTemporaryImageCompression === true) {
             return this._compressImageReferences(references, {
-                updateSelection,
                 addToCanvas: false
             });
         }
-        const choice = await this._showReferenceCompressionDialog(summary, 'image');
+        const choice = await this._showReferenceCompressionDialog(summary);
         if (choice === 'cancel') return CANCELED_IMAGE_REFERENCES;
         if (choice === 'original') return { references, outputs: [] };
         return this._compressImageReferences(references, {
-            updateSelection,
             addToCanvas: choice !== 'compress-temporary'
         });
-    }
-
-    async _compressSelectedImageReferences() {
-        const references = this.imageReferenceSelections
-            .filter(entry => entry?.filePath)
-            .map(entry => ({ itemId: entry.itemId || entry.id, filePath: entry.filePath }));
-        if (references.length === 0 || this.imageCompressReferencesBtn?.disabled) return;
-        const summary = await this._inspectLargeReferenceImages(references, 0);
-        if (!summary) return;
-        const choice = await this._showReferenceCompressionDialog(summary, 'image', { manual: true });
-        if (choice === 'cancel') return;
-        const addToCanvas = choice !== 'compress-temporary';
-        if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.disabled = true;
-        this._setWorkspaceMessage(this.imageGenerateMessage, '', '正在批量转小参考图...');
-        try {
-            const result = await this._compressImageReferences(references, {
-                updateSelection: true,
-                uploadBudgetBytes: IMAGE_REFERENCE_MANUAL_BUDGET_BYTES,
-                addToCanvas
-            });
-            const count = result.outputs.length;
-            this._setWorkspaceMessage(
-                this.imageGenerateMessage,
-                'success',
-                addToCanvas
-                    ? `已生成 ${count} 张较小副本并放入画板，原图保持不变`
-                    : `已缓存 ${count} 张较小副本，未添加到画板，可在后续任务中复用`
-            );
-        } catch (error) {
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
-        } finally {
-            if (this.imageCompressReferencesBtn) this.imageCompressReferencesBtn.disabled = false;
-        }
     }
 
     _handleVideoProgress(event = {}) {
@@ -5084,166 +3543,6 @@ export class AgentSidebar {
                 remoteStatus: event.remoteStatus || null
             }
         });
-
-        if (clientTaskId !== this.activeVideoWorkspaceTaskId) return;
-        const mediaType = String(event.mediaType || '参考素材');
-        const index = Number(event.current);
-        const total = Number(event.total);
-        const messages = {
-            prepare: '正在读取参考素材...',
-            submit: '参考素材准备完成，正在提交模型任务...',
-            queued: '任务已提交，等待模型处理...',
-            recovering: '服务器已接收任务，正在恢复任务连接...',
-            download: '模型生成完成，正在下载视频...',
-            completed: '视频已下载，正在写入画布...'
-        };
-        let message = messages[stage] || '模型生成中...';
-        if (stage === 'upload') {
-            message = Number.isFinite(index) && Number.isFinite(total) && total > 0
-                ? `正在上传${mediaType}（${index}/${total}）...`
-                : `正在上传${mediaType}...`;
-        } else if (stage === 'processing' && progress !== null) {
-            message = `模型生成中 · ${progress}%`;
-        }
-        if (this.videoWorkspaceStatus) this.videoWorkspaceStatus.textContent = stage === 'completed' ? '已完成' : '生成中';
-        this._setWorkspaceMessage(this.videoGenerateMessage, '', message);
-    }
-
-    async _generateImageFromWorkspace() {
-        const provider = this._getImageProvider();
-        const prompt = this.imagePromptInput?.value?.trim() || '';
-        if (!prompt) {
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u8f93\u5165\u56fe\u7247\u63d0\u793a\u8bcd');
-            return;
-        }
-        if (!provider?.apiKey || !provider?.endpoint || !provider?.model) {
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u5728\u8bbe\u7f6e\u6a21\u5f0f\u914d\u7f6e\u751f\u56fe API');
-            return;
-        }
-        if (!window.flowCanvas?.mcp?.generateImage) {
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u672c\u5730\u751f\u56fe\u63a5\u53e3\u4e0d\u53ef\u7528');
-            return;
-        }
-
-        const size = this.imageSizeSelect?.value || undefined;
-        const quality = this.imageQualitySelect?.value || 'high';
-        const gptImage2 = isGptImage2Model(provider.model);
-        const responseFormat = gptImage2 ? (this.imageResponseFormatSelect?.value || 'url') : 'url';
-        const historyDisabled = gptImage2 ? this.imageHistoryDisabled?.checked !== false : true;
-        const stream = gptImage2 ? Boolean(this.imageStream?.checked) : false;
-        let sourceReferences = this.imageGenerationMode === 'reference'
-            ? this.imageReferenceSelections
-                .filter(entry => entry?.filePath)
-                .map(entry => ({ itemId: entry.itemId || entry.id, filePath: entry.filePath }))
-            : [];
-        if (this.imageGenerationMode === 'reference' && sourceReferences.length === 0) {
-            this._setWorkspaceMessage(this.imageGenerateMessage, 'error', '\u8bf7\u5148\u4ece\u753b\u5e03\u4e2d\u9009\u62e9\u81f3\u5c11\u4e00\u5f20\u53c2\u8003\u56fe');
-            return;
-        }
-        if (sourceReferences.length > 0) {
-            if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = true;
-            this._setWorkspaceMessage(this.imageGenerateMessage, '', '正在检查参考图大小...');
-            try {
-                const prepared = await this._prepareImageReferencesForGeneration(sourceReferences, {
-                    updateSelection: true
-                });
-                if (prepared === CANCELED_IMAGE_REFERENCES) {
-                    this._setWorkspaceMessage(
-                        this.imageGenerateMessage,
-                        'error',
-                        '已取消参考图处理，本次未开始生成。如需保持原图请重新生成并在提示中选择“保持原图”。'
-                    );
-                    return;
-                }
-                if (!prepared) {
-                    this._setWorkspaceMessage(
-                        this.imageGenerateMessage,
-                        'error',
-                        '参考图准备服务不可用，已中止生成以避免丢失参考图。'
-                    );
-                    return;
-                }
-                sourceReferences = prepared.references;
-                if (prepared.outputs.length > 0) {
-                    this._setWorkspaceMessage(
-                        this.imageGenerateMessage,
-                        'success',
-                        `已批量转小 ${prepared.outputs.length} 张参考图，正在继续生成...`
-                    );
-                }
-            } catch (error) {
-                this._setWorkspaceMessage(this.imageGenerateMessage, 'error', error?.message || String(error));
-                return;
-            } finally {
-                if (this.imageGenerateBtn) this.imageGenerateBtn.disabled = false;
-            }
-        }
-        const sourcePaths = sourceReferences.map(reference => reference.filePath).filter(Boolean);
-        const generationTask = this._createGenerationTask('image', provider, prompt, {
-            size: size || null,
-            quality,
-            responseFormat,
-            historyDisabled,
-            stream
-        }, sourcePaths);
-        this._setImageWorkspaceStatus('running', '\u751f\u6210\u4e2d');
-        this._setWorkspaceMessage(this.imageGenerateMessage, '', '\u6b63\u5728\u751f\u6210...');
-        const placeholder = this.options.beginImageGeneration?.({
-            size,
-            sourceReferences,
-            onCancel: () => this._cancelGenerationTask(generationTask.id)
-        }) || null;
-        let result = null;
-
-        try {
-            result = await window.flowCanvas.mcp.generateImage({
-                provider: 'openai',
-                providerConfig: provider,
-                clientTaskId: generationTask.id,
-                prompt,
-                size,
-                quality,
-                responseFormat,
-                historyDisabled,
-                stream,
-                sourceReferences,
-                x: placeholder?.x,
-                y: placeholder?.y,
-                canvasWidth: placeholder?.width,
-                canvasHeight: placeholder?.height,
-                addToCanvas: true
-            });
-            if (this._isGenerationTaskCanceled(generationTask.id) || result?.canceled) {
-                throw this._generationCancellationError();
-            }
-            if (result?.success === false) throw new Error(result.error || '\u56fe\u7247\u751f\u6210\u8bf7\u6c42\u5931\u8d25');
-            this._updateGenerationTask(generationTask.id, {
-                status: 'success',
-                error: null,
-                filePath: result?.filePath || null,
-                taskId: result?.taskId || null
-            });
-            this._setImageWorkspaceStatus('success', '\u5df2\u5b8c\u6210');
-            const sizeMessage = result?.actualSize
-                ? `\uff0c\u5b9e\u9645\u5c3a\u5bf8 ${result.actualSize}${result.sizeMatchesRequest === false ? `\uff08\u8bf7\u6c42 ${result.requestedSize}\uff09` : ''}`
-                : '';
-            this._setWorkspaceMessage(
-                this.imageGenerateMessage,
-                'success',
-                result?.filePath ? '\u5df2\u6dfb\u52a0\u5230\u753b\u677f\uff1a' + result.filePath + sizeMessage : '\u56fe\u7247\u5df2\u751f\u6210' + sizeMessage
-            );
-        } catch (error) {
-            this._recordGenerationError(generationTask.id, error);
-            const canceled = this._isGenerationTaskCanceled(generationTask.id);
-            this._setImageWorkspaceStatus(canceled ? 'idle' : 'failed', canceled ? '已中断' : '\u5931\u8d25');
-            this._setWorkspaceMessage(
-                this.imageGenerateMessage,
-                canceled ? '' : 'error',
-                canceled ? '生成任务已中断' : (error?.message || String(error))
-            );
-        } finally {
-            if (placeholder?.id) this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
-        }
     }
 
     open() {
@@ -5381,7 +3680,7 @@ export class AgentSidebar {
             this.apiConfigHydrated = true;
             this._writeLocalApiConfig();
             this._renderProviderList();
-            this._renderModelSelect();
+            this._renderAgentComposerModels();
             this._renderAgentSkillList();
             this._renderAgentExecutionMode();
             if (this.defaultTemporaryCompressionToggle) {
@@ -5510,7 +3809,7 @@ export class AgentSidebar {
         this.globalConfig.textProviderId = id;
         this._saveConfig();
         this._renderProviderList();
-        this._renderModelSelect();
+        this._renderAgentComposerModels();
     }
 
     _setImageProvider(id) {
@@ -5519,7 +3818,7 @@ export class AgentSidebar {
         this.globalConfig.imageProviderId = id;
         this._saveConfig();
         this._renderProviderList();
-        this._renderModelSelect();
+        this._renderAgentComposerModels();
         this._renderAgentSkillList();
         this._renderAgentExecutionMode();
     }
@@ -5537,8 +3836,7 @@ export class AgentSidebar {
         this.globalConfig.videoProviderId = id;
         this._saveConfig();
         this._renderProviderList();
-        this._renderModelSelect();
-        if (this.currentMode === 'video') this._renderVideoStage();
+        this._renderAgentComposerModels();
     }
 
     _getImageProvider() {
@@ -5715,11 +4013,14 @@ export class AgentSidebar {
             const match = /^(\d+)x(\d+)$/i.exec(String(size.value || ''));
             return match ? inferImageResolutionTier(Number(match[1]), Number(match[2])) : null;
         }).filter(Boolean));
-        return {
+        const base = {
             sizes,
             resolutionTiers: IMAGE_RESOLUTION_TIERS.filter(tier => availableTiers.has(tier)),
             defaultResolutionTier: availableTiers.has('1K') ? '1K' : ([...availableTiers][0] || '1K')
         };
+        // CONFIG 提供档位时以 CONFIG 为准（例如 mj_imagine 只有 1K/2K），未收录的模型保持原行为。
+        const resolution = resolveModelConfigEntry(modelConfigStore.getConfig(), { ...provider, kind: 'image' });
+        return mergeImageProfile(base, toImageProfileOverrides(modelConfigStore.getConfig(), resolution.entry));
     }
 
     getVideoProviderConfig(binding = null) {
@@ -6043,7 +4344,7 @@ export class AgentSidebar {
         this._saveConfig();
         this._hideForm();
         this._renderProviderList();
-        this._renderModelSelect();
+        this._renderAgentComposerModels();
     }
 
     _deleteProvider(id) {
@@ -6052,7 +4353,7 @@ export class AgentSidebar {
         this._ensureProviderRoles();
         this._saveConfig();
         this._renderProviderList();
-        this._renderModelSelect();
+        this._renderAgentComposerModels();
     }
 
     _setActiveProvider(id) {
@@ -6150,65 +4451,6 @@ export class AgentSidebar {
             card.appendChild(actions);
             this.providerListEl.appendChild(card);
         });
-    }
-
-    _renderModelSelect() {
-        const selects = [
-            { el: this.textModelSelectEl, role: 'text', selectedId: this.globalConfig.textProviderId },
-            { el: this.imageModelSelectEl, role: 'image', selectedId: this.globalConfig.imageProviderId },
-            { el: this.videoModelSelectEl, role: 'video', selectedId: this.globalConfig.videoProviderId }
-        ].filter(item => item.el);
-
-        selects.forEach(({ el }) => {
-            el.innerHTML = '';
-        });
-
-        if (this.providers.length === 0) {
-            selects.forEach(({ el }) => {
-                const opt = document.createElement('option');
-                opt.value = "";
-                opt.textContent = "-- 请先添加 API --";
-                el.appendChild(opt);
-            });
-            this._renderAgentComposerModels();
-            this._renderVideoProviderContext();
-            if (this.currentMode === 'video') this._renderVideoStage();
-            return;
-        }
-
-        selects.forEach(({ el, role, selectedId }) => {
-            const opt = document.createElement('option');
-            opt.value = "";
-            opt.textContent = role === 'text'
-                ? '-- 选择文字 API --'
-                : role === 'image'
-                    ? '-- 选择生图 API --'
-                    : '-- 选择视频 API --';
-            el.appendChild(opt);
-
-            this._providerVariants().forEach(p => {
-                const matchesRole = role === 'video'
-                    ? this._isVideoProvider(p)
-                    : role === 'text'
-                        ? this._isTextProvider(p)
-                        : this._isImageProvider(p);
-                if (!matchesRole) return;
-                const option = document.createElement('option');
-                option.value = p.id;
-                const profileMeta = role === 'video'
-                    ? formatVideoModelProfile(this._getVideoModelProfile(p), false)
-                    : '';
-                option.textContent = `${p.name} (${p.model})${profileMeta ? ` · ${profileMeta}` : ''}`;
-                if (p.id === selectedId) {
-                    option.selected = true;
-                }
-                el.appendChild(option);
-            });
-        });
-        this._renderAgentComposerModels();
-        this._renderVideoProviderContext();
-        this._renderImageModelCapabilities();
-        if (this.currentMode === 'video') this._renderVideoStage();
     }
 
 }

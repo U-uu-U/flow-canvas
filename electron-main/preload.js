@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 缩略图
     thumb: {
         get: (filePath, maxDim) => ipcRenderer.invoke('thumb:get', filePath, maxDim),
+        preview: (filePath, maxDim, preferOriginal = false) => ipcRenderer.invoke('thumb:preview', filePath, maxDim, preferOriginal),
     },
 
     // 剪贴板
@@ -127,6 +128,11 @@ contextBridge.exposeInMainWorld('flowCanvas', {
 
     metrics: {
         getBoardUsage: () => ipcRenderer.invoke('metrics:getBoardUsage'),
+    },
+
+    // 模型能力 CONFIG：渲染层不直接发请求，拉取与 schema 校验都在主进程完成。
+    modelConfig: {
+        fetch: (payload) => ipcRenderer.invoke('model-config:fetch', payload),
     },
 
     // 网页图片摘取

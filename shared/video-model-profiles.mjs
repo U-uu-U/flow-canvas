@@ -69,18 +69,6 @@ export const VIDEO_MODEL_PROFILES = [
         defaultDuration: 5
     },
     {
-        match: /seedance[^a-z0-9]*(?:1[._-]?5|1[._-]?0[-_]?pro)/i,
-        label: 'Seedance 1.5',
-        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
-        resolutions: ['480p', '720p', '1080p'],
-        durations: [-1, 5, 10, 12],
-        durationControl: 'select',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 5
-    },
-    {
         match: /minimax[^a-z0-9]*h3/i,
         label: 'MiniMax H3',
         ratios: ['adaptive', '16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
@@ -97,42 +85,6 @@ export const VIDEO_MODEL_PROFILES = [
         adaptiveFallbackRatio: '16:9',
         defaultResolution: '2k',
         defaultDuration: 4
-    },
-    {
-        match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
-        label: 'DashScope',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
-        resolutions: ['720P', '1080P'],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: '720P',
-        defaultDuration: 5
-    },
-    {
-        match: /kling|可灵/i,
-        label: 'Kling',
-        ratios: ['16:9', '9:16', '1:1'],
-        resolutions: [],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: null,
-        defaultDuration: 5
-    },
-    {
-        match: /tencent|vidu|腾讯/i,
-        label: 'Tencent / Vidu',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'],
-        resolutions: [],
-        durations: [5, 10],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: null,
-        defaultDuration: 5
     }
 ];
 

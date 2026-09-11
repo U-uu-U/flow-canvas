@@ -64,6 +64,7 @@ import {
 } from './generation-record.js';
 import { withoutReferenceCitationGuide } from './reference-citations.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
+import { assertModelRequest, checkModelRequest } from './model-config-ui.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
     composePromptFromTemplate,
@@ -4991,8 +4992,14 @@ export class CanvasManager {
                 const guidance = errorLabel === '文件失联'
                     ? '文件已移动或删除，点击错误标记可手动重接'
                     : errorLabel === '无法解码'
-                        ? '文件仍在磁盘，但当前视频编码或容器无法读取，可重接为兼容文件'
-                        : '点击错误标记可手动重接';
+                        ? (this._getItemMediaType(data) === 'video'
+                            ? '文件仍在磁盘，但当前视频编码或容器无法读取，可重接为兼容文件'
+                            : '图片读取失败，点击错误标记可手动重接')
+                        : errorLabel === '文件是网页'
+                            ? '此文件实际是 HTML 页面，不含可解码图片，请重新导入原图'
+                            : errorLabel === '图片损坏或不支持'
+                                ? '原文件无法生成兼容预览，请检查文件是否完整，或重接原图'
+                                : '点击错误标记可手动重接';
                 this._showCanvasStatus(`${errorLabel}：${this._fileNameFromPath(data.filePath)}，${guidance}`, 4600);
             }
             if (this._countPlanReferencesToItem(data.id, data.filePath) > 0) {
@@ -10239,6 +10246,18 @@ export class CanvasManager {
         }
         if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
 
+        // CONFIG 前置校验：模型能力表判定「一定不行」的参数在提交前拦下，
+        // 避免把请求打到上游才失败（例如线路固定 30 秒、比例不在白名单、提示词超长）。
+        const guard = this._guardNodeModelConfig(data);
+        if (guard.errors.length) {
+            message.textContent = `当前模型参数不被支持：${guard.errors.map(item => item.message).join('；')}`;
+            message.dataset.state = 'error';
+            return;
+        }
+        if (guard.matched && guard.warnings.length) {
+            this._showCanvasStatus(guard.warnings.map(item => item.message).join('；'), 2600);
+        }
+
         if (data.nodeType === 'image'
             && this.options.getImageIntentPipelineMode?.() !== 'off'
             && typeof this.options.generateImageThroughAgent === 'function') {
@@ -10264,6 +10283,43 @@ export class CanvasManager {
         this._syncGenerationComposerStatus(nodeId, '正在提交生成任务…');
         await this.runFromNode(nodeId);
         this._syncGenerationComposerStatus(nodeId);
+    }
+
+    // CONFIG 前置校验：把模型能力表里「一定不行」的节点参数挑出来。
+    // 只报错误用于拦截；未收录模型 / 边界未知只作为提示，绝不阻止生成。
+    _guardNodeModelConfig(data) {
+        const config = data?.config || {};
+        const kind = data?.nodeType === 'video' ? 'video' : 'image';
+        const provider = (kind === 'video'
+            ? this.options.getVideoProvider?.(config)
+            : this.options.getImageProvider?.(config)) || {
+            model: config.model,
+            endpoint: config.endpoint,
+            name: config.providerName
+        };
+        const fields = kind === 'video'
+            ? { resolutionTier: config.resolution, ratio: config.ratio, duration: config.duration }
+            : {
+                resolutionTier: config.resolutionTier
+                    || (config.width && config.height ? `${config.width}x${config.height}` : undefined),
+                quality: config.quality
+            };
+        const features = kind === 'video'
+            ? {
+                cameraFixed: config.cameraFixed === true,
+                generateAudio: config.generateAudio === true,
+                webSearch: config.webSearch === true,
+                watermark: config.watermark === true
+            }
+            : {};
+        return checkModelRequest({
+            provider: { ...provider, kind },
+            kind,
+            fields,
+            features,
+            prompt: config.prompt || '',
+            promptResolved: !this._hasUpstreamPrompt(data)
+        });
     }
 
     _syncGenerationComposerStatus(nodeId, pendingMessage = '') {
@@ -10812,6 +10868,7 @@ export class CanvasManager {
             getTextProvider: (binding) => this.options.getTextProvider?.(binding) || null,
             getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
             getVideoProvider: (binding) => this.options.getVideoProvider?.(binding) || null,
+            validateGenerationRequest: assertModelRequest,
             getImageIntentPipelineMode: () => this.options.getImageIntentPipelineMode?.() || 'compiled',
             // 同 main.js：不能用 `|| []` 兜底，否则「用户取消参考图处理」
             // 会被折叠成空数组，生成静默降级为纯文生图。
@@ -14609,7 +14666,7 @@ export class CanvasManager {
         return null;
     }
 
-    async _failImageLoad(item, token, fallbackMessage = '加载失败') {
+    async _failImageLoad(item, token, fallbackMessage = '图片加载失败') {
         const fileExists = await this._inspectMediaFileExists(item?.data?.filePath || '');
         if (!this._isLoadCurrent(item, token)) {
             this._completeContentLoad(item);
@@ -14618,7 +14675,7 @@ export class CanvasManager {
         return this._failLoad(
             item,
             token,
-            fileExists === false ? '文件失联' : fileExists === true ? '无法解码' : fallbackMessage
+            fileExists === false ? '文件失联' : fallbackMessage
         );
     }
 
@@ -15001,79 +15058,85 @@ export class CanvasManager {
     /**
      * 加载低分辨率缩略图（LOD 模式）— 通过 IPC 获取 thumbnail dataURL
      */
-    async _loadLowRes(item, token) {
-        try {
-            const dataUrl = await window.flowCanvas.thumb.get(item.data.filePath);
-            if (!this._isLoadCurrent(item, token)) {
-                this._completeContentLoad(item);
-                return;
-            }
-            if (!dataUrl) {
-                await this._failImageLoad(item, token);
-                return;
-            }
-
-            const img = new window.Image();
-            img.onload = () => {
-                if (!this._isLoadCurrent(item, token)) {
-                    this._completeContentLoad(item);
-                    return;
-                }
-
-                const { width: targetW, height: targetH } = this._resolveMediaDisplaySize(item.data, img.width, img.height);
-                this._storeResolvedMediaSize(item, targetW, targetH);
-
-                const fallback = item.group.findOne('.fallbackIcon');
-                if (fallback) fallback.destroy();
-
-                const node = new Konva.Image({
-                    name: 'displayNode',
-                    image: img,
-                    width: targetW,
-                    height: targetH
-                });
-                item.group.add(node);
-                this._placeLoadedDisplayNode(item, node, token);
-
-                if (this.selectedItems.has(item.data.id)) {
-                    this._updateSelectionVisuals();
-                }
-                this._finishLoad(item, token);
-                item.group.getLayer()?.batchDraw();
-            };
-            img.onerror = () => void this._failImageLoad(item, token);
-            img.src = dataUrl;
-        } catch (err) {
-            await this._failImageLoad(item, token);
-            console.warn('[Canvas] _loadLowRes 失败:', item.data.filePath, err);
-        }
+    _loadLowRes(item, token) {
+        return this._loadThumbnail(item, token, { useThumbnail: true });
     }
 
-    async _loadThumbnail(item, token, retryCount = 0) {
+    async _loadThumbnail(item, token, { retryCount = 0, forcePreview = false, useThumbnail = false } = {}) {
         const MAX_RETRIES = 5;
         const RETRY_DELAY = 1500; // ms
         const group = item.group;
         const data = item.data;
         const filePath = data.filePath;
+        const failOrRetry = (message, retryable = true) => {
+            if (!this._isLoadCurrent(item, token)) return;
+            if (!retryable || retryCount >= MAX_RETRIES) {
+                this._failLoad(item, token, message);
+                return;
+            }
+            console.warn(`[Canvas] 图片读取暂未成功，${RETRY_DELAY}ms 后重试 (${retryCount + 1}/${MAX_RETRIES}):`, filePath, message);
+            setTimeout(() => {
+                if (this._isLoadCurrent(item, token)) {
+                    // Recheck the original file: it may have finished writing since the failed preview.
+                    void this._loadThumbnail(item, token, { retryCount: retryCount + 1, useThumbnail });
+                }
+            }, RETRY_DELAY);
+        };
 
         try {
             const imgUrl = 'local-res://' + encodeURIComponent(filePath);
+            const maxDim = useThumbnail ? 200 : 4096;
+            const preview = window.flowCanvas?.thumb?.preview
+                ? await window.flowCanvas.thumb.preview(filePath, maxDim, !useThumbnail && !forcePreview)
+                : useThumbnail && window.flowCanvas?.thumb?.get
+                    ? { success: true, dataUrl: await window.flowCanvas.thumb.get(filePath, maxDim) }
+                    : null;
+            if (!this._isLoadCurrent(item, token)) return;
+            if (preview && !preview.success && (forcePreview || preview.error?.code !== 'IMAGE_DECODE_FAILED')) {
+                failOrRetry(preview.error?.message || '图片加载失败',
+                    !['FILE_MISSING', 'NOT_IMAGE_HTML', 'IMAGE_TOO_LARGE'].includes(preview.error?.code));
+                return;
+            }
 
             const imgObj = new window.Image();
+            const releaseImage = () => {
+                imgObj.onload = null;
+                imgObj.onerror = null;
+                imgObj.removeAttribute('src');
+            };
             imgObj.onload = () => {
                 if (!this._isLoadCurrent(item, token)) {
-                    this._completeContentLoad(item);
+                    releaseImage();
                     return;
                 }
 
-                const { width: targetW, height: targetH } = this._resolveMediaDisplaySize(data, imgObj.width, imgObj.height);
+                const { width: targetW, height: targetH } = this._resolveMediaDisplaySize(data, preview?.width || imgObj.width, preview?.height || imgObj.height);
+                let displayImage = imgObj;
+                if (useThumbnail && Math.max(imgObj.naturalWidth, imgObj.naturalHeight) > maxDim) {
+                    try {
+                        // Chromium can decode formats Sharp cannot (such as BMP); retain only a small bitmap.
+                        const bitmap = document.createElement('canvas');
+                        const scale = Math.min(1, maxDim / Math.max(imgObj.naturalWidth, imgObj.naturalHeight));
+                        bitmap.width = Math.max(1, Math.round(imgObj.naturalWidth * scale));
+                        bitmap.height = Math.max(1, Math.round(imgObj.naturalHeight * scale));
+                        const context = bitmap.getContext('2d');
+                        if (!context) throw new Error('无法创建图片预览');
+                        context.drawImage(imgObj, 0, 0, bitmap.width, bitmap.height);
+                        displayImage = bitmap;
+                        releaseImage();
+                    } catch (error) {
+                        releaseImage();
+                        failOrRetry(error?.message || '图片预览失败');
+                        return;
+                    }
+                }
 
                 this._storeResolvedMediaSize(item, targetW, targetH);
 
                 const imageNode = new Konva.Image({
                     name: 'displayNode',
                     x: 0, y: 0,
-                    image: imgObj,
+                    image: displayImage,
                     width: targetW,
                     height: targetH
                 });
@@ -15089,7 +15152,7 @@ export class CanvasManager {
                 }
 
                 // 如果是 GIF，DOM 叠加层默认隐藏，hover 时才显示动画
-                if (filePath.toLowerCase().endsWith('.gif')) {
+                if (!useThumbnail && filePath.toLowerCase().endsWith('.gif') && (!preview || preview.useOriginal)) {
                     const gifImg = document.createElement('img');
                     gifImg.src = imgUrl;
                     gifImg.style.position = 'absolute';
@@ -15119,37 +15182,27 @@ export class CanvasManager {
                 }
 
                 this._finishLoad(item, token);
-                group.getLayer().batchDraw();
+                group.getLayer()?.batchDraw();
             };
             imgObj.onerror = async () => {
-                if (!this._isLoadCurrent(item, token)) {
-                    this._completeContentLoad(item);
-                    return;
-                }
+                releaseImage();
+                if (!this._isLoadCurrent(item, token)) return;
                 const fileExists = await this._inspectMediaFileExists(filePath);
-                if (!this._isLoadCurrent(item, token)) {
-                    this._completeContentLoad(item);
-                    return;
-                }
+                if (!this._isLoadCurrent(item, token)) return;
                 if (fileExists === false) {
-                    this._failLoad(item, token, '文件失联');
+                    failOrRetry('文件失联', false);
                     return;
                 }
-                if (retryCount < MAX_RETRIES) {
-                    console.warn(`[Canvas] 图片加载失败，${RETRY_DELAY}ms 后重试 (${retryCount + 1}/${MAX_RETRIES}):`, filePath);
-                    setTimeout(() => {
-                        if (this._isLoadCurrent(item, token)) {
-                            this._loadThumbnail(item, token, retryCount + 1);
-                        }
-                    }, RETRY_DELAY);
-                } else {
-                    console.error('[Canvas] 图片加载最终失败（已重试' + MAX_RETRIES + '次）:', filePath);
-                    this._failLoad(item, token, fileExists === true ? '无法解码' : '加载失败');
+                if (!useThumbnail && !forcePreview && window.flowCanvas?.thumb?.preview) {
+                    void this._loadThumbnail(item, token, { retryCount, forcePreview: true, useThumbnail });
+                    return;
                 }
+                failOrRetry(preview?.error?.message || '图片加载失败');
             };
-            imgObj.src = imgUrl;
+            imgObj.src = preview?.dataUrl || imgUrl;
         } catch (err) {
-            await this._failImageLoad(item, token);
+            const fileExists = await this._inspectMediaFileExists(filePath);
+            failOrRetry(fileExists === false ? '文件失联' : '图片加载失败', fileExists !== false);
             console.error('[Canvas] 图片异常:', filePath, err);
         }
     }

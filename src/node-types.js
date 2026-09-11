@@ -546,6 +546,11 @@ NODE_TYPES['image'] = {
                 stream: gptImage2 ? config.stream === true : false,
                 nodeId: ctx?.item?.id || null
             };
+            ctx?.validateGenerationRequest?.({
+                kind: 'image', provider, prompt: requestPrompt,
+                fields: { resolutionTier: imageRequestParams.size, quality: imageRequestParams.quality, n: 1 },
+                references: { image: { count: sourceReferences.length } }
+            });
             const generationTask = ctx?.createGenerationTask?.({
                 kind: 'image',
                 provider,
@@ -775,6 +780,18 @@ NODE_TYPES['video'] = {
             : (config.ratio || undefined);
         const videoReferences = toFileList(sources.filter(value => localResourceType(value) === 'video'));
         const audioReferences = toFileList(sources.filter(value => localResourceType(value) === 'file'));
+
+        for (const prompt of prompts) {
+            ctx?.validateGenerationRequest?.({
+                kind: 'video', provider, prompt,
+                fields: { resolutionTier: config.resolution, ratio, duration: Number(config.duration) || 5 },
+                features: {
+                    cameraFixed: config.cameraFixed === true, generateAudio: config.generateAudio === true,
+                    webSearch: config.webSearch === true, watermark: config.watermark === true
+                },
+                references: { image: { count: frames.length }, video: { count: videoReferences.length }, audio: { count: audioReferences.length } }
+            });
+        }
 
         const generationTasks = prompts.map(prompt => ctx?.createGenerationTask?.({
             kind: 'video',

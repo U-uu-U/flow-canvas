@@ -1,0 +1,4 @@
+# 运行时数据：版本文件、state 指针、密码哈希、审计日志。绝不进版本库。
+# （根 .gitignore 里的 `data/` 与 `node_modules/` 已覆盖，这里写出来是为了自解释。）
+data/
+node_modules/

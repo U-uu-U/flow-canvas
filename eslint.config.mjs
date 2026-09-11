@@ -61,6 +61,19 @@ export default [
         languageOptions: { sourceType: 'module' }
     },
 
+    // ── configserver（独立部署的 CONFIG 服务：Node + ESM） ────
+    // 它有自己的 package.json（"type": "module"），但 flat config 不会去推断，
+    // 所以这里显式声明 Node 环境与 ESM，否则 process/console/Buffer/URL 会被误报 no-undef。
+    {
+        files: ['configserver/**/*.mjs'],
+        ignores: ['configserver/**/*.test.mjs'],
+        languageOptions: {
+            ecmaVersion: 2023,
+            sourceType: 'module',
+            globals: { ...globals.node }
+        }
+    },
+
     // ── 测试文件（Node + 部分文件会伪装浏览器全局） ───────────
     {
         files: ['**/*.test.js', '**/*.test.cjs', '**/*.test.mjs'],

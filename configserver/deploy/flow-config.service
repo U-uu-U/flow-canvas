@@ -1,0 +1,45 @@
+[Unit]
+# Flow Canvas 模型能力 CONFIG 服务
+# 占位符由 deploy/install.sh 替换：__APP_DIR__ / __DATA_DIR__ / __USER__ / __PORT__ / __DOMAIN__
+Description=Flow Canvas model config server (artconfig)
+Documentation=file://__APP_DIR__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__APP_DIR__
+
+# 非敏感配置放 EnvironmentFile；密码哈希在 __DATA_DIR__/admin.json（600，仅本服务用户可读），
+# 所以这个文件里不会有任何明文凭据。
+EnvironmentFile=-/etc/default/flow-config
+Environment=CONFIG_HOST=127.0.0.1
+Environment=CONFIG_PORT=__PORT__
+Environment=CONFIG_DATA_DIR=__DATA_DIR__
+Environment=CONFIG_PUBLIC_ORIGIN=https://__DOMAIN__
+
+ExecStart=/usr/bin/env node __APP_DIR__/server.mjs
+
+# 只允许写自己的数据目录，其余一律只读；CONFIG_DATA_DIR 之外无处可写。
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=__DATA_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flow-config
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,212 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://flowcanvas.local/schemas/model-config.schema.json",
+    "title": "Flow Canvas 模型能力 CONFIG",
+    "description": "远端下发的模型能力配置。只校验客户端真正消费的字段；其余字段一律放行，保证服务端可以先于旧客户端增加字段而不被拒绝。",
+    "type": "object",
+    "required": ["schemaVersion", "models"],
+    "properties": {
+        "schemaVersion": { "type": "integer", "minimum": 1 },
+        "revision": { "type": "integer", "minimum": 0 },
+        "updatedAt": { "type": "string" },
+        "source": { "type": "string" },
+        "refreshIntervalMs": { "type": "integer", "minimum": 60000, "maximum": 86400000 },
+        "kinds": { "$ref": "#/definitions/labels" },
+        "fields": { "$ref": "#/definitions/fieldVocabulary" },
+        "capabilities": { "$ref": "#/definitions/capabilityVocabulary" },
+        "models": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/definitions/model" }
+        }
+    },
+    "definitions": {
+        "labels": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+        },
+        "stringList": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+        },
+        "paramNames": {
+            "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "$ref": "#/definitions/stringList" }
+            ]
+        },
+        "fieldVocabulary": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["label", "param"],
+                "properties": {
+                    "label": { "type": "string", "minLength": 1 },
+                    "param": { "$ref": "#/definitions/paramNames" },
+                    "type": {
+                        "enum": ["text", "enum", "range", "duration", "tier", "boolean", "references", "unknown"]
+                    },
+                    "nodeKey": { "type": "string" },
+                    "note": { "type": "string" }
+                }
+            }
+        },
+        "capabilityVocabulary": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["label"],
+                "properties": {
+                    "label": { "type": "string", "minLength": 1 },
+                    "fields": { "$ref": "#/definitions/stringList" },
+                    "kind": { "enum": ["image", "video", "text"] },
+                    "kinds": {
+                        "type": "array",
+                        "items": { "enum": ["image", "video", "text"] },
+                        "minItems": 1
+                    },
+                    "implies": { "$ref": "#/definitions/stringList" },
+                    "note": { "type": "string" }
+                }
+            }
+        },
+        "constraint": {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["type", "values"],
+                    "properties": {
+                        "type": { "const": "enum" },
+                        "values": { "type": "array", "minItems": 1 },
+                        "default": {},
+                        "allowAuto": { "type": "boolean" },
+                        "labels": { "$ref": "#/definitions/labels" },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "min", "max"],
+                    "properties": {
+                        "type": { "const": "range" },
+                        "min": { "type": "number" },
+                        "max": { "type": "number" },
+                        "integer": { "type": "boolean" },
+                        "step": { "type": "number" },
+                        "default": { "type": "number" },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "value"],
+                    "properties": {
+                        "type": { "const": "fixed" },
+                        "value": {},
+                        "unit": { "type": "string" },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "values"],
+                    "properties": {
+                        "type": { "const": "tier" },
+                        "values": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                        "default": { "type": "string" },
+                        "encode": { "enum": ["dimensions", "tier"] },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": { "const": "unknown" },
+                        "reason": { "type": "string" },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": { "const": "unsupported" },
+                        "reason": { "type": "string" },
+                        "field": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                }
+            ]
+        },
+        "capability": {
+            "type": "object",
+            "required": ["supported"],
+            "properties": {
+                "supported": { "type": "boolean" },
+                "max": { "type": "integer", "minimum": 0 },
+                "min": { "type": "integer", "minimum": 0 },
+                "maxBytesPerImage": { "type": "integer", "minimum": 1 },
+                "maxLength": { "type": "integer", "minimum": 1 },
+                "note": { "type": "string" },
+                "reason": { "type": "string" },
+                "params": { "$ref": "#/definitions/stringList" }
+            }
+        },
+        "model": {
+            "type": "object",
+            "required": ["id", "kind", "match"],
+            "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "label": { "type": "string" },
+                "kind": { "enum": ["image", "video", "text"] },
+                "channel": { "type": "string" },
+                "route": { "type": "string" },
+                "priority": { "type": "integer" },
+                "match": {
+                    "type": "object",
+                    "required": ["model"],
+                    "properties": {
+                        "model": { "$ref": "#/definitions/stringList" },
+                        "endpoint": { "type": "string" },
+                        "channel": { "type": "string" }
+                    }
+                },
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "accepts": { "$ref": "#/definitions/stringList" },
+                        "required": { "$ref": "#/definitions/stringList" }
+                    }
+                },
+                "options": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/definitions/constraint" }
+                },
+                "capabilities": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/definitions/capability" }
+                },
+                "prompt": {
+                    "type": "object",
+                    "properties": {
+                        "required": { "type": "boolean" },
+                        "maxLength": { "type": "integer", "minimum": 1 },
+                        "note": { "type": "string" }
+                    }
+                },
+                "limits": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "notes": { "type": "string" }
+            }
+        }
+    }
+}

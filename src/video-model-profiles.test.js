@@ -43,3 +43,9 @@ test('fixed-duration routes retain the same CNY sale and media capabilities', ()
         assert.equal(profile.price.currency, 'CNY');
     }
 });
+
+test('unconnected model families have no bundled capability presets', () => {
+    for (const model of ['seedance-1.5', 'wan-t2v', 'kling-v2', 'vidu']) {
+        assert.equal(getVideoModelProfile({ model }), DEFAULT_VIDEO_MODEL_PROFILE);
+    }
+});
