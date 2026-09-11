@@ -75,3 +75,17 @@ test('direct workspace image records restore dimensions and provider binding', (
 test('ordinary media does not pretend to have generation history', () => {
     assert.equal(records.hasGenerationRecord({ kind: 'media', mediaType: 'image' }), false);
 });
+
+for (const nodeType of ['image', 'video']) {
+    test(`${nodeType} reuse preserves the editable draft instead of the submitted prompt`, () => {
+        const draft = { prompt: '', referenceCitationIds: [], generationUpstreamPrompts: ['original upstream'] };
+        const data = { kind: 'media', mediaType: nodeType, generation: {
+            nodeType, prompt: 'expanded request', config: { prompt: 'expanded request', duration: 30 }, promptDraftConfig: draft
+        } };
+        const reused = records.getGenerationReuseConfig(data);
+        assert.equal(reused.prompt, '');
+        assert.deepEqual(reused.generationUpstreamPrompts, ['original upstream']);
+        assert.equal(reused.duration, 30);
+        assert.equal(records.getGenerationRecord(data).prompt, 'expanded request');
+    });
+}

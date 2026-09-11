@@ -10,6 +10,7 @@ import {
 } from './image-intent-pipeline.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
 import { inferClosestAspectRatio } from './image-node-settings.js';
+import { restoreReferenceCitations, referenceCitationGuide, withoutReferenceCitationGuide, bindReferenceCitations } from './reference-citations.js';
 
 // ============================================================
 // Flow Canvas — Node Type Definitions (节点类型注册表)
@@ -68,9 +69,9 @@ function toFilePath(url) {
 }
 
 function toFileList(value) {
-    return asArray(value)
+    return [...new Set(asArray(value)
         .map(toFilePath)
-        .filter(Boolean)
+        .filter(Boolean))]
         .map(filePath => ({ filePath }));
 }
 
@@ -109,57 +110,6 @@ function asArray(value) {
     return value == null || value === '' ? [] : [value];
 }
 
-function referenceLabelNumber(label) {
-    const value = String(label || '').trim();
-    const chineseNumerals = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
-    const chineseIndex = chineseNumerals.findIndex(numeral => value === `图${numeral}`);
-    if (chineseIndex >= 0) return chineseIndex + 1;
-    const numeric = Number(value.match(/^图(\d+)$/)?.[1]);
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-}
-
-function restoreReferenceCitations(prompt, config = {}) {
-    const text = String(prompt || '');
-    const ids = Array.isArray(config.referenceCitationIds) ? config.referenceCitationIds : [];
-    const labels = Array.isArray(config.referenceCitationLabels) ? config.referenceCitationLabels : [];
-    const offsets = config.referenceCitationOffsets && typeof config.referenceCitationOffsets === 'object'
-        ? config.referenceCitationOffsets
-        : {};
-    const occurrences = Array.isArray(config.referenceCitationOccurrences)
-        ? config.referenceCitationOccurrences
-        : ids.map(id => ({ connectionId: id, offset: offsets[id] }));
-    const insertions = occurrences.map((entry, index) => ({
-        index,
-        label: String(labels[ids.indexOf(entry.connectionId)] || '').trim(),
-        offset: Number(entry.offset)
-    })).filter(entry => entry.label && Number.isFinite(entry.offset) && entry.offset >= 0 && entry.offset <= text.length);
-
-    let restored = text;
-    insertions
-        .sort((left, right) => right.offset - left.offset || right.index - left.index)
-        .forEach(entry => {
-            restored = `${restored.slice(0, entry.offset)}${entry.label}${restored.slice(entry.offset)}`;
-        });
-    return restored;
-}
-
-function referenceCitationGuide(config = {}) {
-    const labels = Array.isArray(config.referenceCitationLabels)
-        ? config.referenceCitationLabels.filter(label => typeof label === 'string' && label.trim())
-        : [];
-    const mappings = labels.map(label => {
-        const normalized = label.trim();
-        const position = referenceLabelNumber(normalized);
-        return position ? `${normalized}=第${position}张` : normalized;
-    });
-    return mappings.length ? `参考图编号与上传顺序一致：${mappings.join('，')}。` : '';
-}
-
-function withoutReferenceCitationGuide(prompt, config = {}) {
-    const guide = referenceCitationGuide(config);
-    const text = String(prompt || '');
-    return guide && text.startsWith(`${guide}\n`) ? text.slice(guide.length + 1) : text;
-}
 
 function plannerProviderSummary(provider = {}) {
     provider = provider || {};
@@ -364,8 +314,8 @@ function expandGenerationPrompts(inputs, config = {}) {
         const prompt = citationPrefix ? `${citationPrefix}\n${agentCompiledPrompt}` : agentCompiledPrompt;
         return Array.from({ length: count }, () => prompt);
     }
-    const upstream = asArray(inputs?.prompt)
-        .filter(value => typeof value === 'string' && value.trim());
+    const inputPrompts = asArray(inputs?.prompt).filter(value => typeof value === 'string' && value.trim());
+    const upstream = inputPrompts.length ? inputPrompts : asArray(config.generationUpstreamPrompts);
     const configured = typeof config.prompt === 'string' && config.prompt.trim()
         ? restoreReferenceCitations(config.prompt, config)
         : '';
@@ -388,6 +338,12 @@ function expandGenerationPrompts(inputs, config = {}) {
         { length: count },
         () => citationPrefix ? `${citationPrefix}\n${prompt}` : prompt
     ));
+}
+
+function generationUserPrompt(prompt, config) {
+    if (!config.agentCompiledPrompt) return withoutReferenceCitationGuide(prompt, config);
+    return expandGenerationPrompts({}, { ...config, agentCompiledPrompt: '', count: 1 })
+        .map(value => withoutReferenceCitationGuide(value, config)).join('\n\n');
 }
 
 /**
@@ -532,6 +488,14 @@ NODE_TYPES['image'] = {
     ],
     async execute(inputs, config, ctx) {
         const sources = collectGenerationSources(inputs, ['prompt', 'reference']);
+        const own = ctx?.item?.filePath;
+        const refs = toFileList(sources.filter(value => localResourceType(value) === 'image'));
+        if (own && !refs.some(r => r.filePath === own)) refs.unshift({ filePath: own });
+        const bound = bindReferenceCitations(config, refs, ctx?.inputContext);
+        config = bound.config;
+        const inputPrompts = sources.filter(value => typeof value === 'string' && !toFilePath(value));
+        if (inputPrompts.length) config.generationUpstreamPrompts = inputPrompts;
+        const promptDraftConfig = JSON.parse(JSON.stringify(config));
         const provider = ctx?.getImageProvider?.(config);
         const midjourneyModel = isMidjourneyImageModel(provider?.model || config.model);
         const prompts = expandGenerationPrompts({
@@ -539,7 +503,6 @@ NODE_TYPES['image'] = {
         }, midjourneyModel ? { ...config, count: 1 } : config);
 
         // 纯素材模式：没有 prompt 但自身有文件，直接透传，不调 API
-        const own = ctx?.item?.filePath;
         if (!prompts.length && own) {
             return { image: 'local-res://' + encodeURIComponent(own) };
         }
@@ -549,8 +512,6 @@ NODE_TYPES['image'] = {
         if (!window.flowCanvas?.mcp?.generateImage) throw new Error('本地生图接口不可用');
 
         // 统一输入口按素材类型自动分流；自身素材仍作为首张参考图。
-        const refs = toFileList(sources.filter(value => localResourceType(value) === 'image'));
-        if (own && !refs.some(r => r.filePath === own)) refs.unshift({ filePath: own });
         const sourceReferences = await prepareGenerationReferences(refs, ctx?.prepareImageReferences);
 
         const resultGroups = await mapWithConcurrency(prompts, midjourneyModel ? 1 : config.concurrency, async prompt => {
@@ -589,6 +550,9 @@ NODE_TYPES['image'] = {
                 kind: 'image',
                 provider,
                 prompt: requestPrompt,
+                promptDraftConfig,
+                referenceBindings: bound.bindings,
+                userPrompt: generationUserPrompt(prompt, config),
                 params: imageRequestParams,
                 sourcePaths: sourceReferences.map(reference => reference.filePath).filter(Boolean)
             });
@@ -603,6 +567,9 @@ NODE_TYPES['image'] = {
                     nodeId: ctx?.item?.id,
                     projectId: generationTask?.projectId,
                     prompt: requestPrompt,
+                    promptDraftConfig,
+                    referenceBindings: bound.bindings,
+                    userPrompt: generationUserPrompt(prompt, config),
                     size: imageRequestParams.size,
                     quality: imageRequestParams.quality,
                     webSearch: config.webSearch === true ? true : undefined,
@@ -704,13 +671,15 @@ NODE_TYPES['image'] = {
                 _generation: {
                     nodeType: 'image',
                     prompt: requestPrompt,
-                    promptDraftConfig: JSON.parse(JSON.stringify(config)),
+                    requestPrompt,
+                    promptDraftConfig,
+                    referenceBindings: bound.bindings,
                     model: imageModel || '',
                     providerId: provider?.id || null,
                     sourceProviderId: provider?.sourceProviderId || provider?.id || null,
                     config: {
                         ...config,
-                        prompt: requestPrompt,
+                        prompt: String(promptDraftConfig.prompt || ''),
                         model: imageModel || config.model || ''
                     },
                     references: sourceReferences.map(reference => ({
@@ -759,6 +728,14 @@ NODE_TYPES['video'] = {
     ],
     async execute(inputs, config, ctx) {
         const sources = collectGenerationSources(inputs, ['prompt', 'image', 'video', 'audio']);
+        const own = ctx?.item?.filePath;
+        const frames = toFileList(sources.filter(value => localResourceType(value) === 'image'));
+        if (!frames.length && own) frames.push({ filePath: own });
+        const bound = bindReferenceCitations(config, frames, ctx?.inputContext);
+        config = bound.config;
+        const inputPrompts = sources.filter(value => typeof value === 'string' && !toFilePath(value));
+        if (inputPrompts.length) config.generationUpstreamPrompts = inputPrompts;
+        const promptDraftConfig = JSON.parse(JSON.stringify(config));
         const prompts = expandGenerationPrompts({
             prompt: sources.filter(value => typeof value === 'string' && !toFilePath(value))
         }, {
@@ -766,7 +743,6 @@ NODE_TYPES['video'] = {
             promptMergeMode: config.promptMergeMode || 'replace'
         });
 
-        const own = ctx?.item?.filePath;
         if (!prompts.length && own) {
             return { video: 'local-res://' + encodeURIComponent(own) };
         }
@@ -777,8 +753,6 @@ NODE_TYPES['video'] = {
         if (!window.flowCanvas?.mcp?.generateVideo) throw new Error('本地视频接口不可用');
 
         // 统一输入口按扩展名分流为图片、视频和音频参考。
-        const frames = toFileList(sources.filter(value => localResourceType(value) === 'image'));
-        if (!frames.length && own) frames.push({ filePath: own });
         const firstFrameContext = (ctx?.inputContext || []).find(entry =>
             entry?.source?.filePath && entry.source.filePath === frames[0]?.filePath
         );
@@ -806,6 +780,9 @@ NODE_TYPES['video'] = {
             kind: 'video',
             provider,
             prompt,
+            promptDraftConfig,
+            referenceBindings: bound.bindings,
+            userPrompt: generationUserPrompt(prompt, config),
             params: {
                 resolution: config.resolution || null,
                 ratio: ratio || null,
@@ -855,6 +832,9 @@ NODE_TYPES['video'] = {
                     nodeId: ctx?.item?.id,
                     projectId: generationTask?.projectId,
                     prompt,
+                    promptDraftConfig,
+                    referenceBindings: bound.bindings,
+                    userPrompt: generationUserPrompt(prompt, config),
                     resolution: config.resolution || undefined,
                     ratio,
                     duration: Number(config.duration) || 5,
@@ -912,12 +892,15 @@ NODE_TYPES['video'] = {
                 _generation: {
                     nodeType: 'video',
                     prompt,
+                    requestPrompt: prompt,
+                    promptDraftConfig,
+                    referenceBindings: bound.bindings,
                     model: provider?.model || config.model || '',
                     providerId: provider?.id || null,
                     sourceProviderId: provider?.sourceProviderId || provider?.id || null,
                     config: {
                         ...config,
-                        prompt,
+                        prompt: String(promptDraftConfig.prompt || ''),
                         ratio: ratio || config.ratio || '',
                         model: provider?.model || config.model || ''
                     },

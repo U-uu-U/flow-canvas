@@ -62,6 +62,7 @@ import {
     getGenerationReuseConfig,
     hasGenerationRecord
 } from './generation-record.js';
+import { withoutReferenceCitationGuide } from './reference-citations.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
 import { checkModelRequest } from './model-config-ui.js';
 import {
@@ -2037,16 +2038,22 @@ export class CanvasManager {
             return true;
         };
 
-        (Array.isArray(record?.references) ? record.references : []).forEach(reference => {
+        const historyReferences = (Array.isArray(record?.references) ? record.references : []).flatMap((reference, index) => {
+            const binding = record?.referenceBindings?.find(entry => entry.position === index + 1);
+            if (!binding) return [reference];
+            const sourceIds = binding.sourceNodeIds?.length ? binding.sourceNodeIds : [binding.sourceNodeId || reference.itemId];
+            return sourceIds.map(itemId => ({ itemId, filePath: binding.filePath, stable: Boolean(itemId) }));
+        });
+        historyReferences.forEach(reference => {
             let item = reference?.itemId ? this.items.get(reference.itemId) : null;
-            if (!item && reference?.filePath) {
+            if (!item && reference?.filePath && !reference.stable) {
                 item = [...this.items.values()].find(candidate =>
                     this._copyableFilePath(candidate?.data) === reference.filePath
                 );
             }
             addItem(item);
         });
-        if (resolved.length) return resolved;
+        if (resolved.length || record?.referenceBindings?.length) return resolved;
 
         (this.graphView?.connections || [])
             .filter(connection => connection?.to?.nodeId === itemId
@@ -2107,9 +2114,7 @@ export class CanvasManager {
 
         const defaults = this._createDefaultOpConfig(nodeType);
         const historicalConfig = getGenerationReuseConfig(source, defaults);
-        const config = nodeType === 'image'
-            ? mergeImageNodePromptConfig(historicalConfig, source)
-            : historicalConfig;
+        const config = mergeImageNodePromptConfig(historicalConfig, source);
         const useSourceAsReference = !record;
         const referenceConnections = record
             ? this._getHistoricalGenerationReferenceConnections(itemId, nodeType, record)
@@ -5522,6 +5527,7 @@ export class CanvasManager {
     }
 
     _hasUpstreamPrompt(data) {
+        if (data.config?.generationUpstreamPrompts?.some(prompt => typeof prompt === 'string' && prompt.trim())) return true;
         return (this.graphView?.connections || []).some(connection =>
             this._isGeneratorInputConnection(data, connection)
             && this._connectionOutputDataType(connection) === 'string'
@@ -8539,6 +8545,11 @@ export class CanvasManager {
         const { data } = entry;
         data.config = data.config || {};
         this._closeGenerationComposer({ commit: true, keepReferencePick: true });
+        if (data.generation && !data.generation.promptDraftConfig
+            && data.config.prompt === data.generation.prompt
+            && withoutReferenceCitationGuide(data.config.prompt, data.config) !== data.config.prompt) {
+            data.config = mergeImageNodePromptConfig(data.config, { generation: data.generation });
+        }
         this._closeGenerationTypeMenu();
         this._closeOpQuickMenu();
         this._closeOpPromptPresetMenu();
@@ -8798,7 +8809,6 @@ export class CanvasManager {
             ? this._getVideoReferenceLimitsForConfig(data.config || {}, profile)
             : null;
         const citationState = this._generationComposerCitationState(data, references);
-        let imageIndex = 0;
         references.forEach(({ connection, source }, index) => {
             const tile = document.createElement('div');
             tile.className = 'generation-composer-reference';
@@ -8807,8 +8817,7 @@ export class CanvasManager {
             // 与 _generationComposerCitationState 共用同一判定，保证磁贴显示的
             // 编号与点击后插入的胶囊编号一致（见 _isCitableImageReference）。
             if (this._isCitableImageReference(source)) {
-                const referenceLabel = this._generationImageReferenceLabel(imageIndex);
-                imageIndex += 1;
+                const referenceLabel = citationState.labelsById.get(connection.id);
                 const image = document.createElement('img');
                 image.src = `local-res://${encodeURIComponent(resolveCanvasFilePath(source.filePath))}`;
                 image.alt = '';
@@ -8904,9 +8913,12 @@ export class CanvasManager {
     _generationComposerCitationState(data, references = this._opReferenceEntries(data)) {
         data.config = data.config || {};
         const imageReferences = references.filter(({ source }) => this._isCitableImageReference(source));
-        const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
+        const imagePaths = [...new Set(imageReferences.map(({ source }) => source.filePath))];
+        const labelsById = new Map(imageReferences.map(({ connection, source }) => [
+            connection.id, this._generationImageReferenceLabel(imagePaths.indexOf(source.filePath))
+        ]));
         const configuredIds = Array.isArray(data.config.referenceCitationIds)
-            ? data.config.referenceCitationIds.filter(id => validIds.has(id))
+            ? data.config.referenceCitationIds
             : [];
         const occurrences = (Array.isArray(data.config.referenceCitationOccurrences)
             ? data.config.referenceCitationOccurrences
@@ -8915,9 +8927,11 @@ export class CanvasManager {
                 offset: data.config.referenceCitationOffsets?.[connectionId]
             }))).map(entry => {
                 if (!entry) return null;
-                const reference = imageReferences.find(({ connection }) => connection.id === entry.connectionId)
-                    || imageReferences.find(({ source }) => source.id === entry.sourceNodeId);
-                return reference ? { ...entry, connectionId: reference.connection.id, sourceNodeId: reference.source.id } : null;
+                const reference = entry.sourceNodeId
+                    ? imageReferences.find(({ source }) => source.id === entry.sourceNodeId)
+                    : imageReferences.find(({ connection }) => connection.id === entry.connectionId);
+                return reference ? { ...entry, connectionId: reference.connection.id, sourceNodeId: reference.source.id, missing: false }
+                    : { ...entry, missing: true };
             }).filter(Boolean);
         data.config.referenceCitationOccurrences = occurrences;
         const selectedIds = new Set(occurrences.map(entry => entry.connectionId));
@@ -8933,15 +8947,11 @@ export class CanvasManager {
             const offset = Number(configuredOffsets[id]);
             if (Number.isFinite(offset) && offset >= 0) offsets[id] = offset;
         });
-        const labels = imageReferences
-            .map(({ connection }, index) => selectedIds.has(connection.id)
-                ? this._generationImageReferenceLabel(index)
-                : null)
-            .filter(Boolean);
+        const labels = orderedIds.map(id => labelsById.get(id));
         data.config.referenceCitationIds = orderedIds;
         data.config.referenceCitationLabels = labels;
         data.config.referenceCitationOffsets = offsets;
-        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets, occurrences };
+        return { imageReferences, labelsById, selectedIds: new Set(orderedIds), orderedIds, labels, offsets, occurrences };
     }
 
     _addGenerationComposerCitation(nodeId, connectionId) {
@@ -8953,7 +8963,7 @@ export class CanvasManager {
         if (index < 0) return;
         const prompt = active.element.querySelector('[data-prompt]');
         const citation = this._createGenerationComposerCitation(
-            nodeId, connectionId, this._generationImageReferenceLabel(index), crypto.randomUUID()
+            nodeId, connectionId, state.labelsById.get(connectionId), crypto.randomUUID()
         );
         this._insertGenerationComposerCitation(prompt, citation, undefined, this._generationComposerPromptSelection(prompt));
         this._syncGenerationComposerCitationsFromPrompt(data, prompt);
@@ -8971,10 +8981,7 @@ export class CanvasManager {
         const prompt = active.element.querySelector('[data-prompt]');
         if (!prompt) return;
         const state = this._generationComposerCitationState(data, references || this._opReferenceEntries(data));
-        const labelsById = new Map(state.imageReferences.map(({ connection }, index) => [
-            connection.id,
-            this._generationImageReferenceLabel(index)
-        ]));
+        const labelsById = state.labelsById;
         const existingById = new Map();
         const occurrencesById = new Map(state.occurrences.map(entry => [entry.id, entry]));
         prompt.querySelectorAll('[data-citation-id]').forEach(citation => {
@@ -8985,9 +8992,11 @@ export class CanvasManager {
                 return;
             }
             citation.dataset.citationId = occurrence.connectionId;
-            const label = labelsById.get(occurrence.connectionId);
+            const label = occurrence.missing ? '引用失联' : labelsById.get(occurrence.connectionId);
             citation.textContent = label;
-            citation.title = `取消引用${label}`;
+            citation.classList.toggle('is-missing', occurrence.missing === true);
+            citation.dataset.referencePath = state.imageReferences.find(entry => entry.source.id === occurrence.sourceNodeId)?.source.filePath || '';
+            citation.title = occurrence.missing ? '素材已失联，点击移除此引用' : `取消引用${label}`;
             citation.setAttribute('aria-label', `取消引用${label}`);
             existingById.set(occurrenceId, citation);
         });
@@ -8995,8 +9004,11 @@ export class CanvasManager {
         const missing = state.occurrences.filter(entry => !existingById.has(entry.id));
         for (let index = missing.length - 1; index >= 0; index -= 1) {
             const entry = missing[index];
-            const label = labelsById.get(entry.connectionId);
+            const label = entry.missing ? '引用失联' : labelsById.get(entry.connectionId);
             const pill = this._createGenerationComposerCitation(nodeId, entry.connectionId, label, entry.id);
+            pill.classList.toggle('is-missing', entry.missing === true);
+            if (entry.missing) pill.title = '素材已失联，点击移除此引用';
+            pill.dataset.referencePath = state.imageReferences.find(reference => reference.source.id === entry.sourceNodeId)?.source.filePath || '';
             this._insertGenerationComposerCitation(
                 prompt,
                 pill,
@@ -9020,7 +9032,26 @@ export class CanvasManager {
         pill.textContent = label;
         pill.title = `取消引用${label}`;
         pill.setAttribute('aria-label', `取消引用${label}`);
+        const closePreview = () => pill.querySelector('.generation-citation-preview')?.remove();
+        pill.addEventListener('mouseenter', () => {
+            closePreview();
+            const filePath = pill.dataset.referencePath;
+            if (!filePath) return;
+            const preview = document.createElement('img');
+            preview.className = 'generation-citation-preview';
+            preview.setAttribute('popover', 'manual');
+            preview.alt = '';
+            preview.src = 'local-res://' + encodeURIComponent(filePath);
+            preview.addEventListener('error', closePreview, { once: true });
+            pill.appendChild(preview);
+            const bounds = pill.getBoundingClientRect();
+            preview.style.left = `${Math.max(8, Math.min(bounds.left, window.innerWidth - 208))}px`;
+            preview.style.top = `${bounds.top > 166 ? bounds.top - 158 : bounds.bottom + 8}px`;
+            preview.showPopover();
+        });
+        pill.addEventListener('mouseleave', closePreview);
         pill.addEventListener('pointerdown', event => {
+            closePreview();
             event.preventDefault();
             event.stopPropagation();
         });
@@ -9124,14 +9155,15 @@ export class CanvasManager {
     _syncGenerationComposerCitationsFromPrompt(data, prompt) {
         const references = this._opReferenceEntries(data);
         const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
-        const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
         const measuredOffsets = this._generationComposerCitationOffsets(prompt);
+        const previous = new Map((data.config.referenceCitationOccurrences || []).map(entry => [entry.id, entry]));
         data.config.referenceCitationOccurrences = [...prompt.querySelectorAll('[data-citation-id]')]
-            .filter(citation => validIds.has(citation.dataset.citationId))
             .map(citation => ({
+                ...previous.get(citation.dataset.citationOccurrenceId),
                 id: citation.dataset.citationOccurrenceId,
                 connectionId: citation.dataset.citationId,
-                sourceNodeId: imageReferences.find(({ connection }) => connection.id === citation.dataset.citationId)?.source.id,
+                sourceNodeId: previous.get(citation.dataset.citationOccurrenceId)?.sourceNodeId
+                    || imageReferences.find(({ connection }) => connection.id === citation.dataset.citationId)?.source.id,
                 offset: measuredOffsets[citation.dataset.citationOccurrenceId]
             }));
         const state = this._generationComposerCitationState(data, references);
@@ -9236,16 +9268,9 @@ export class CanvasManager {
         }
         rows.forEach(row => row.sort((a, b) => (a.routeLabel || '') < (b.routeLabel || '') ? -1
             : (a.routeLabel || '') > (b.routeLabel || '') ? 1 : 0));
-        const splitSeedanceSources = new Set(rows
-            .filter(row => row.length === 2 && row[0].routeGroup === 'seedance25-fixed'
-                && row[0].routeLabel !== row[1].routeLabel)
-            .map(row => row[0].sourceProviderId));
-        const visibleRows = rows.filter(row => !(row.length === 1
-            && row[0].model?.toLowerCase() === 'seedance_v2.5'
-            && splitSeedanceSources.has(row[0].sourceProviderId)));
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            const matches = visibleRows.filter(row => row.some(provider => !query
+            const matches = rows.filter(row => row.some(provider => !query
                 || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
@@ -9264,14 +9289,14 @@ export class CanvasManager {
                     const group = document.createElement('div');
                     group.className = 'generation-composer-model-routes';
                     group.setAttribute('role', 'group');
-                    group.setAttribute('aria-label', 'Seedance 2.5 线路选择');
+                    group.setAttribute('aria-label', 'Seedance 2.5 固定 30 秒线路选择');
                     const current = row.find(provider => provider.id === data.config?.providerId
                         || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model));
                     const trigger = document.createElement('button');
                     trigger.type = 'button';
                     trigger.className = 'generation-composer-route-trigger';
                     trigger.classList.toggle('selected', !!current);
-                    trigger.innerHTML = '<span><strong>Seedance 2.5</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
+                    trigger.innerHTML = '<span><strong>Seedance 2.5 · 固定 30 秒</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
                     trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
                     const panel = document.createElement('div');
                     panel.className = 'generation-composer-route-panel';
@@ -9348,7 +9373,7 @@ export class CanvasManager {
                         ? provider.routeLabel + (provider.routeLabel === '线路一' ? '（推荐）' : '')
                         : provider.model) || '未命名模型';
                     const source = document.createElement('small');
-                    source.textContent = provider.name || '未命名 API';
+                    source.textContent = (split ? provider.model : provider.name) || '未命名 API';
                     copy.append(model, source);
                     const marker = document.createElement('span');
                     marker.textContent = selected ? '当前' : '›';
@@ -10195,6 +10220,11 @@ export class CanvasManager {
         const data = this.items.get(nodeId)?.data;
         if (active?.nodeId !== nodeId || !data) return;
         const message = active.element.querySelector('[data-message]');
+        if (this._generationComposerCitationState(data).occurrences.some(entry => entry.missing)) {
+            message.textContent = '引用素材已失联，请重新连接素材或移除失联胶囊';
+            message.dataset.state = 'error';
+            return;
+        }
         const hasUpstreamPrompt = this._hasUpstreamPrompt(data);
         if (!String(data.config?.prompt || '').trim() && !hasUpstreamPrompt) {
             message.textContent = '请先填写提示词，或连接一个文本节点';

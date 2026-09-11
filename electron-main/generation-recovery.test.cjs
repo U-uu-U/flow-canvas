@@ -13,6 +13,8 @@ function setup(t) {
         recoveryDirectory: path.join(directory, 'records') });
     bridge.attachRecoveredGeneration = async () => ({ nodeId: 'node', projectId: 'original' });
     const body = bridge._rememberGeneration('image', { clientTaskId: 'local', nodeId: 'node',
+        promptDraftConfig: { prompt: 'original draft', referenceCitationOccurrences: [{ id: 'citation', sourceNodeId: 'ref-node', offset: 2 }] },
+        referenceBindings: [{ position: 1, sourceNodeId: 'ref-node', filePath: 'original.png' }], userPrompt: 'original draft',
         prompt: 'two images', quality: 'high', size: '2048x2048', sourceReferences: [{ filePath: 'reference.png' }],
         providerConfig: { id: 'api', endpoint: 'https://original.test/v1', model: 'mj', apiKey: 'secret' } });
     bridge._rememberSubmitted(body, { remoteTaskId: 'remote', model: 'mj', targetDir: directory, location: '/v1/custom/remote' });
@@ -28,6 +30,9 @@ test('journal survives restart, preserves Location and never saves API keys', t 
     assert.equal(bridge.recoveryStore.get('local').projectId, 'original');
     assert.equal(restored.get('local').params.quality, 'high');
     assert.deepEqual(restored.get('local').sourcePaths, ['reference.png']);
+    assert.deepEqual(restored.get('local').promptDraftConfig, body.promptDraftConfig);
+    assert.deepEqual(restored.get('local').referenceBindings, body.referenceBindings);
+    assert.equal(restored.get('local').userPrompt, 'original draft');
 });
 
 test('immediate recovery after cancel uses original route and never submits generation', async t => {
@@ -40,11 +45,14 @@ test('immediate recovery after cancel uses original route and never submits gene
         assert.equal(request.providerConfig.endpoint, 'https://original.test/v1');
         assert.equal(request.location, '/v1/custom/remote');
         assert.equal(request.projectId, 'original');
+        assert.deepEqual(request.promptDraftConfig, body.promptDraftConfig);
+        assert.deepEqual(request.referenceBindings, body.referenceBindings);
         const filePath = path.join(directory, 'result.png');
         fs.writeFileSync(filePath, 'test');
         return { filePath, filePaths: [filePath], taskId: request.taskId };
     };
-    const request = { ...body, providerConfig: { ...body.providerConfig, endpoint: 'https://changed.test/v1' } };
+    const request = { ...body, promptDraftConfig: { prompt: 'stale renderer' },
+        providerConfig: { ...body.providerConfig, endpoint: 'https://changed.test/v1' } };
     const result = await bridge.recoverGenerationFromRenderer(request);
     assert.equal(result.recovered, true);
     await bridge.recoverGenerationFromRenderer(request);

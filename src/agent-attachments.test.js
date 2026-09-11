@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectUpstreamMediaAttachments, collectUpstreamPromptContext } from './agent-attachments.js';
 
+test('Agent context reuses saved upstream text without mixing it with live text', () => {
+    const target = { id: 'target', kind: 'op', nodeType: 'image', config: { prompt: '', generationUpstreamPrompts: ['saved'] } };
+    assert.equal(collectUpstreamPromptContext({ targetNodeId: 'target', items: [target] }).effectivePrompt, 'saved');
+    const source = { id: 'text', kind: 'op', nodeType: 'text', config: { text: 'live' } };
+    const context = collectUpstreamPromptContext({ targetNodeId: 'target', items: [target, source],
+        connections: [{ from: { nodeId: 'text' }, to: { nodeId: 'target' } }] });
+    assert.equal(context.effectivePrompt, 'live');
+});
+
 test('collects and de-duplicates transitive upstream media in nearest-first order', () => {
     const items = [
         { id: 'target', kind: 'op', nodeType: 'image' },

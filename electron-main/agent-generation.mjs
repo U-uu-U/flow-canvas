@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { topoOrder, getPorts } from '../src/graph-model.js';
 import { expandGenerationPrompts } from '../src/node-types.js';
+import { bindReferenceCitations, withoutReferenceCitationGuide } from '../src/reference-citations.js';
 import { getGeneratorResultEntries, appendGeneratorResult } from '../src/generator-result-stack.js';
 import { resolveImageDimensions, resolveGenerationDisplaySize, inferClosestAspectRatio } from '../src/image-node-settings.js';
 import { inferProviderCapability } from '../src/provider-capabilities.js';
@@ -11,6 +12,15 @@ import adapters from './video-provider-adapters.js';
 import { mediaKind } from './agent-media.cjs';
 
 const copy = value => JSON.parse(JSON.stringify(value));
+function bindAgentReferences(config, references, connections) {
+    const images = references.filter(reference => reference.kind === 'image')
+        .map(reference => ({ ...reference, filePath: reference.filePath || `pending:${reference.nodeId}` }));
+    const files = [...new Set(images.map(reference => reference.filePath))].map(filePath => ({ filePath }));
+    return bindReferenceCitations(config, files, images.map(reference => ({
+        connectionId: connections.find(connection => connection.from.nodeId === reference.nodeId)?.id,
+        source: { id: reference.nodeId, filePath: reference.filePath }
+    })));
+}
 const error = (code, message) => Object.assign(new Error(message), { code });
 const fingerprint = (node, connections) => crypto.createHash('sha256').update(JSON.stringify({
     id: node.id, kind: node.kind, nodeType: node.nodeType, config: node.config,
@@ -81,14 +91,11 @@ export class AgentGeneration {
                 continue;
             }
             if (!targets.has(id) && this._pathFor(node)) continue;
-            const config = copy(node.config || {});
+            let config = copy(node.config || {});
             if (node.id === run.source?.nodeId) Object.assign(config, run.source.parameters || {});
             // The orchestrator has already compiled the image intent into the node prompt.
             const count = Number(config.count ?? 1);
             if (!Number.isInteger(count) || count < 1 || count > 8) throw error('COUNT_LIMIT', '单节点每批次需要 1 到 8 次生成');
-            const prompts = expandGenerationPrompts({ prompt: upstreamText }, { ...config, count });
-            if (!prompts.length) throw error('PROMPT_REQUIRED', '生成节点缺少提示词');
-            if (!Number.isInteger(count) || count < 1 || count > 8 || prompts.length > 8) throw error('COUNT_LIMIT', '单节点每批次最多 8 次生成');
             const provider = this.resolveProvider(config, node.nodeType);
             if (node.nodeType === 'image' && config.quality && !['auto', 'low', 'medium', 'high'].includes(config.quality))
                 throw error('INVALID_QUALITY', '图片质量参数无效');
@@ -109,6 +116,11 @@ export class AgentGeneration {
             }
             const references = inputs.filter(n => !texts.has(n.id)).map(n => ({ nodeId: n.id, filePath: steps.some(step => step.nodeId === n.id) ? '' : this._pathFor(n),
                 kind: n.kind === 'op' ? n.nodeType : n.mediaType || mediaKind(n.filePath || ''), width: n.width, height: n.height }));
+            config = bindAgentReferences(config, references, project.connections.filter(c => c.kind !== 'history' && c.to.nodeId === id)).config;
+            if (upstreamText.length) config.generationUpstreamPrompts = upstreamText;
+            const prompts = expandGenerationPrompts({ prompt: upstreamText }, { ...config, count });
+            if (!prompts.length) throw error('PROMPT_REQUIRED', '生成节点缺少提示词');
+            if (prompts.length > 8) throw error('COUNT_LIMIT', '单节点每批次最多 8 次生成');
             const limits = profile?.referenceLimits;
             if (limits) for (const kind of ['image', 'video', 'audio']) {
                 if (references.filter(r => r.kind === kind).length > (limits[kind] || 0)) throw error('REFERENCE_LIMIT', `该模型的 ${kind} 参考素材数量超限`);
@@ -157,6 +169,22 @@ export class AgentGeneration {
             return { ...ref, filePath };
         });
         const config = step.config;
+        const outputReferences = references.map(reference => {
+            const generatedSource = run.results?.find(result => result.sourceNodeId === reference.nodeId && result.filePaths?.includes(reference.filePath));
+            return { ...reference, nodeId: generatedSource?.nodeIds?.[0] || reference.nodeId };
+        });
+        const draft = copy(config);
+        if (step.nodeId === run.source?.nodeId && typeof run.source.prompt === 'string') draft.prompt = run.source.prompt;
+        for (const occurrence of draft.referenceCitationOccurrences || []) {
+            const index = references.findIndex(reference => reference.nodeId === occurrence.sourceNodeId);
+            if (index >= 0) occurrence.sourceNodeId = outputReferences[index].nodeId;
+        }
+        const bound = bindAgentReferences(draft, outputReferences,
+            project.connections.filter(connection => connection.kind !== 'history' && connection.to.nodeId === step.nodeId));
+        const promptDraftConfig = bound.config;
+        const userPrompt = step.nodeId === run.source?.nodeId
+            ? run.source.effectivePrompt || run.source.prompt || withoutReferenceCitationGuide(step.prompt, config)
+            : withoutReferenceCitationGuide(step.prompt, config);
         const first = references.find(r => r.kind === 'image');
         const ratio = !config.ratio || config.ratio === 'adaptive' ? inferClosestAspectRatio(first?.width, first?.height,
             step.kind === 'video' ? getVideoModelProfile(provider).ratios.filter(r => r !== 'adaptive') : ['1:1', '16:9', '9:16', '4:3', '3:4'], '16:9') : config.ratio;
@@ -184,15 +212,14 @@ export class AgentGeneration {
             current.items.push({ id: outputId, kind: 'op', nodeType: step.kind, title: step.title,
                 x: step.x + step.width + 64, y: step.y + run.steps.indexOf(step) * (step.height + 48),
                 width: first?.width || display.width || step.width, height: first?.height || display.height || step.height,
-                config: { ...config, prompt: step.prompt, count: 1, model: step.model }, runStatus: 'running',
+                config: { ...promptDraftConfig, count: 1, model: step.model }, runStatus: 'running',
                 runStartedAt: Date.now(),
                 metadata: { agentRunId: run.id, agentStepId: step.id } });
             const parent = current.items.find(node => node.id === step.nodeId);
             current.connections.push({ id: `history-${step.id}`, kind: 'history',
                 from: { nodeId: step.nodeId, port: getPorts(parent).outputs[0]?.name || step.kind }, to: { nodeId: outputId, port: 'source' } });
-            references.forEach((reference, index) => {
-                const generatedSource = run.results?.find(result => result.sourceNodeId === reference.nodeId && result.filePaths?.includes(reference.filePath));
-                const sourceId = generatedSource?.nodeIds?.[0] || reference.nodeId;
+            outputReferences.forEach((reference, index) => {
+                const sourceId = reference.nodeId;
                 const source = current.items.find(node => node.id === sourceId);
                 if (source) current.connections.push({ id: `reference-${step.id}-${index}`, kind: 'flow',
                     from: { nodeId: sourceId, port: getPorts(source).outputs[0]?.name || 'source' }, to: { nodeId: outputId, port: 'source' } });
@@ -202,8 +229,9 @@ export class AgentGeneration {
             provider: step.kind === 'video' ? 'openai-video' : 'openai', providerConfig: provider,
             noSubmissionRetry: true, requestId: step.id,
             clientTaskId: step.id, prompt: step.prompt, targetDir, addToCanvas: false,
+            promptDraftConfig, referenceBindings: bound.bindings, userPrompt,
             projectId: run.projectId, nodeId: outputId,
-            sourceReferences: references.filter(r => r.kind === 'image').map(r => ({ filePath: r.filePath })),
+            sourceReferences: bound.bindings.map(r => ({ filePath: r.filePath })),
             videoReferences: references.filter(r => r.kind === 'video').map(r => ({ filePath: r.filePath })),
             audioReferences: references.filter(r => r.kind === 'audio').map(r => ({ filePath: r.filePath })),
             size: config.size || `${dimensions.width}x${dimensions.height}`, quality: config.quality || 'high',
@@ -250,8 +278,12 @@ export class AgentGeneration {
             output.filePath = filePaths[0];
             output.mediaType = result.mediaType || step.kind;
             output.generation = { kind: output.mediaType, prompt: step.prompt, originalPrompt: step.originalPrompt,
+                nodeType: step.kind, requestPrompt: step.prompt, promptDraftConfig, referenceBindings: bound.bindings,
                 model: step.model, providerId: provider.id, sourceProviderId: provider.sourceProviderId,
-                config: { ...config, prompt: step.prompt }, references: references.map(r => ({ itemId: r.nodeId, filePath: r.filePath })),
+                config: { ...promptDraftConfig }, references: [
+                    ...bound.bindings.map(r => ({ itemId: r.sourceNodeId, filePath: r.filePath })),
+                    ...outputReferences.filter(r => r.kind !== 'image').map(r => ({ itemId: r.nodeId, filePath: r.filePath }))
+                ],
                 generatedAt: Date.now(), taskId: result.taskId || step.remoteTaskId, agentRunId: run.id };
             for (const filePath of filePaths) appendGeneratorResult(output, { filePath, item: { filePath, mediaType: output.mediaType, generation: output.generation } });
         });
