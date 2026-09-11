@@ -47,7 +47,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         assert.equal(await split.count(), 1);
         assert.equal(await split.locator('.generation-composer-route-trigger strong').innerText(), 'Seedance 2.5');
         assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
-        assert.deepEqual(await split.locator('.generation-composer-route-options strong').allTextContents(), ['\u7ebf\u8def\u4e00', '\u7ebf\u8def\u4e8c']);
+        assert.deepEqual(await split.locator('.generation-composer-route-options strong').allTextContents(), ['\u7ebf\u8def\u4e00\uff08\u63a8\u8350\uff09', '\u7ebf\u8def\u4e8c']);
         assert.equal(await page.locator('.generation-composer-model-options > .generation-composer-model-option').count(), 2);
         assert.equal(await options.filter({ hasText: 'seedance_v2.5' }).count(), 0);
         for (const [index, model] of [[0, 'sd2.5-route1'], [1, 'sd2.5']]) {
@@ -75,6 +75,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         }
         await split.locator('.generation-composer-route-trigger').hover();
         await page.mouse.move(900, 600);
+        await page.waitForFunction(() => document.querySelector('.generation-composer-route-trigger').getAttribute('aria-expanded') === 'false');
         assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
         await split.locator('.generation-composer-route-trigger').focus();
         assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'true');
@@ -82,6 +83,30 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         assert.equal(await split.locator('.generation-composer-route-trigger').getAttribute('aria-expanded'), 'false');
         await page.locator('.generation-composer-popover-search input').fill('sd2.5-route1');
         assert.equal(await options.count(), 2);
+        await page.evaluate(() => {
+            const { fixture, providers } = window.routeFixture;
+            fixture._closeGenerationComposerPopover(fixture._generationComposer);
+            providers.unshift(...Array.from({ length: 8 }, (_, index) => ({ id: `extra-${index}`, model: `video-${index}`, name: 'Video API' })));
+            fixture._showGenerationComposerModelMenu('node', {});
+        });
+        await split.locator('.generation-composer-route-trigger').evaluate(trigger => {
+            const list = trigger.closest('.generation-composer-model-options');
+            list.scrollTop += trigger.getBoundingClientRect().bottom - list.getBoundingClientRect().bottom;
+        });
+        await split.locator('.generation-composer-route-trigger').hover();
+        await page.waitForFunction(() => getComputedStyle(document.querySelector('.generation-composer-route-panel')).opacity === '1');
+        await split.evaluate(element => Promise.all(element.getAnimations({ subtree: true }).map(animation => animation.finished)));
+        const expanded = await split.locator('.generation-composer-route-panel').boundingBox();
+        const secondRoute = split.locator('.generation-composer-model-option').nth(1);
+        const secondBounds = await secondRoute.boundingBox();
+        assert.ok(secondBounds.y + secondBounds.height <= expanded.y + expanded.height + 1,
+            'the detached dropdown must contain both routes');
+        const modelMenu = await page.locator('.generation-composer-model-popover').boundingBox();
+        if (process.env.FLOW_ROUTE_SCREENSHOT) await page.screenshot({ path: `${process.env.FLOW_ROUTE_SCREENSHOT}-long-list.png`, animations: 'disabled' });
+        assert.ok(secondBounds.y + secondBounds.height > modelMenu.y + modelMenu.height,
+            `the route dropdown should extend outside the model menu: ${JSON.stringify({ expanded, secondBounds, modelMenu })}`);
+        await secondRoute.click();
+        assert.equal(await page.evaluate(() => window.routeFixture.data.config.model), 'sd2.5');
         await page.evaluate(() => {
             const { fixture, providers } = window.routeFixture;
             fixture._closeGenerationComposerPopover(fixture._generationComposer);
