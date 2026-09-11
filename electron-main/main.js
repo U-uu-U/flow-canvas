@@ -3077,12 +3077,24 @@ async function downloadImageFromUrl(url, targetDir, redirectDepth = 0) {
 }
 
 // ── 应用生命周期 ────────────────────────────────────────
-app.whenReady().then(async () => {
-    // 监听本地文件加载
-    protocol.handle('local-res', handleLocalResourceRequest);
+let applicationStartupPromise = null;
 
-    await initServices();
-    createWindow();
+function startApplication() {
+    applicationStartupPromise ??= (async () => {
+        await app.whenReady();
+
+        // 监听本地文件加载
+        protocol.handle('local-res', handleLocalResourceRequest);
+        await initServices();
+
+        if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    })();
+    return applicationStartupPromise;
+}
+
+void startApplication().catch(error => {
+    safeWrite(process.stderr, ['[Main] Application startup failed:', error]);
+    dialog.showErrorBox('Flow Canvas 启动失败', error?.stack || error?.message || String(error));
 });
 
 let agentShutdownPromise = null;
@@ -3121,9 +3133,13 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        restoreMainWindowFromOrb();
-    } else if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-    }
+    void startApplication().then(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            restoreMainWindowFromOrb();
+        } else if (BrowserWindow.getAllWindows().length === 0) {
+            createWindow();
+        }
+    }).catch(error => {
+        safeWrite(process.stderr, ['[Main] Application activation failed:', error]);
+    });
 });
