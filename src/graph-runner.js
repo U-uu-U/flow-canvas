@@ -92,21 +92,34 @@ export class GraphRunner {
             return { ok: false, reason: '该节点链正在执行' };
         }
 
-        // 只锁本次运行真正涉及的节点。互不相干的链可并发，共享上游的链
-        // 仍会被拒绝，避免同一节点的状态和结果被两个运行互相覆盖。
-        order.forEach(id => this.activeNodes.add(id));
-        const runState = { targetId, order, items, canceled: false };
+        // Shared references are read per run; only nodes doing work own status and cancellation.
+        const readOnlyInputs = new Map(order.flatMap(id => {
+            if (id === targetId) return [];
+            const item = items.get(id);
+            const override = options?.configOverrides instanceof Map
+                ? options.configOverrides.get(id) : options?.configOverrides?.[id];
+            const config = { ...item?.config, ...override };
+            const product = generatorResultOutput(item);
+            const readOnly = item?.kind !== 'op'
+                || Object.keys(product).length > 0
+                || (item.nodeType === 'text' && !config.useAi);
+            return readOnly ? [[id, { item: { ...item, config }, product }]] : [];
+        }));
+        const ownedNodes = order.filter(id => !readOnlyInputs.has(id));
+        ownedNodes.forEach(id => this.activeNodes.add(id));
+        const runState = { targetId, order, ownedNodes, items, canceled: false };
         this.activeRuns.set(targetId, runState);
         const runCache = new Map();
 
-        order.forEach(id => {
+        ownedNodes.forEach(id => {
             const item = items.get(id);
             if (item) this._setStatus(item, STATUS.QUEUED);
         });
 
         try {
             for (const id of order) {
-                const item = items.get(id);
+                const source = readOnlyInputs.get(id);
+                const item = source?.item || items.get(id);
                 if (!item) continue;
 
                 if (runState.canceled) {
@@ -115,15 +128,15 @@ export class GraphRunner {
                 }
 
                 // 上游失败时该节点已被标 error，跳过
-                if (item.runStatus === STATUS.ERROR) continue;
+                if (!readOnlyInputs.has(id) && item.runStatus === STATUS.ERROR) continue;
 
-                this._setStatus(item, STATUS.RUNNING);
+                if (!readOnlyInputs.has(id)) this._setStatus(item, STATUS.RUNNING);
 
                 try {
-                    const configOverride = options?.configOverrides instanceof Map
+                    const configOverride = source ? null : options?.configOverrides instanceof Map
                         ? options.configOverrides.get(id)
                         : options?.configOverrides?.[id];
-                    const persistedProduct = id !== targetId ? generatorResultOutput(item) : {};
+                    const persistedProduct = source ? source.product : id !== targetId ? generatorResultOutput(item) : {};
                     const reusedProduct = Object.keys(persistedProduct).length > 0;
                     const output = reusedProduct
                         ? persistedProduct
@@ -136,7 +149,7 @@ export class GraphRunner {
                     // await：落地是异步的（要建卡片再连溯源边），不等的话
                     // 下一个节点可能在结果节点存在之前就跑起来。
                     // Keep downloaded outputs cached even if canvas persistence fails.
-                    if (!reusedProduct && item.kind === 'op' && typeof this.ctx.onResult === 'function') {
+                    if (!readOnlyInputs.has(id) && !reusedProduct && item.kind === 'op' && typeof this.ctx.onResult === 'function') {
                         try {
                             const landedOutputs = Array.isArray(output?._batchResults)
                                 ? output._batchResults
@@ -152,7 +165,7 @@ export class GraphRunner {
                         }
                     }
                     if (runState.canceled) throw cancellationError();
-                    this._setStatus(item, STATUS.DONE);
+                    if (!readOnlyInputs.has(id)) this._setStatus(item, STATUS.DONE);
                 } catch (err) {
                     const message = err?.message || String(err);
                     if (runState.canceled || isCancellationError(err)) {
@@ -160,12 +173,12 @@ export class GraphRunner {
                         this._setStatus(target, STATUS.CANCELED, '生成任务已中断');
                         return { ok: false, canceled: true, reason: '生成任务已中断', ran: order };
                     }
-                    this._setStatus(item, STATUS.ERROR, message);
+                    if (!readOnlyInputs.has(id)) this._setStatus(item, STATUS.ERROR, message);
 
                     // 级联标错下游，并跳过它们
                     downstreamOf(id, connections).forEach(downId => {
                         const down = items.get(downId);
-                        if (down && order.includes(downId)) {
+                        if (down && ownedNodes.includes(downId)) {
                             this._setStatus(down, STATUS.ERROR, `上游节点「${this._label(item)}」执行失败`);
                         }
                     });
@@ -174,13 +187,13 @@ export class GraphRunner {
                 }
             }
         } finally {
-            order.forEach(id => {
+            ownedNodes.forEach(id => {
                 const item = items.get(id);
                 if ([STATUS.QUEUED, STATUS.RUNNING].includes(item?.runStatus)) {
                     this._setStatus(item, STATUS.CANCELED, runState.canceled ? '生成任务已中断' : '本次任务已停止，节点未执行');
                 }
             });
-            order.forEach(id => this.activeNodes.delete(id));
+            ownedNodes.forEach(id => this.activeNodes.delete(id));
             this.activeRuns.delete(targetId);
         }
 
@@ -234,10 +247,10 @@ export class GraphRunner {
 
     async cancel(targetId) {
         const runState = this.activeRuns.get(targetId)
-            || [...this.activeRuns.values()].find(run => run.order.includes(targetId));
+            || [...this.activeRuns.values()].find(run => run.ownedNodes.includes(targetId));
         if (!runState || runState.canceled) return false;
         runState.canceled = true;
-        const pendingIds = runState.order.filter(id =>
+        const pendingIds = runState.ownedNodes.filter(id =>
             [STATUS.QUEUED, STATUS.RUNNING].includes(runState.items.get(id)?.runStatus));
         pendingIds.forEach(id => this._setStatus(runState.items.get(id), STATUS.CANCELED, '生成任务已中断'));
         const canceled = await Promise.allSettled(pendingIds.map(id => Promise.resolve().then(() => this.ctx.cancelGenerationTasks?.(id))));
