@@ -34,6 +34,24 @@ test('body timeout is distinguished from user cancellation and includes uncertai
     assert.match(error.message, /不要连续重复生成/);
 });
 
+test('unknown submission outcome carries a structured marker, not just prose', () => {
+    // 渲染层据 submissionUnknown 把任务归为「结果未知/待重传」，而不是
+    // 「确定失败」——后者会给出「重新提交会创建新任务」的建议，
+    // 与本条消息末尾的告诫矛盾，且可能重复计费。
+    const timeout = imageRequestFailure(new Error('aborted'), {
+        requestId: 'r1', startedAt: 0, now: 301000, payloadBytes: 0, imageCount: 1,
+        phase: '读取结果', timedOut: true
+    });
+    assert.equal(timeout.submissionUnknown, true);
+    assert.equal(timeout.timedOut, true);
+
+    const emptyResponse = imageRequestFailure(new Error('net::ERR_EMPTY_RESPONSE'), {
+        requestId: 'r2', startedAt: 0, now: 5000, payloadBytes: 0, imageCount: 1, phase: '等待响应'
+    });
+    assert.equal(emptyResponse.submissionUnknown, true);
+    assert.equal(emptyResponse.timedOut, false);
+});
+
 test('empty POST response is not resubmitted and diagnostic excludes credentials', async () => {
     let calls = 0;
     const run = imageRequest(async () => { calls++; throw new Error('net::ERR_EMPTY_RESPONSE'); });

@@ -3764,7 +3764,12 @@ export class CanvasManager {
                 // Keep video controls screen-sized after snap resizing.
                 const controlsGroup = movedGroup.findOne('.videoControls');
                 const coverControls = movedGroup.findOne('.videoCoverControls');
-                if (controlsGroup && movedGroup.attrs.filePath.match(/\.(mp4|mov|avi|mkv|wmv|flv|webm)$/i)) {
+                // movedGroup.attrs.filePath 只存在于媒体节点；生成节点没有该属性
+                // （见 _createOpNode 的 name:'nodeGroup'），而它的结果预览同样会挂
+                // 'videoControls'（_addGeneratorVideoControls）。旧写法直接 .match()
+                // 会在拖动带结果的视频生成节点并触发吸附改尺寸时抛 TypeError。
+                const movedFilePath = String(movedGroup.attrs.filePath || '');
+                if (controlsGroup && /\.(mp4|mov|avi|mkv|wmv|flv|webm)$/i.test(movedFilePath)) {
                     this._layoutVideoControlGroup(controlsGroup, snappedW, snappedH);
                 }
                 if (coverControls) this._layoutVideoControlGroup(coverControls, snappedW, snappedH);
@@ -4225,6 +4230,14 @@ export class CanvasManager {
 
     // ── 清空画布上所有卡片（用于切换文件夹组） ──
     clearAll(options = {}) {
+        // 生成面板必须在清空之前关闭：它捕获的是打开时刻的 data 对象，
+        // 而调用方（撤销/重做、切换文件夹组）会用快照深拷贝替换 storeData.items，
+        // renderInitialItems 再以新对象重建 this.items。面板若继续存活，用户
+        // 之后输入的内容只会写进那个已经游离的旧对象，保存时序列化的却是新对象，
+        // 输入静默丢失。同类浮层一并关掉，避免"幽灵面板"指向已销毁的节点。
+        this._closeGenerationComposer({ commit: true });
+        this._closeOpQuickMenu();
+        this._closeGenerationTypeMenu();
         this._closeImageCrop({ silent: true });
         if (!options.preserveTransients) this.clearVideoGenerationPlaceholders();
         this.graphView?.closeConnectionNodeMenu?.();
@@ -8686,6 +8699,13 @@ export class CanvasManager {
             }
             if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
                 event.preventDefault();
+                // 必须同时阻止冒泡：全局快捷键处理器（canvas.js 的 matchesShortcut
+                // run 分支）也绑定了 Mod+Enter，而它的守卫只排除 INPUT/TEXTAREA/
+                // contentEditable —— composer 默认 focusPrompt:false，焦点在 body 上，
+                // 守卫放行。不拦的话一次 Ctrl+Enter 会同时触发两条运行路径：
+                // 全局那一次先发起普通生成，随后 Agent 规划流程被
+                // graph-runner 的「该节点链正在执行」顶掉（或反之弹出假错误）。
+                event.stopPropagation();
                 this._runGeneratorFromComposer(nodeId);
             }
         };
@@ -8784,7 +8804,9 @@ export class CanvasManager {
             tile.className = 'generation-composer-reference';
             tile.title = this._fileNameFromPath(source.filePath) || `参考素材 ${index + 1}`;
             const mediaType = this._getItemMediaType(source);
-            if (mediaType === 'image' && source.filePath) {
+            // 与 _generationComposerCitationState 共用同一判定，保证磁贴显示的
+            // 编号与点击后插入的胶囊编号一致（见 _isCitableImageReference）。
+            if (this._isCitableImageReference(source)) {
                 const referenceLabel = this._generationImageReferenceLabel(imageIndex);
                 imageIndex += 1;
                 const image = document.createElement('img');
@@ -8865,9 +8887,23 @@ export class CanvasManager {
         return `图${numerals[index] || index + 1}`;
     }
 
+    /**
+     * 能否作为「可引用参考图」（会拿到 图一/图二 编号、可插入引用胶囊）。
+     *
+     * 必须同时满足「是图片」和「有真实文件路径」。后者排除了带生成结果的
+     * 生成节点：它有 mediaType/图片输出，却没有 filePath，渲染时走的是图标
+     * 分支、无法被引用。历史上编号状态（_generationComposerCitationState）
+     * 只按「是图片」过滤，而参考条按「是图片 且 有 filePath」编号，两套下标
+     * 不同源 —— 当生成节点与普通素材同时作参考时，磁贴写着「点击引用图一」，
+     * 点下去插入的却是「图二」，用户照 UI 写的编号会指向另一张图。
+     */
+    _isCitableImageReference(source) {
+        return this._getItemMediaType(source) === 'image' && Boolean(source?.filePath);
+    }
+
     _generationComposerCitationState(data, references = this._opReferenceEntries(data)) {
         data.config = data.config || {};
-        const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
+        const imageReferences = references.filter(({ source }) => this._isCitableImageReference(source));
         const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
         const configuredIds = Array.isArray(data.config.referenceCitationIds)
             ? data.config.referenceCitationIds.filter(id => validIds.has(id))
@@ -10169,7 +10205,9 @@ export class CanvasManager {
     _closeGenerationComposer({ commit = true, keepReferencePick = false } = {}) {
         const active = this._generationComposer;
         if (!active) return;
-        const activeData = this.items.get(active.nodeId)?.data;
+        // 以 items 里的当前对象为准：activeData 是打开时刻捕获的引用，
+        // 撤销/重做或切换文件夹组之后可能已经游离，往它上面写会丢输入。
+        const activeData = this.items.get(active.nodeId)?.data || active.data;
         if (commit) this._cacheMediaGenerationPromptDraft(activeData);
         if (commit && active.changed && activeData?.nodeType === 'image') {
             this._rememberImageGenerationPreferences(activeData);
@@ -10644,7 +10682,12 @@ export class CanvasManager {
             getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
             getVideoProvider: (binding) => this.options.getVideoProvider?.(binding) || null,
             getImageIntentPipelineMode: () => this.options.getImageIntentPipelineMode?.() || 'compiled',
-            prepareImageReferences: (refs) => this.options.prepareImageReferences?.(refs) || [],
+            // 同 main.js：不能用 `|| []` 兜底，否则「用户取消参考图处理」
+            // 会被折叠成空数组，生成静默降级为纯文生图。
+            prepareImageReferences: (refs) => {
+                const prepare = this.options.prepareImageReferences;
+                return typeof prepare === 'function' ? prepare(refs) : null;
+            },
             createGenerationTask: (details) => this.options.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => this.options.updateGenerationTask?.(taskId, patch) || null,
             recordGenerationError: (taskId, error) => this.options.recordGenerationError?.(taskId, error) || null,
@@ -10653,10 +10696,36 @@ export class CanvasManager {
         return this.graphRunner;
     }
 
+    /**
+     * 中断生成。
+     *
+     * `runner.cancel()` 只对**内存中仍在跑**的运行有效；对进程被杀、渲染层重载
+     * 或终端事件丢失后遗留在 board.json 里的 `running`/`queued` 节点，它返回
+     * false。旧实现在这种情况下直接 `return false`，于是用户看到的是一个
+     * 永远转圈、点了毫无反应的取消按钮，且没有任何解释。
+     *
+     * 这里补一条兜底：没有活动运行时，说明这个"正在生成"只是残留状态，
+     * 就地复位为 idle 并告知用户，让节点重新可用。
+     */
     async _cancelRunningGenerator(nodeId) {
         const canceled = await this._ensureRunner().cancel(nodeId);
-        if (!canceled) return false;
-        this._showCanvasStatus('正在中断生成任务…', 1800);
+        if (canceled) {
+            this._showCanvasStatus('正在中断生成任务…', 1800);
+            this.refreshOpNode(nodeId);
+            this.emit('change');
+            return true;
+        }
+
+        const entry = this.items.get(nodeId);
+        const data = entry?.data;
+        const isStaleBusy = data?.runStatus === STATUS.QUEUED || data?.runStatus === STATUS.RUNNING;
+        if (!isStaleBusy) return false;
+
+        // 没有在跑的任务，却停在忙碌状态：这是上次会话/重载留下的残影。
+        data.runStatus = STATUS.IDLE;
+        delete data.runStartedAt;
+        data.runError = '';
+        this._showCanvasStatus('该任务已不在运行，已重置节点状态', 2600);
         this.refreshOpNode(nodeId);
         this.emit('change');
         return true;
@@ -13626,7 +13695,11 @@ export class CanvasManager {
 
         this._isGeneratingPlanRow = true;
         this._setHoveredPlanRow(planId, rowId);
-        this._showCanvasStatus(`正在使用 ${imageProvider.model} 生成结果图...`);
+        // 用 provider 而不是 imageProvider：视频分支下 imageProvider 可能为 null
+        // （上面的守卫只校验了对应分支的 provider），而这一行在 try 之外，
+        // 一旦抛错 finally 就不会执行，_isGeneratingPlanRow 会永久为 true，
+        // 此后该规划行的生图入口会静默失效，直到重启应用。
+        this._showCanvasStatus(`正在使用 ${provider?.model || ''} 生成结果图...`);
         try {
             const rowIndex = Math.max(0, (plan.rows || []).findIndex(entry => entry.id === rowId));
             const outputX = plan.x + (plan.width || PLAN_NODE_WIDTH) + 80;

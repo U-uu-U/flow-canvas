@@ -86,6 +86,78 @@ test('reference preprocessing cannot silently drop selected images', async () =>
     assert.deepEqual(await helpers.prepareGenerationReferences(refs, async () => ({ references: compressed })), compressed);
 });
 
+test('prepareGenerationReferences: 用户取消参考图处理时中止而不是静默清空', async () => {
+    const refs = [{ filePath: 'first.png' }, { filePath: 'second.png' }];
+    await assert.rejects(
+        helpers.prepareGenerationReferences(refs, async () => helpers.CANCELED_IMAGE_REFERENCES),
+        /参考图处理未完成/
+    );
+    // 结构相同的普通对象也应被识别为取消标记
+    await assert.rejects(
+        helpers.prepareGenerationReferences(refs, async () => ({ canceled: true })),
+        /参考图处理未完成/
+    );
+    // 准备器不可用属于异常，同样不能退化成空数组
+    await assert.rejects(
+        helpers.prepareGenerationReferences(refs, async () => null),
+        /参考图准备服务不可用/
+    );
+});
+
+test('取消参考图的错误文案不得被误判为用户中断', async () => {
+    const refs = [{ filePath: 'first.png' }];
+    const messages = [];
+    for (const prepare of [
+        async () => helpers.CANCELED_IMAGE_REFERENCES,
+        async () => null
+    ]) {
+        await helpers.prepareGenerationReferences(refs, prepare).catch(error => messages.push(error.message));
+    }
+    assert.equal(messages.length, 2);
+    for (const message of messages) {
+        // graph-runner 旧版按文本匹配 /已取消|cancel/i 判定用户中断，会把真实失败
+        // 原因吞掉、节点标成 canceled。这些文案必须避开这些字样。
+        assert.doesNotMatch(message, /任务已中断|已取消|cancel/i, `文案不应含中断关键词：${message}`);
+    }
+});
+
+test('image execute: 取消参考图处理时不提交任何生图请求', async () => {
+    const calls = [];
+    const previousWindow = global.window;
+    global.window = {
+        flowCanvas: {
+            mcp: {
+                generateImage: async options => {
+                    calls.push(options);
+                    return { filePath: 'C:/output/should-not-happen.png' };
+                }
+            }
+        }
+    };
+
+    try {
+        await assert.rejects(
+            helpers.NODE_TYPES.image.execute(
+                { reference: ['local-res://C%3A%2Frefs%2Fone.png'] },
+                { prompt: '生成以图二色调为主的全景', width: 1024, height: 1024, count: 1, concurrency: 1 },
+                {
+                    item: { id: 'image-node' },
+                    getImageProvider: () => ({
+                        apiKey: 'test-key',
+                        endpoint: 'https://example.test/v1',
+                        model: 'gpt-image-2.5-sunburst'
+                    }),
+                    prepareImageReferences: async () => helpers.CANCELED_IMAGE_REFERENCES
+                }
+            ),
+            /参考图处理未完成/
+        );
+        assert.deepEqual(calls, [], '取消后不应再向生图接口提交请求');
+    } finally {
+        global.window = previousWindow;
+    }
+});
+
 test('mapWithConcurrency: 保持结果顺序并限制并发', async () => {
     let active = 0;
     let peak = 0;
@@ -100,6 +172,32 @@ test('mapWithConcurrency: 保持结果顺序并限制并发', async () => {
 
     assert.deepEqual(results, [60, 10, 40, 2]);
     assert.equal(peak, 2);
+});
+
+test('mapWithConcurrency: 失败后不再领取新任务，避免孤儿请求继续扣费', async () => {
+    const started = [];
+    const values = [1, 2, 3, 4, 5, 6];
+    // 并发 2：索引 0 立即失败；索引 1 稍慢。修复前 consume 会继续领取
+    // 索引 2、3、4、5，对图片/视频节点意味着白花的生成请求与产物下载。
+    const error = await helpers.mapWithConcurrency(values, 2, async value => {
+        started.push(value);
+        if (value === 1) throw new Error('第一个任务失败');
+        await new Promise(resolve => setTimeout(resolve, 5));
+        return value;
+    }).then(() => null, err => err);
+
+    assert.ok(error, '应当抛出第一个错误');
+    assert.equal(error.message, '第一个任务失败', '应原样抛出第一个错误，而不是包装');
+    // 索引 0、1 各领一次即可；断言没有继续领到后面四个任务
+    assert.deepEqual(started, [1, 2], `失败后不应再领取新任务，实际领取了 ${started.join(',')}`);
+});
+
+test('mapWithConcurrency: 全部失败时抛出第一个错误而不是 AggregateError', async () => {
+    const error = await helpers.mapWithConcurrency([1, 2, 3], 3, async value => {
+        throw new Error(`失败-${value}`);
+    }).then(() => null, err => err);
+    assert.ok(error);
+    assert.match(error.message, /失败-\d/);
 });
 
 test('text execute: 开启文字 AI 后使用独立文字 provider', async () => {

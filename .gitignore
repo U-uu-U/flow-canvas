@@ -36,3 +36,6 @@ latest.yml
 .DS_Store
 Thumbs.db
 *.log
+
+# ���ط�����������ֿ⣩
+.analysis/

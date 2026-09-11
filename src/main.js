@@ -82,8 +82,13 @@ async function bootstrap() {
                 agentSidebar?.prepareAgentFromNode?.(details) || null,
             generateImageThroughAgent: (details) =>
                 agentSidebar?.generateImageFromNode?.(details) || null,
-            prepareImageReferences: (refs) =>
-                agentSidebar?._prepareImageReferencesForGeneration?.(refs) || [],
+            // 不能写成 `?.() || []`：那会把「用户取消参考图处理」和
+            // 「side bar 未就绪」都折叠成空数组，使生成静默降级为纯文生图。
+            // 这里原样上传结果，由 node-types 的 prepareGenerationReferences 判定。
+            prepareImageReferences: (refs) => {
+                const prepare = agentSidebar?._prepareImageReferencesForGeneration;
+                return typeof prepare === 'function' ? prepare.call(agentSidebar, refs) : null;
+            },
             createGenerationTask: (details) => agentSidebar?.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => agentSidebar?.updateGenerationTask?.(taskId, patch) || null,
             recordGenerationError: (taskId, error) => agentSidebar?.recordGenerationError?.(taskId, error) || null,

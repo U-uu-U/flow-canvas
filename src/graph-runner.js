@@ -31,10 +31,23 @@ function cancellationError() {
     return error;
 }
 
+/**
+ * 判定「用户中断了生成」。
+ *
+ * 只认本应用自己打的两个标记：`code === 'GENERATION_CANCELED'` 与 `name === 'AbortError'`。
+ * 这三处产出中断错误的代码都会带上它们：
+ *   - graph-runner.js 的 cancellationError()
+ *   - node-types.js 的 throwIfGenerationCanceled()
+ *   - electron-main/mcp-bridge.js 的 generationCanceledError()
+ *
+ * 这里**不能**再按文本匹配（旧实现含 /已取消|cancel/i）：供应商返回的正常失败
+ * 只要文案里带 "cancelled"，就会被当成用户中断——节点被标成 canceled、真实的
+ * 失败原因被丢弃、重试入口消失。凡是要走「用户中断」语义的地方，请打标记，
+ * 不要靠文案。
+ */
 function isCancellationError(error) {
     return error?.code === 'GENERATION_CANCELED'
-        || error?.name === 'AbortError'
-        || /任务已中断|已取消|cancel(?:led|ed)?/i.test(error?.message || String(error || ''));
+        || error?.name === 'AbortError';
 }
 
 export class GraphRunner {
@@ -68,7 +81,15 @@ export class GraphRunner {
         if (status === STATUS.IDLE) delete item.runStartedAt;
         item.runStatus = status;
         item.runError = error;
-        this.ctx.onStatus?.(item.id);
+        // onStatus 是宿主的重绘回调，不属于运行逻辑的一部分。它抛错必须被隔离：
+        // runFrom 的加锁与解锁之间到处都在调 _setStatus，一旦异常逃逸，
+        // finally 就不会执行，activeNodes 永久残留 → 该节点链在本会话内
+        // 再也跑不起来（只能重启）。状态已经写入 item，重绘失败不影响正确性。
+        try {
+            this.ctx.onStatus?.(item.id);
+        } catch (statusError) {
+            console.error('[Runner] onStatus 回调失败（已忽略）:', statusError);
+        }
     }
 
     /**
@@ -94,6 +115,12 @@ export class GraphRunner {
 
         // 只锁本次运行真正涉及的节点。互不相干的链可并发，共享上游的链
         // 仍会被拒绝，避免同一节点的状态和结果被两个运行互相覆盖。
+        //
+        // 注意：从加锁到 finally 释放之间的每一处 _setStatus 都不能让异常逃逸。
+        // _setStatus 会回调宿主的 onStatus（画布重绘），它一旦抛错就会在进入
+        // try 之前（或让 finally 提前中断）跳过锁释放，activeNodes 永久残留，
+        // 该节点链在本会话内再也无法运行，只有重启应用才能恢复。
+        // 因此 _setStatus 内部对 onStatus 做了兜底 try/catch（见其实现）。
         order.forEach(id => this.activeNodes.add(id));
         const runState = { targetId, order, items, canceled: false };
         this.activeRuns.set(targetId, runState);

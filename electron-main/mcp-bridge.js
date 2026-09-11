@@ -60,6 +60,15 @@ const {
     videoModelFilePrefix
 } = require('./video-provider-adapters');
 
+// 图片编辑链路只放行图像编辑接口稳定支持的这四种格式，其余（gif/bmp/svg/ico/
+// tiff 等）会被当作「不可用参考图」在提交前拦下，见 collectImageSourceReferences
+// 的 requireAll 校验与 image-reference-validation.test.cjs。
+//
+// 这是**有意**的窄白名单，不要为了跟画布侧的展示白名单（canvas.js 的
+// _getFileType 把 ico/gif 等显示为图片）对齐而扩大它：画布负责「能不能显示」，
+// 这里负责「能不能作为编辑输入提交」。两者不一致本身是设计取舍，但带来的
+// 用户可见后果是——合成器把一个 .gif 显示为可引用的「图一」，提交时却整单被拒。
+// 若要改善，应当让合成器对不可提交的格式提前给出提示，而不是放宽这里的校验。
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.flv', '.mpeg', '.mpg']);
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.aac', '.flac', '.ogg']);
@@ -1287,29 +1296,39 @@ class FlowCanvasBridge {
         throwIfGenerationCanceled(signal);
         this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'completed' });
         if (body.addToCanvas !== false) this.notifyTaskCompleted?.({ clientTaskId: body.clientTaskId, remoteTaskId: resolvedTaskId, filePath });
-        const item = body.addToCanvas === false
-            ? null
-            : addBoardItem(data, filePath, {
-                x: body.x,
-                y: body.y,
-                width: body.canvasWidth,
-                height: body.canvasHeight,
-                generation: generationRecordFromRequest('video', {
-                    ...body,
-                    providerConfig: { ...providerConfig, model }
-                }, prompt, [], { taskId: resolvedTaskId })
-            });
-        if (item) this._saveAndNotify(data, 'mcp:video-recovered');
-        return {
-            item,
-            filePath,
-            provider: 'openai-video',
-            taskId: resolvedTaskId,
-            video: { url: completed.url },
-            targetDir,
-            requestedTargetDir,
-            targetDirFallback: targetInfo.fallbackReason
-        };
+        // 关键：不要在轮询前捕获的 data 上继续写入。
+        // 上面的 pollOpenAiVideoTask 最长可以跑约 60 分钟（还包含下载），期间
+        // 用户或另一路 MCP/Agent 完全可能改过画板。若在这里对旧快照 addBoardItem
+        // 再 _saveAndNotify，store.save 是整文件重写，会把这一小时内的所有并发
+        // 编辑静默回滚。图片恢复路径在 _commitBoardMutation 内重新 load，这里
+        // 此前是唯一的例外。
+        return await this._commitBoardMutation(async () => {
+            const { data: latest } = this._loadWithPlanService();
+            let item = null;
+            if (body.addToCanvas !== false) {
+                item = addBoardItem(latest, filePath, {
+                    x: body.x,
+                    y: body.y,
+                    width: body.canvasWidth,
+                    height: body.canvasHeight,
+                    generation: generationRecordFromRequest('video', {
+                        ...body,
+                        providerConfig: { ...providerConfig, model }
+                    }, prompt, [], { taskId: resolvedTaskId })
+                });
+            }
+            if (item) this._saveAndNotify(latest, 'mcp:video-recovered');
+            return {
+                item,
+                filePath,
+                provider: 'openai-video',
+                taskId: resolvedTaskId,
+                video: { url: completed.url },
+                targetDir,
+                requestedTargetDir,
+                targetDirFallback: targetInfo.fallbackReason
+            };
+        });
     }
 
     _sendJson(res, statusCode, payload) {
@@ -2757,8 +2776,21 @@ function summarizeVideoRequest(endpoint, body = {}, logId = '') {
     };
 }
 
+/**
+ * 判断提交视频任务时连接中断是否属于「结果不明」。
+ *
+ * 这里只收「响应已经开始但被截断」的形态：服务端很可能已经受理了付费任务，
+ * 此时复用一个本地 log id 去轮询是有意义的（服务端按 X-Log-Id 关联）。
+ *
+ * 刻意**不**包含 `fetch failed`。它是 undici 对「连接阶段就失败」的通用包装
+ * （DNS / 拒绝连接 / TLS 失败），请求通常根本没发出去；把它归入「可能已受理」
+ * 会让上层拿本地生成的 recoveryId 充当远端 taskId 落库，而渲染层的重试条件是
+ * `!task.taskId`（agent-sidebar.js 的 canRetry）→ 任务从此既不能重试
+ * （「重新提交」永不出现），拉取又必然 404，永久卡死。
+ * 宁可把它当普通连接失败，让用户看到明确的失败与「重新提交」。
+ */
 function isAmbiguousVideoSubmitError(error) {
-    return /ERR_CONNECTION_(?:CLOSED|RESET)|ERR_TIMED_OUT|socket hang up|other side closed|fetch failed/i
+    return /ERR_CONNECTION_(?:CLOSED|RESET)|ERR_TIMED_OUT|socket hang up|other side closed/i
         .test(error?.message || String(error));
 }
 

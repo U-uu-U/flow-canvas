@@ -41,6 +41,27 @@ let mediaPreviewWasFullScreen = null;
 
 const isDev = !app.isPackaged;
 
+/**
+ * 带 broken-pipe 保护的写日志函数。
+ *
+ * 必须声明在模块作用域：installSafeConsole() 内部原本用 const 声明了一个同名
+ * 局部函数，而模块底部的启动失败 / 激活失败分支（startApplication().catch 与
+ * macOS activate 的错误处理）在模块作用域写日志 —— 那里拿不到局部变量，
+ * 会抛 ReferenceError，导致本该弹出的「启动失败」诊断对话框永远不出现，
+ * 恰恰把最需要诊断的路径变成静默失败。
+ */
+function writeLogLine(stream, args) {
+    if (!stream || stream.destroyed) return;
+    try {
+        stream.write(`${util.format(...args)}\n`);
+    } catch (err) {
+        // 管道断开时静默丢弃，不要因为日志写失败再引发一次异常
+        if (!(err?.code === 'EPIPE' || /broken pipe/i.test(String(err?.message || '')))) {
+            throw err;
+        }
+    }
+}
+
 installSafeConsole();
 require('./diagnostics-electron.cjs').installDiagnostics({
     getWindow: () => mainWindow,
@@ -2286,6 +2307,10 @@ ipcMain.handle('mcp:image:generate', async (_, body) => {
         return {
             success: false,
             canceled: err?.code === 'GENERATION_CANCELED' || err?.name === 'AbortError',
+            // 结构化语义必须显式过 IPC：自定义错误属性不会随 message 传过去，
+            // 而渲染层需要它来区分「结果未知」与「确定失败」——前者绝不能
+            // 引导用户直接重新提交（可能重复计费）。
+            submissionUnknown: err?.submissionUnknown === true,
             error: err.message
         };
     }
@@ -3093,7 +3118,7 @@ function startApplication() {
 }
 
 void startApplication().catch(error => {
-    safeWrite(process.stderr, ['[Main] Application startup failed:', error]);
+    writeLogLine(process.stderr, ['[Main] Application startup failed:', error]);
     dialog.showErrorBox('Flow Canvas 启动失败', error?.stack || error?.message || String(error));
 });
 
@@ -3140,6 +3165,6 @@ app.on('activate', () => {
             createWindow();
         }
     }).catch(error => {
-        safeWrite(process.stderr, ['[Main] Application activation failed:', error]);
+        writeLogLine(process.stderr, ['[Main] Application activation failed:', error]);
     });
 });

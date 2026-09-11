@@ -47,6 +47,19 @@ function throwIfGenerationCanceled(ctx, result = null) {
     throw error;
 }
 
+/**
+ * 把主进程返回的失败结果转成 Error，并保留其结构化语义。
+ *
+ * `submissionUnknown` 表示「服务端可能已受理、结果无法确认」，渲染层据此把任务
+ * 归为 disconnected 而不是 failed，从而不引导用户直接重新提交（可能重复计费）。
+ * 直接用 new Error(result.error) 会丢掉这个标记，只靠错误文案里的关键词去猜。
+ */
+function generationFailureError(result, fallbackMessage = '生图未返回图片') {
+    const error = new Error(result?.error || fallbackMessage);
+    if (result?.submissionUnknown === true) error.submissionUnknown = true;
+    return error;
+}
+
 /** local-res:// URL → 文件路径。上游媒体端口传的都是这个协议。 */
 function toFilePath(url) {
     const prefix = 'local-res://';
@@ -61,11 +74,20 @@ function toFileList(value) {
         .map(filePath => ({ filePath }));
 }
 
+/**
+ * local-res:// URL → 媒体类型。
+ *
+ * 这份白名单必须覆盖画布侧认定为「图片」的全部扩展名
+ * （见 canvas.js 的 _getFileType），否则会出现：合成器把某素材当作可引用的
+ * 「图一」写进提示词，而这里把它判成 file 并在收集参考图时丢掉 —— 结果是
+ * 请求带着「图一=第1张」的文字却一张图都没上传，静默退化为纯文生图。
+ * `.ico` 曾经就是这种漏网扩展名之一。
+ */
 function localResourceType(value) {
     const filePath = toFilePath(value);
     if (!filePath) return null;
     const extension = filePath.split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase() || '';
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff'].includes(extension)) {
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'heic', 'heif', 'tif', 'tiff'].includes(extension)) {
         return 'image';
     }
     if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv', 'mpeg', 'mpg'].includes(extension)) {
@@ -301,11 +323,29 @@ function startImageIntentPipeline({ prompt, config, ctx, references, imageProvid
     };
 }
 
+/**
+ * 「用户主动放弃参考图」的显式标记。
+ *
+ * 素材准备有两种非数组结果，必须区分开：
+ *   - CANCELED_IMAGE_REFERENCES：用户明确取消了参考图处理 → 中止生成并提示
+ *   - 其它 falsy（null/undefined）：准备器不可用 → 属于异常，同样中止
+ * 历史上两者都被折叠成空数组，导致「取消压缩对话框」变成
+ * 「静默改用纯文生图」——模型收不到任何参考图，提示词里却仍写着「图一/图二」。
+ *
+ * 注意：这两条错误文案里**不能出现**「取消」「已取消」「cancel」等字样。
+ * graph-runner 的 isCancellationError（graph-runner.js:34-38）会按文本匹配把它们
+ * 误判成「用户中断了生成」，从而丢弃真正的失败原因、把节点标成 canceled。
+ */
+const CANCELED_IMAGE_REFERENCES = Object.freeze({ canceled: true });
+
 async function prepareGenerationReferences(references, prepare) {
     if (!references.length) return [];
     if (typeof prepare !== 'function') return references;
     const prepared = await prepare(references);
-    if (!prepared) throw new Error('已取消参考图处理');
+    if (prepared === CANCELED_IMAGE_REFERENCES || prepared?.canceled === true) {
+        throw new Error('参考图处理未完成，本次生成没有开始，也没有提交任何请求。请重新运行，并在参考图提示中选择“保持原图”或“批量转小”。');
+    }
+    if (!prepared) throw new Error('参考图准备服务不可用，本次生成没有开始，以避免丢失参考图。');
     const result = Array.isArray(prepared) ? prepared : prepared.references;
     if (!Array.isArray(result)) throw new Error('参考图预处理未返回有效素材');
     if (result.length !== references.length || result.some(reference => !reference?.filePath)) {
@@ -350,20 +390,46 @@ function expandGenerationPrompts(inputs, config = {}) {
     ));
 }
 
+/**
+ * 有限并发地处理列表，保持结果顺序。
+ *
+ * 失败语义（重要）：任意一个 worker 抛错后，**其余 worker 不再领取新任务**，
+ * 但已经在飞行中的请求会自然跑完；最后重新抛出第一个错误。
+ *
+ * 旧实现是裸 `Promise.all([...consume])`：首个 reject 立即向上抛，而其余 worker
+ * 仍在 `while` 循环里继续领取剩余任务。后果是真实且要花钱的——
+ *   - 图片：孤儿请求继续下载产物，并把各自的任务记录写成 success，而节点已被
+ *     标成 ERROR → 磁盘堆孤儿文件、任务表与画布状态互相矛盾；
+ *   - 视频：孤儿请求继续提交**付费**任务。
+ * 因此这里必须显式止血，而不是让循环继续跑。
+ */
 async function mapWithConcurrency(values, concurrency, worker) {
     const list = Array.isArray(values) ? values : [];
     if (!list.length) return [];
     const limit = Math.max(1, Math.min(list.length, Number(concurrency) || 1));
     const results = new Array(list.length);
     let cursor = 0;
+    let aborted = false;
+    let firstError;
 
     const consume = async () => {
-        while (cursor < list.length) {
+        while (!aborted && cursor < list.length) {
             const index = cursor++;
-            results[index] = await worker(list[index], index);
+            try {
+                results[index] = await worker(list[index], index);
+            } catch (error) {
+                // 只记住第一个错误并停止领取新任务；在飞的请求不打断
+                // （打断需要各 worker 自己支持取消，属于调用方的职责）。
+                if (!aborted) {
+                    aborted = true;
+                    firstError = error;
+                }
+                return;
+            }
         }
     };
     await Promise.all(Array.from({ length: limit }, consume));
+    if (aborted) throw firstError;
     return results;
 }
 
@@ -591,16 +657,17 @@ NODE_TYPES['image'] = {
                 ? filePaths.map(filePath => 'local-res://' + encodeURIComponent(filePath))
                 : [result?.url].filter(Boolean);
             if (!imageUrls.length) {
-                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, new Error(result?.error || '生图未返回图片'));
+                const failure = generationFailureError(result);
+                if (clientTaskId) ctx?.recordGenerationError?.(clientTaskId, failure);
                 intent?.finish({
                     ...imageProviderSummary(provider),
                     status: 'failed',
                     durationMs: Date.now() - generationStartedAt,
                     requestPrompt,
                     imageOrder: sourceReferences.map(reference => reference.filePath),
-                    error: result?.error || '生图未返回图片'
+                    error: failure.message
                 }, intentOutcome);
-                throw new Error(result?.error || '生图未返回图片');
+                throw failure;
             }
             if (clientTaskId) {
                 ctx?.updateGenerationTask?.(clientTaskId, {
@@ -926,5 +993,6 @@ export {
     prepareGenerationReferences,
     expandGenerationPrompts,
     mapWithConcurrency,
-    startImageIntentPipeline
+    startImageIntentPipeline,
+    CANCELED_IMAGE_REFERENCES
 };

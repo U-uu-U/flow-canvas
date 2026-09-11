@@ -33,6 +33,7 @@ import {
     parseAgentImageCompilationResponse
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
+import { CANCELED_IMAGE_REFERENCES } from './node-types.js';
 import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
 import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
 import {
@@ -3021,6 +3022,12 @@ export class AgentSidebar {
         this._finishAgentSidebarResize?.();
         const nextMode = ['agent', 'settings', 'canvas'].includes(mode) ? mode : 'canvas';
         const body = document.body;
+        // 离开设置界面时必须解除快捷键录制状态。_captureShortcut 是 document 捕获
+        // 阶段的常驻监听器，只要 recordingShortcutAction 有值就会 preventDefault +
+        // stopImmediatePropagation —— 面板收起后用户看不见任何提示，但全应用按键都
+        // 被吞掉（输入框打不进字），且第一个不冲突的键会被静默写成新绑定。
+        // 此前只有 Esc 和切换 tab 会清除它，关闭面板的路径都不会。
+        if (nextMode !== 'settings') this._cancelShortcutCapture();
         this._closeAgentComposerPopovers();
         this._closeAgentHeaderPopovers();
         this._setTaskHistoryOpen(false);
@@ -4109,6 +4116,11 @@ export class AgentSidebar {
     }
 
     _isGenerationDisconnect(error) {
+        // 主进程已经明确判定「结果未知」时以此为准（见 imageRequestFailure 的
+        // submissionUnknown）。这类失败的语义是"可能已受理、无法确认"，既不该
+        // 引导用户重复提交，也不该只当成普通网络失败。下面的关键词匹配仅作为
+        // 兜底，覆盖没有结构化标记的其它来源。
+        if (error?.submissionUnknown === true) return true;
         const marker = `${error?.name || ''} ${error?.code || ''} ${error?.message || error || ''}`;
         return /network|fetch failed|failed to fetch|econn|etimedout|socket|connection|timeout|timed out|aborterror|断开|断连|连接失败|网络|超时/i.test(marker);
     }
@@ -4147,6 +4159,18 @@ export class AgentSidebar {
         const error = new Error('生成任务已中断');
         error.name = 'AbortError';
         error.code = 'GENERATION_CANCELED';
+        return error;
+    }
+
+    /**
+     * 把主进程返回的失败结果转成 Error，并保留其结构化语义。
+     * `submissionUnknown` 表示「可能已受理、结果无法确认」，必须带上去，
+     * 否则 _isGenerationDisconnect 只能靠错误文案里的关键词猜，
+     * 会把这类任务误判为可安全重试的普通失败。
+     */
+    _generationFailureError(result, fallbackMessage = '请求失败') {
+        const error = new Error(result?.error || fallbackMessage);
+        if (result?.submissionUnknown === true) error.submissionUnknown = true;
         return error;
     }
 
@@ -4487,6 +4511,12 @@ export class AgentSidebar {
         if (retryImageReferences.length > 0) {
             try {
                 const prepared = await this._prepareImageReferencesForGeneration(retryImageReferences);
+                if (prepared === CANCELED_IMAGE_REFERENCES) {
+                    this._updateGenerationTask(task.id, {
+                        error: '已取消参考图处理，未重新提交任务'
+                    });
+                    return;
+                }
                 if (!prepared) return;
                 retryImageReferences = prepared.references;
             } catch (error) {
@@ -4578,7 +4608,7 @@ export class AgentSidebar {
             if (this._isGenerationTaskCanceled(task.id) || result?.canceled) {
                 throw this._generationCancellationError();
             }
-            if (result?.success === false) throw new Error(result.error || '生成请求失败');
+            if (result?.success === false) throw this._generationFailureError(result, '生成请求失败');
             if (restoreOnOriginalNode) {
                 const restored = await this.options.completeGenerationTaskOnNode({
                     nodeId: originalNodeId,
@@ -4642,8 +4672,32 @@ export class AgentSidebar {
         const confirmLabel = isImageMode
             ? (manual ? '转小并放入画板' : '转小到画板并继续')
             : '压缩到画板';
+        // 同一时刻只允许存在一个参考图处理弹层。若已经有一个（例如侧栏提交
+        // 挂起时用户又按了 Ctrl+Enter 从画布触发了同一条准备流程），必须先让它
+        // 正常结束：直接 remove 掉 DOM 会留下一个永不 settle 的 Promise，
+        // 调用方的 await 永久挂起、finally 不执行 → 「生成」按钮永久 disabled
+        // 且没有任何提示，另外还会残留一个 document keydown 监听器。
+        const previous = this._activeCompressionDialog;
+        this._activeCompressionDialog = null;
+        if (previous) {
+            try {
+                previous('cancel');
+            } catch (error) {
+                console.error('[AgentSidebar] 关闭上一个参考图处理弹层失败:', error);
+            }
+        }
+
         return new Promise(resolve => {
-            document.querySelector('.video-compression-dialog-overlay')?.remove();
+            let settled = false;
+            const finish = choice => {
+                if (settled) return;
+                settled = true;
+                if (this._activeCompressionDialog === finish) this._activeCompressionDialog = null;
+                document.removeEventListener('keydown', onKeyDown);
+                overlay.remove();
+                resolve(choice);
+            };
+
             const overlay = document.createElement('div');
             overlay.className = `video-compression-dialog-overlay${isImageMode ? ' image-reference-compression' : ''}`;
             overlay.innerHTML = `
@@ -4678,11 +4732,6 @@ export class AgentSidebar {
                 list.appendChild(row);
             });
 
-            const finish = choice => {
-                document.removeEventListener('keydown', onKeyDown);
-                overlay.remove();
-                resolve(choice);
-            };
             const onKeyDown = event => {
                 if (event.key === 'Escape') finish('cancel');
             };
@@ -4696,6 +4745,9 @@ export class AgentSidebar {
             });
             document.addEventListener('keydown', onKeyDown);
             document.body.appendChild(overlay);
+            // 到此为止 overlay / onKeyDown / finish 都已就绪，再登记为"当前弹层"，
+            // 供下一次调用顶替时正常收尾（避免上面提到的永久挂起）。
+            this._activeCompressionDialog = finish;
             overlay.querySelector('.video-compression-confirm')?.focus();
         });
     }
@@ -4956,7 +5008,7 @@ export class AgentSidebar {
             });
         }
         const choice = await this._showReferenceCompressionDialog(summary, 'image');
-        if (choice === 'cancel') return null;
+        if (choice === 'cancel') return CANCELED_IMAGE_REFERENCES;
         if (choice === 'original') return { references, outputs: [] };
         return this._compressImageReferences(references, {
             updateSelection,
@@ -5077,8 +5129,20 @@ export class AgentSidebar {
                 const prepared = await this._prepareImageReferencesForGeneration(sourceReferences, {
                     updateSelection: true
                 });
+                if (prepared === CANCELED_IMAGE_REFERENCES) {
+                    this._setWorkspaceMessage(
+                        this.imageGenerateMessage,
+                        'error',
+                        '已取消参考图处理，本次未开始生成。如需保持原图请重新生成并在提示中选择“保持原图”。'
+                    );
+                    return;
+                }
                 if (!prepared) {
-                    this._setWorkspaceMessage(this.imageGenerateMessage, '', '');
+                    this._setWorkspaceMessage(
+                        this.imageGenerateMessage,
+                        'error',
+                        '参考图准备服务不可用，已中止生成以避免丢失参考图。'
+                    );
                     return;
                 }
                 sourceReferences = prepared.references;
@@ -5173,6 +5237,9 @@ export class AgentSidebar {
 
     close() {
         this._finishAgentSidebarResize?.();
+        // 面板收起时务必解除快捷键录制，否则 _captureShortcut 仍会在 document
+        // 捕获阶段吞掉全应用按键（详见 setMode 中的说明）。
+        this._cancelShortcutCapture();
         this._closeAgentHeaderPopovers();
         document.body.classList.remove('agent-open');
         this._syncHudState();
