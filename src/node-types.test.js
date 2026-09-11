@@ -291,7 +291,9 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
         assert.equal(output._resultFilePath, 'C:/output/result.png');
         assert.equal(output._generation.prompt, '测试图片\n\n上游场景描述');
         assert.equal(output._generation.model, 'gpt-image-2');
-        assert.equal(output._generation.config.prompt, calls[0].prompt);
+        assert.equal(output._generation.config.prompt, '测试图片');
+        assert.equal(output._generation.requestPrompt, calls[0].prompt);
+        assert.deepEqual(output._generation.promptDraftConfig.generationUpstreamPrompts, ['上游场景描述']);
         assert.equal(output._generation.promptDraftConfig.prompt, '测试图片');
     } finally {
         global.window = previousWindow;

@@ -34,13 +34,16 @@ export function installGenerationRecoveryBoard(bridge, board) {
                         x: (original?.x || 0) + (original?.width || 320) + 48, y: original?.y || 0,
                         width: original?.width || result.images?.[0]?.width || 320,
                         height: original?.height || result.images?.[0]?.height || (request.kind === 'video' ? 180 : 320),
-                        config: { ...(request.params || {}), prompt: request.prompt, model: request.providerConfig.model } };
+                        config: { ...(request.params || {}), ...(request.promptDraftConfig || { prompt: request.prompt }), model: request.providerConfig.model } };
                     project.items.push(node);
                     if (original) project.connections.push({ id: `recovery-link-${key}`, kind: 'history',
                         from: { nodeId: original.id, port: original.nodeType || request.kind }, to: { nodeId: node.id, port: 'source' } });
                 }
             }
             const generation = { ...node.generation, kind: request.kind, prompt: request.prompt,
+                nodeType: request.kind, requestPrompt: request.prompt,
+                ...(request.promptDraftConfig ? { promptDraftConfig: structuredClone(request.promptDraftConfig) } : {}),
+                ...(request.referenceBindings ? { referenceBindings: structuredClone(request.referenceBindings) } : {}),
                 model: request.providerConfig.model, providerId: request.providerConfig.id,
                 config: { ...node.config }, taskId: result.taskId || request.taskId,
                 references: (request.sourcePaths || []).map(filePath => ({ filePath })), generatedAt: Date.now() };

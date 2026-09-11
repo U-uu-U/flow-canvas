@@ -7227,6 +7227,42 @@ select.plan-cell-input {
     color: #f1f2f4;
 }
 
+.generation-composer-citation.is-missing {
+    color: #e3a8a8;
+    border-color: #975c5c;
+}
+
+.generation-citation-preview {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    padding: 4px;
+    width: 200px;
+    height: 150px;
+    box-sizing: border-box;
+    object-fit: contain;
+    background: #232427;
+    border: 1px solid #505359;
+    border-radius: 4px;
+    pointer-events: none;
+}
+
+.agent-task-request { color: #aeb1b8; font-size: 11px; }
+.agent-task-request summary { cursor: pointer; padding: 4px 0; }
+.agent-task-request pre {
+    flex: 1;
+    min-width: 0;
+    max-height: 180px;
+    margin: 4px 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+    user-select: text;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
 .generation-composer-prompt {
     display: block;
     width: 100%;

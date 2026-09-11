@@ -1,3 +1,5 @@
+import { reusablePromptConfig } from './reference-citations.js';
+
 export const IMAGE_GENERATION_PREFERENCE_KEYS = Object.freeze([
     'resolutionTier',
     'ratio',
@@ -38,6 +40,7 @@ export const IMAGE_NODE_PROMPT_KEYS = Object.freeze([
     'promptMergeMode',
     'negativePrompt',
     'promptTemplate',
+    'generationUpstreamPrompts',
     'referenceCitationIds',
     'referenceCitationLabels',
     'referenceCitationOffsets',
@@ -67,15 +70,7 @@ function copyNodePromptConfig(config = {}) {
 }
 
 export function resolveImageNodePromptConfig(source = {}) {
-    const generationConfig = source?.generation?.config;
-    const promptDraftConfig = source?.generation?.promptDraftConfig;
-    const historical = copyNodePromptConfig(promptDraftConfig || generationConfig);
-    // Legacy records store the expanded request, whose offsets no longer match the editor draft.
-    if (!promptDraftConfig) {
-        for (const key of IMAGE_NODE_PROMPT_KEYS.filter(key => key.startsWith('referenceCitation'))) {
-            if (Object.prototype.hasOwnProperty.call(historical, key)) historical[key] = [];
-        }
-    }
+    const historical = source?.generation ? copyNodePromptConfig(reusablePromptConfig(source.generation)) : {};
     return {
         ...historical,
         ...copyNodePromptConfig(source?.generationPromptDraft)

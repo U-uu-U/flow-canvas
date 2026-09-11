@@ -291,6 +291,7 @@ class FlowCanvasBridge {
             providerId: body.providerConfig?.sourceProviderId || body.providerConfig?.id || null,
             endpoint: body.providerConfig?.endpoint || '', model: body.providerConfig?.model || body.model || '',
             prompt: body.prompt || '', taskId: null, result: null, location: null,
+            promptDraftConfig: body.promptDraftConfig, referenceBindings: body.referenceBindings, userPrompt: body.userPrompt,
             params, sourcePaths: (body.sourceReferences || []).map(reference => reference.filePath).filter(Boolean),
             targetDir: body.targetDir || null, state: 'submitting', createdAt: new Date().toISOString()
         });
@@ -312,6 +313,7 @@ class FlowCanvasBridge {
         if (!this.recoveryStore.get(body.clientTaskId)?.kind) {
             this.recoveryStore.update(body.clientTaskId, { kind: result.mediaType || body.kind,
                 projectId: body.projectId, nodeId: body.nodeId, prompt: body.prompt,
+                promptDraftConfig: body.promptDraftConfig, referenceBindings: body.referenceBindings, userPrompt: body.userPrompt,
                 endpoint: body.providerConfig?.endpoint, model: body.providerConfig?.model,
                 providerId: body.providerConfig?.sourceProviderId || body.providerConfig?.id });
         }
@@ -339,6 +341,9 @@ class FlowCanvasBridge {
         const request = { ...body, kind, taskId, clientTaskId, providerConfig: config,
             projectId: existing?.projectId || body.projectId,
             nodeId: existing?.nodeId || body.nodeId, prompt: existing?.prompt || body.prompt || '',
+            promptDraftConfig: existing?.promptDraftConfig || body.promptDraftConfig,
+            referenceBindings: existing?.referenceBindings || body.referenceBindings,
+            userPrompt: existing?.userPrompt ?? body.userPrompt,
             params: existing?.params || body.params, sourcePaths: existing?.sourcePaths || body.sourcePaths,
             targetDir: existing?.targetDir || body.targetDir, location: existing?.location, addToCanvas: false };
         request.targetSignature = this.captureRecoveryTarget?.(request);
@@ -354,6 +359,7 @@ class FlowCanvasBridge {
                 }
                 this.recoveryStore.update(clientTaskId, { kind, taskId, projectId: request.projectId,
                     nodeId: request.nodeId, endpoint: config.endpoint, model: config.model, prompt: request.prompt,
+                    promptDraftConfig: request.promptDraftConfig, referenceBindings: request.referenceBindings, userPrompt: request.userPrompt,
                     providerId: existing?.providerId || config.sourceProviderId || config.id,
                     result: null, location: request.location || null, state: 'recovering' });
                 result = await (kind === 'video' ? this._resumeVideoFromRenderer(request, signal)
@@ -1387,6 +1393,9 @@ function generationRecordFromRequest(kind, body = {}, prompt = '', references = 
         title: kind === 'video' ? '视频生成' : '图片生成',
         prompt: String(prompt || ''),
         config,
+        requestPrompt: String(prompt || ''),
+        ...(body.promptDraftConfig ? { promptDraftConfig: clone(body.promptDraftConfig) } : {}),
+        ...(body.referenceBindings ? { referenceBindings: clone(body.referenceBindings) } : {}),
         model,
         providerId: providerConfig.id || null,
         sourceProviderId: providerConfig.sourceProviderId || providerConfig.id || null,

@@ -47,13 +47,22 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
             localStorage.setItem('flow-canvas-api-config-meta-v1', JSON.stringify({ version: 1, revision: 100 }));
             localStorage.setItem('flow-canvas-generation-tasks', JSON.stringify([
                 { id: 'local-image', kind: 'image', projectId: 'original', status: 'canceled', providerId: 'fixture', providerName: 'Recovery test API',
-                    model: 'gpt-image-2', prompt: 'recover me', taskId: null, params: { nodeId: 'image-node', targetDir }, sourcePaths: [], createdAt: new Date().toISOString() },
+                    model: 'gpt-image-2', prompt: 'reference mapping\nrecover me', userPrompt: 'recover me',
+                    promptDraftConfig: { prompt: 'recover me' }, referenceBindings: [],
+                    taskId: null, params: { nodeId: 'image-node', targetDir }, sourcePaths: [], createdAt: new Date().toISOString() },
                 { id: 'local-bad', kind: 'image', projectId: 'original', status: 'failed', providerId: 'fixture', providerName: 'Recovery test API',
                     model: 'gpt-image-2', prompt: 'show error', taskId: 'bad-task', params: { targetDir }, sourcePaths: [], createdAt: new Date().toISOString() }
             ]));
         }, { endpoint: `http://127.0.0.1:${server.address().port}/v1`, targetDir });
         await page.reload();
         await page.locator('#agentTaskHistoryBtn').click();
+        const history = page.locator('.agent-task-item').filter({ has: page.locator('[data-copy-task-prompt="local-image"]') });
+        assert.equal(await history.locator('.agent-task-prompt').innerText(), 'recover me');
+        await history.locator('[data-copy-task-prompt]:not([data-copy-task-request])').click();
+        assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), 'recover me');
+        await history.locator('.agent-task-request summary').click();
+        await history.locator('[data-copy-task-request]').click();
+        assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), 'reference mapping\nrecover me');
         const recover = page.locator('[data-recover-task="local-image"]:not([data-edit-task-id])');
         await recover.click();
         await page.locator('.generation-recovery-dialog input').fill('remote-image');
@@ -67,6 +76,8 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         let restored = state.folderGroups.find(g => g.id === 'original').savedItems[0];
         assert.equal(restored.width, 400); assert.equal(restored.height, 300);
         assert.equal(restored.runStatus, 'done');
+        assert.equal(restored.generation.promptDraftConfig.prompt, 'recover me');
+        assert.equal(restored.generation.requestPrompt, 'reference mapping\nrecover me');
         await fs.access(restored.filePath);
         const count = requests.length;
         await recover.click();
@@ -89,6 +100,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         state = await page.evaluate(() => window.flowCanvas.store.load());
         restored = state.folderGroups.find(g => g.id === 'original').savedItems[0];
         assert.equal(restored.resultEntries.length, 1);
+        assert.equal(await history.locator('.agent-task-prompt').innerText(), 'recover me');
         assert.ok(requests.every(request => request.method === 'GET'), 'recovery must never POST a generation');
         assert.deepEqual(errors, []);
         console.log('Recovery desktop smoke passed: canceled task/manual ID/GET query/download/original project/cache/copy/error/renderer reload');

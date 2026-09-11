@@ -1,3 +1,5 @@
+import { reusablePromptConfig } from './reference-citations.js';
+
 const IMAGE_PARAMETER_KEYS = Object.freeze([
     ['resolutionTier', '画质'],
     ['size', '尺寸'],
@@ -64,9 +66,9 @@ export function getGenerationReuseConfig(data = {}, defaults = {}) {
     if (!record) return cloneObject(defaults);
     const config = {
         ...cloneObject(defaults),
-        ...cloneObject(record.config)
+        ...cloneObject(record.config),
+        ...reusablePromptConfig(record)
     };
-    if (record.prompt) config.prompt = record.prompt;
     if (record.model) config.model = record.model;
     if (record.providerId && !config.providerId) config.providerId = record.providerId;
     if (record.sourceProviderId && !config.sourceProviderId) {

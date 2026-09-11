@@ -126,11 +126,13 @@ export function collectUpstreamPromptContext({ targetNodeId, items, connections 
         incoming.get(toId).push(fromId);
     });
     const upstreamTextNodeIds = new Set();
-    const upstreamPrompts = (incoming.get(targetNodeId) || [])
+    const liveUpstreamPrompts = (incoming.get(targetNodeId) || [])
         .filter(sourceId => byId.get(sourceId)?.nodeType === 'text')
         .map(sourceId => resolveStaticText(sourceId, byId, incoming, new Set(), upstreamTextNodeIds))
         .filter(Boolean);
-    const prompt = String(target.config?.prompt || '').trim();
+    const upstreamPrompts = liveUpstreamPrompts.length ? liveUpstreamPrompts
+        : (target.config?.generationUpstreamPrompts || []).filter(value => typeof value === 'string' && value.trim());
+      const prompt = String(target.config?.prompt || '').trim();
     const promptMergeMode = ['append', 'prepend', 'replace'].includes(target.config?.promptMergeMode)
         ? target.config.promptMergeMode
         : 'append';

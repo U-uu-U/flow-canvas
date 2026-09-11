@@ -55,3 +55,18 @@ test('removed original node is restored separately on next explicit recovery, ne
     assert.equal(board.readProject('original').items.length, 1);
     assert.equal(board.readProject('other').items.length, 0);
 });
+
+test('task-ID recovery preserves the raw draft and reference bindings on new nodes', async () => {
+    const { bridge, board, request, result } = setup();
+    await board.updateProject('original', project => { project.items = []; });
+    request.prompt = 'expanded provider request';
+    request.promptDraftConfig = { prompt: 'raw draft', referenceCitationOccurrences: [{ id: 'cite', sourceNodeId: 'ref', offset: 0 }] };
+    request.referenceBindings = [{ position: 1, sourceNodeId: 'ref', filePath: '/original.png' }];
+    request.targetSignature = bridge.captureRecoveryTarget(request);
+    await bridge.attachRecoveredGeneration(request, result);
+    const node = board.readProject('original').items[0];
+    assert.equal(node.config.prompt, 'raw draft');
+    assert.deepEqual(node.generation.promptDraftConfig, request.promptDraftConfig);
+    assert.deepEqual(node.generation.referenceBindings, request.referenceBindings);
+    assert.equal(node.generation.requestPrompt, 'expanded provider request');
+});
