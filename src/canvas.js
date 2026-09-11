@@ -30,6 +30,7 @@ import {
     getGeneratorPlaceholderSize,
     getGeneratorSplitPositions
 } from './generator-placeholder-layout.js';
+import { formatGenerationElapsed, isGenerationRecoveryActive, canRecoverGenerationTask } from './generation-progress.js';
 import {
     appendGeneratorResult,
     clearGeneratorResults,
@@ -2167,6 +2168,7 @@ export class CanvasManager {
         const entry = this.items.get(nodeId);
         const data = entry?.data;
         if (!entry || !data?.composerDraft) return data || null;
+        const citationOccurrences = this._generationComposerCitationState(data).occurrences.map(entry => ({ ...entry }));
         const sourceId = data.composerSourceItemId;
         const useSourceAsReference = data.composerUseSourceAsReference !== false;
         const referenceConnections = Array.isArray(data.composerReferenceConnections)
@@ -2233,12 +2235,14 @@ export class CanvasManager {
             this.items.set(nodeId, { group: draftGroup, data, loaded: true, loading: false });
             data.composerReferenceConnections = referenceConnections;
             data.composerReferenceItemIds = referenceConnections.map(reference => reference.nodeId);
+            data.config.referenceCitationOccurrences = citationOccurrences;
             this._showCanvasStatus('参考图连接失败，请重新选择图片', 3200);
             return null;
         }
         if (this._generationComposer?.nodeId === nodeId) {
             this._generationComposer.materialized = true;
         }
+        data.config.referenceCitationOccurrences = citationOccurrences;
         this._renderGenerationComposerReferences(nodeId);
         this._positionGenerationComposer();
         this.emit('change');
@@ -2650,6 +2654,22 @@ export class CanvasManager {
         return control;
     }
 
+    _addGenerationElapsedLabel(group, width, height, startedAt) {
+        const label = new Konva.Text({
+            name: 'generationElapsed', width, height,
+            text: formatGenerationElapsed(startedAt),
+            align: 'center', verticalAlign: 'middle',
+            fontFamily: 'Segoe UI, sans-serif', fontSize: Math.min(24, Math.max(10, height * 0.16)),
+            fontStyle: 'bold', fill: '#c6c8ce', listening: false,
+            shadowColor: '#18191b', shadowBlur: 4, shadowOpacity: 0.65
+        });
+        group.add(label);
+        return () => {
+            const value = formatGenerationElapsed(startedAt);
+            if (label.text() !== value) label.text(value);
+        };
+    }
+
     addGenerationPlaceholder(options = {}) {
         const referenceSize = this._getGenerationReferenceSize(options.sourceReferences);
         const { width, height } = resolveGenerationDisplaySize({
@@ -2743,6 +2763,9 @@ export class CanvasManager {
         });
         sweepClip.add(sweep);
         group.add(sweepClip);
+        const updateElapsed = kind === 'video'
+            ? this._addGenerationElapsedLabel(group, width, height, options.startedAt || Date.now())
+            : null;
         this._addGenerationCancelControl(group, {
             x: Math.max(8, width - 58),
             y: 8,
@@ -2756,6 +2779,7 @@ export class CanvasManager {
         const animation = new Konva.Animation((frame) => {
             const progress = ((frame?.time || 0) % 1500) / 1500;
             sweep.x(-sweepWidth + ((width + sweepWidth) * progress));
+            updateElapsed?.();
         }, this.transientLayer);
         this.generationPlaceholders.set(id, { group, animation, placement });
         animation.start();
@@ -4271,8 +4295,6 @@ export class CanvasManager {
                 const raw = items[index];
                 if (raw?.kind === 'op') {
                     if (raw.id && this.items.has(raw.id)) continue;
-                    raw.runStatus = 'idle';
-                    raw.runError = '';
                     this._createOpNode(raw);
                     continue;
                 }
@@ -5748,12 +5770,13 @@ export class CanvasManager {
 
         const status = data.runStatus || 'idle';
         const recoveryTask = this.generationTaskStates.get(data.id) || null;
-        const isRecoverable = ['disconnected', 'failed'].includes(recoveryTask?.status);
-        const isRecovering = recoveryTask?.status === 'running'
-            && recoveryTask?.params?.syncStage === 'recovering';
+        const isRecovering = isGenerationRecoveryActive(recoveryTask);
         const results = ensureGeneratorResultEntries(data);
         const resultCount = results.length;
-        const isBusy = status === STATUS.QUEUED || status === STATUS.RUNNING || isRecovering;
+        const isRecoverable = ['disconnected', 'failed', 'canceled'].includes(recoveryTask?.status)
+            || (recoveryTask?.status === 'success' && !resultCount && canRecoverGenerationTask(recoveryTask));
+        const isBusy = recoveryTask ? recoveryTask.status === 'running'
+            : status === STATUS.QUEUED || status === STATUS.RUNNING;
         const stroke = isRecoverable
             ? 'rgba(221, 166, 90, 0.72)'
             : status === STATUS.ERROR && !isRecovering
@@ -5861,7 +5884,7 @@ export class CanvasManager {
 
         if (results[0]) {
             this._addGeneratorResultPreview(group, group, data, results[0], width, height, 'generatorResultPreview');
-        } else {
+        } else if (!(isBusy && data.nodeType === 'video')) {
             const glyph = NODE_GLYPH_PATHS[data.nodeType] || NODE_GLYPH_PATHS.image;
             group.add(new Konva.Path({
                 data: glyph,
@@ -5901,9 +5924,16 @@ export class CanvasManager {
             });
             clip.add(sweep);
             group.add(clip);
+            if (!(Number(data.runStartedAt) > 0)) {
+                data.runStartedAt = Date.parse(recoveryTask?.createdAt || '') || Date.now();
+            }
+            const updateElapsed = data.nodeType === 'video'
+                ? this._addGenerationElapsedLabel(group, width, height, data.runStartedAt)
+                : null;
             const animation = new Konva.Animation(frame => {
                 const progress = ((frame?.time || 0) % 1500) / 1500;
                 sweep.x(-sweepWidth + (width + sweepWidth) * progress);
+                updateElapsed?.();
             }, this.layer);
             group.setAttr('generatorAnimation', animation);
             animation.start();
@@ -5916,7 +5946,7 @@ export class CanvasManager {
             });
         }
 
-        if (status === STATUS.ERROR && !isRecovering && data.runError) {
+        if (status === STATUS.ERROR && !isRecovering && recoveryTask?.status !== 'success' && data.runError) {
             group.add(new Konva.Rect({
                 x: 8,
                 y: height - 44,
@@ -5940,7 +5970,7 @@ export class CanvasManager {
             }));
         }
 
-        if (isRecoverable) {
+        if (isRecoverable && (recoveryTask.status === 'failed' || canRecoverGenerationTask(recoveryTask))) {
             this._addGenerationRecoveryControl(group, data, recoveryTask, width, height);
         }
 
@@ -5995,13 +6025,13 @@ export class CanvasManager {
             lineJoin: 'round',
             listening: false
         });
-        const isDownloadRecovery = task?.status === 'failed'
-            && task?.params?.syncStage === 'download'
-            && Boolean(task?.taskId);
+        const taskCanRecover = canRecoverGenerationTask(task);
         const isPromptModerationRecovery = task?.status === 'failed'
             && task?.params?.syncStage === 'prompt_moderation_failed'
-            && Boolean(task?.taskId);
-        const isRetry = task?.status === 'failed' && !isDownloadRecovery && !isPromptModerationRecovery;
+            && taskCanRecover;
+        const isDownloadRecovery = Boolean(task?.filePath)
+            || (task?.params?.syncStage === 'download' && taskCanRecover);
+        const isRetry = task?.status === 'failed' && !taskCanRecover && !isPromptModerationRecovery;
         const label = new Konva.Text({
             x: 38,
             y: 8,
@@ -6027,7 +6057,7 @@ export class CanvasManager {
             background.stroke('rgba(231, 182, 113, 0.9)');
             document.body.style.cursor = 'pointer';
             this._showCanvasStatus(isDownloadRecovery
-                ? '继续下载已完成的视频，不会重复提交'
+                ? '恢复已完成的产物，不会重复提交'
                 : (isRetry
                     ? '使用原参数重新提交，并恢复到当前节点'
                     : '从服务器继续原任务，不会重复提交'));
@@ -6059,12 +6089,8 @@ export class CanvasManager {
             const nodeId = String(task?.params?.nodeId || '').trim();
             if (!nodeId || resolvedNodeIds.has(nodeId)) return;
             resolvedNodeIds.add(nodeId);
-            const canResume = task?.kind === 'video' && Boolean(task?.taskId);
-            const relevant = task?.status === 'failed'
-                || (canResume && (
-                    task?.status === 'disconnected'
-                    || (task?.status === 'running' && task?.params?.syncStage === 'recovering')
-                ));
+            const relevant = ['image', 'video'].includes(task?.kind)
+                && ['failed', 'disconnected', 'canceled', 'running', 'success'].includes(task?.status);
             if (!relevant) return;
             next.set(nodeId, task);
         });
@@ -6420,6 +6446,8 @@ export class CanvasManager {
 
     _disposeGeneratorPreviewMedia(group) {
         if (!group) return;
+        group.getAttr('generatorAnimation')?.stop?.();
+        group.setAttr('generatorAnimation', null);
         group.getAttr('generatorVideoAnimation')?.stop?.();
         group.setAttr('generatorVideoAnimation', null);
         const videos = group.getAttr('generatorPreviewVideos') || [];
@@ -8768,19 +8796,18 @@ export class CanvasManager {
                 tile.tabIndex = 0;
                 tile.setAttribute('role', 'button');
                 tile.setAttribute('aria-label', `引用${referenceLabel}`);
-                tile.setAttribute('aria-pressed', citationState.selectedIds.has(connection.id) ? 'true' : 'false');
                 tile.title = `点击引用${referenceLabel} · ${tile.title}`;
-                const toggleCitation = () => this._toggleGenerationComposerCitation(nodeId, connection.id);
+                const addCitation = () => this._addGenerationComposerCitation(nodeId, connection.id);
                 tile.addEventListener('pointerdown', event => {
                     if (event.target.closest('button')) return;
                     event.preventDefault();
                 });
-                tile.addEventListener('click', toggleCitation);
+                tile.addEventListener('click', addCitation);
                 tile.addEventListener('keydown', event => {
                     if (event.target !== tile) return;
                     if (event.key !== 'Enter' && event.key !== ' ') return;
                     event.preventDefault();
-                    toggleCitation();
+                    addCitation();
                 });
             } else {
                 const icon = document.createElement('span');
@@ -8845,7 +8872,19 @@ export class CanvasManager {
         const configuredIds = Array.isArray(data.config.referenceCitationIds)
             ? data.config.referenceCitationIds.filter(id => validIds.has(id))
             : [];
-        const selectedIds = new Set(configuredIds);
+        const occurrences = (Array.isArray(data.config.referenceCitationOccurrences)
+            ? data.config.referenceCitationOccurrences
+            : configuredIds.map(connectionId => ({
+                id: crypto.randomUUID(), connectionId,
+                offset: data.config.referenceCitationOffsets?.[connectionId]
+            }))).map(entry => {
+                if (!entry) return null;
+                const reference = imageReferences.find(({ connection }) => connection.id === entry.connectionId)
+                    || imageReferences.find(({ source }) => source.id === entry.sourceNodeId);
+                return reference ? { ...entry, connectionId: reference.connection.id, sourceNodeId: reference.source.id } : null;
+            }).filter(Boolean);
+        data.config.referenceCitationOccurrences = occurrences;
+        const selectedIds = new Set(occurrences.map(entry => entry.connectionId));
         const orderedIds = imageReferences
             .map(({ connection }) => connection.id)
             .filter(id => selectedIds.has(id));
@@ -8866,29 +8905,27 @@ export class CanvasManager {
         data.config.referenceCitationIds = orderedIds;
         data.config.referenceCitationLabels = labels;
         data.config.referenceCitationOffsets = offsets;
-        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets };
+        return { imageReferences, selectedIds: new Set(orderedIds), orderedIds, labels, offsets, occurrences };
     }
 
-    _toggleGenerationComposerCitation(nodeId, connectionId) {
+    _addGenerationComposerCitation(nodeId, connectionId) {
         const active = this._generationComposer;
         const data = this.items.get(nodeId)?.data;
         if (active?.nodeId !== nodeId || !data) return;
         const state = this._generationComposerCitationState(data);
-        if (!state.imageReferences.some(({ connection }) => connection.id === connectionId)) return;
-        const adding = !state.selectedIds.has(connectionId);
-        if (adding) state.selectedIds.add(connectionId);
-        else {
-            state.selectedIds.delete(connectionId);
-            delete data.config.referenceCitationOffsets?.[connectionId];
-        }
-        data.config.referenceCitationIds = [...state.selectedIds];
+        const index = state.imageReferences.findIndex(({ connection }) => connection.id === connectionId);
+        if (index < 0) return;
+        const prompt = active.element.querySelector('[data-prompt]');
+        const citation = this._createGenerationComposerCitation(
+            nodeId, connectionId, this._generationImageReferenceLabel(index), crypto.randomUUID()
+        );
+        this._insertGenerationComposerCitation(prompt, citation, undefined, this._generationComposerPromptSelection(prompt));
+        this._syncGenerationComposerCitationsFromPrompt(data, prompt);
         active.changed = true;
         this._renderGenerationComposerReferences(nodeId);
-        const prompt = active.element.querySelector('[data-prompt]');
-        const citation = [...prompt.querySelectorAll('[data-citation-id]')]
-            .find(element => element.dataset.citationId === connectionId);
-        if (adding && citation) this._focusGenerationComposerPromptAfterCitation(prompt, citation);
-        else this._focusGenerationComposerPromptEnd(prompt);
+        this._focusGenerationComposerPromptAfterCitation(prompt, citation);
+        this._cacheMediaGenerationPromptDraft(data);
+        this.emit('change');
     }
 
     _renderGenerationComposerCitations(nodeId, references = null) {
@@ -8903,34 +8940,33 @@ export class CanvasManager {
             this._generationImageReferenceLabel(index)
         ]));
         const existingById = new Map();
+        const occurrencesById = new Map(state.occurrences.map(entry => [entry.id, entry]));
         prompt.querySelectorAll('[data-citation-id]').forEach(citation => {
-            const citationId = citation.dataset.citationId;
-            if (!state.selectedIds.has(citationId) || existingById.has(citationId)) {
+            const occurrenceId = citation.dataset.citationOccurrenceId;
+            const occurrence = occurrencesById.get(occurrenceId);
+            if (!occurrence || existingById.has(occurrenceId)) {
                 citation.remove();
                 return;
             }
-            const label = labelsById.get(citationId);
+            citation.dataset.citationId = occurrence.connectionId;
+            const label = labelsById.get(occurrence.connectionId);
             citation.textContent = label;
             citation.title = `取消引用${label}`;
             citation.setAttribute('aria-label', `取消引用${label}`);
-            existingById.set(citationId, citation);
+            existingById.set(occurrenceId, citation);
         });
 
-        const selectionRange = this._generationComposerPromptSelection(prompt);
-        const missing = state.imageReferences.filter(({ connection }) =>
-            state.selectedIds.has(connection.id) && !existingById.has(connection.id)
-        );
+        const missing = state.occurrences.filter(entry => !existingById.has(entry.id));
         for (let index = missing.length - 1; index >= 0; index -= 1) {
-            const { connection } = missing[index];
-            const label = labelsById.get(connection.id);
-            const pill = this._createGenerationComposerCitation(nodeId, connection.id, label);
+            const entry = missing[index];
+            const label = labelsById.get(entry.connectionId);
+            const pill = this._createGenerationComposerCitation(nodeId, entry.connectionId, label, entry.id);
             this._insertGenerationComposerCitation(
                 prompt,
                 pill,
-                state.offsets[connection.id],
-                selectionRange
+                Number.isFinite(entry.offset) ? entry.offset : this._generationComposerPromptValue(prompt).length
             );
-            existingById.set(connection.id, pill);
+            existingById.set(entry.id, pill);
         }
         const synced = this._syncGenerationComposerCitationsFromPrompt(data, prompt);
         prompt.dataset.empty = this._generationComposerPromptValue(prompt) || synced.selectedIds.size
@@ -8938,11 +8974,12 @@ export class CanvasManager {
             : 'true';
     }
 
-    _createGenerationComposerCitation(nodeId, connectionId, label) {
+    _createGenerationComposerCitation(nodeId, connectionId, label, occurrenceId) {
         const pill = document.createElement('button');
         pill.type = 'button';
         pill.className = 'generation-composer-citation';
         pill.dataset.citationId = connectionId;
+        pill.dataset.citationOccurrenceId = occurrenceId;
         pill.contentEditable = 'false';
         pill.textContent = label;
         pill.title = `取消引用${label}`;
@@ -8954,7 +8991,16 @@ export class CanvasManager {
         pill.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            this._toggleGenerationComposerCitation(nodeId, connectionId);
+            const active = this._generationComposer;
+            const data = this.items.get(nodeId)?.data;
+            if (active?.nodeId !== nodeId || !data) return;
+            const prompt = active.element.querySelector('[data-prompt]');
+            pill.remove();
+            this._syncGenerationComposerCitationsFromPrompt(data, prompt);
+            active.changed = true;
+            this._renderGenerationComposerReferences(nodeId);
+            this._cacheMediaGenerationPromptDraft(data);
+            this.emit('change');
         });
         return pill;
     }
@@ -9026,7 +9072,7 @@ export class CanvasManager {
             }
             if (node.nodeType !== Node.ELEMENT_NODE) return;
             if (node.matches('[data-citation-id]')) {
-                offsets[node.dataset.citationId] = textOffset;
+                offsets[node.dataset.citationOccurrenceId] = textOffset;
                 return;
             }
             if (node.tagName === 'BR') {
@@ -9042,16 +9088,19 @@ export class CanvasManager {
     _syncGenerationComposerCitationsFromPrompt(data, prompt) {
         const references = this._opReferenceEntries(data);
         const imageReferences = references.filter(({ source }) => this._getItemMediaType(source) === 'image');
-        const visibleIds = new Set([...prompt.querySelectorAll('[data-citation-id]')]
-            .map(citation => citation.dataset.citationId));
-        data.config.referenceCitationIds = imageReferences
-            .map(({ connection }) => connection.id)
-            .filter(id => visibleIds.has(id));
-        const state = this._generationComposerCitationState(data, references);
+        const validIds = new Set(imageReferences.map(({ connection }) => connection.id));
         const measuredOffsets = this._generationComposerCitationOffsets(prompt);
-        data.config.referenceCitationOffsets = Object.fromEntries(state.orderedIds
-            .filter(id => Number.isFinite(measuredOffsets[id]))
-            .map(id => [id, measuredOffsets[id]]));
+        data.config.referenceCitationOccurrences = [...prompt.querySelectorAll('[data-citation-id]')]
+            .filter(citation => validIds.has(citation.dataset.citationId))
+            .map(citation => ({
+                id: citation.dataset.citationOccurrenceId,
+                connectionId: citation.dataset.citationId,
+                sourceNodeId: imageReferences.find(({ connection }) => connection.id === citation.dataset.citationId)?.source.id,
+                offset: measuredOffsets[citation.dataset.citationOccurrenceId]
+            }));
+        const state = this._generationComposerCitationState(data, references);
+        data.config.referenceCitationOffsets = Object.fromEntries(state.occurrences
+            .map(entry => [entry.connectionId, entry.offset]));
         state.offsets = data.config.referenceCitationOffsets;
         return state;
     }

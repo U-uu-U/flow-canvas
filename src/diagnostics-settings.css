@@ -1,0 +1,11 @@
+#diagnosticsSettings { border-top: 1px solid rgba(255,255,255,.1); margin-top: 18px; padding-top: 12px; color: #aeb1b8; font-size: 12px; }
+#diagnosticsSettings summary { cursor: pointer; padding: 6px 0; }
+.diagnostics-actions { display: flex; align-items: center; gap: 6px; margin: 10px 0; }
+.diagnostics-environment { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.diagnostics-actions button { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; padding: 0; color: #aeb1b8; background: #25262a; border: 1px solid #3b3d42; border-radius: 5px; cursor: pointer; }
+.diagnostics-actions button:hover { background: #34363a; color: #eceef1; }
+.diagnostics-actions button:disabled { opacity: .5; cursor: wait; }
+.diagnostics-errors { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; max-height: 230px; overflow: auto; font: 11px/1.6 Consolas, monospace; scrollbar-width: thin; scrollbar-color: #50535a transparent; }
+.diagnostics-errors::-webkit-scrollbar { width: 5px; height: 5px; }
+.diagnostics-errors::-webkit-scrollbar-thumb { background: #50535a; border-radius: 3px; }
+.diagnostics-status { overflow-wrap: anywhere; font-size: 11px; color: #969ba4; }

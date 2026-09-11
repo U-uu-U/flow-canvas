@@ -33,6 +33,12 @@ import {
     parseAgentImageCompilationResponse
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
+import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
+import { DEFAULT_VIDEO_MODEL_PROFILE, getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import {
+    AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
+    settleRuntimeConversation, formatAgentElapsed
+} from './agent-runtime-view.js';
 import { createBoardToolRegistry } from './board-tool-registry.js';
 import {
     AGENT_SKILL_CATEGORY_IDS,
@@ -64,146 +70,9 @@ function normalizeRavenHashEndpoint(endpoint) {
     return value;
 }
 
-const VIDEO_MODEL_PROFILES = [
-    {
-        matchModel: /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i,
-        label: 'Seedance 2.5',
-        routeLabel: '备用路线',
-        price: { amount: 6, currency: 'CNY', unit: 'request' },
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: [30],
-        durationControl: 'fixed',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 9, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        matchModel: /^seedance_v2\.5$/i,
-        label: 'HM-Seedance 2.5',
-        price: { amount: 1.5, currency: 'CNY', unit: 'request' },
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: Array.from({ length: 27 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 10, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        match: /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i,
-        label: 'Seedance 2.5',
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '4:3', '3:4'],
-        resolutions: ['720p'],
-        durations: Array.from({ length: 27 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 10, video: 0, audio: 0 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 30
-    },
-    {
-        match: /seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i,
-        label: 'Seedance 2.0',
-        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
-        resolutions: ['480p', '720p', '1080p', '4K'],
-        durations: Array.from({ length: 15 }, (_, index) => index + 1),
-        durationControl: 'slider',
-        supportsWebSearch: true,
-        defaultRatio: '16:9',
-        defaultResolution: '1080p',
-        defaultDuration: 5
-    },
-    {
-        match: /seedance[^a-z0-9]*(?:1[._-]?5|1[._-]?0[-_]?pro)/i,
-        label: 'Seedance 1.5',
-        ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive'],
-        resolutions: ['480p', '720p', '1080p'],
-        durations: [-1, 5, 10, 12],
-        durationControl: 'select',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: '720p',
-        defaultDuration: 5
-    },
-    {
-        match: /minimax[^a-z0-9]*h3/i,
-        label: 'MiniMax H3',
-        ratios: ['adaptive', '16:9', '9:16', '1:1', '2:3', '3:2', '4:3', '3:4', '21:9'],
-        resolutions: ['2k', '4k', '1080p', '768p', '480p'],
-        durations: Array.from({ length: 12 }, (_, index) => index + 4),
-        durationControl: 'slider',
-        supportsWebSearch: false,
-        supportsCameraFixed: false,
-        supportsGeneratedAudio: false,
-        supportsWatermark: false,
-        referenceLimits: { image: 9, video: 3, audio: 3 },
-        defaultRatio: 'adaptive',
-        resolveAdaptiveRatio: true,
-        adaptiveFallbackRatio: '16:9',
-        defaultResolution: '2k',
-        defaultDuration: 4
-    },
-    {
-        match: /(?:dashscope|wanx|tongyi|通义万相|wan[^\s]*(?:t2v|i2v))/i,
-        label: 'DashScope',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
-        resolutions: ['720P', '1080P'],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: '720P',
-        defaultDuration: 5
-    },
-    {
-        match: /kling|可灵/i,
-        label: 'Kling',
-        ratios: ['16:9', '9:16', '1:1'],
-        resolutions: [],
-        durations: [3, 5, 10, 15],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '16:9',
-        defaultResolution: null,
-        defaultDuration: 5
-    },
-    {
-        match: /tencent|vidu|腾讯/i,
-        label: 'Tencent / Vidu',
-        ratios: ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'],
-        resolutions: [],
-        durations: [5, 10],
-        durationControl: 'segmented',
-        supportsWebSearch: false,
-        defaultRatio: '1:1',
-        defaultResolution: null,
-        defaultDuration: 5
-    }
-];
 
 function formatVideoModelPrice(price) {
-    if (price?.currency !== 'CNY' || price?.unit !== 'request') return '';
+    if (price?.kind !== 'sale' || !price.source || price.currency !== 'CNY' || price.unit !== 'request') return '';
     const amount = Number(price.amount);
     if (!Number.isFinite(amount) || amount < 0) return '';
     return `¥${Number.isInteger(amount) ? amount : amount.toFixed(2)}/次`;
@@ -217,20 +86,6 @@ function formatVideoModelProfile(profile, includeLabel = true) {
     ].filter(Boolean).join(' · ');
 }
 
-const DEFAULT_VIDEO_MODEL_PROFILE = {
-    label: '未收录模型',
-    ratios: [],
-    resolutions: [],
-    durations: [],
-    durationControl: null,
-    supportsWebSearch: false,
-    supportsCameraFixed: false,
-    supportsGeneratedAudio: false,
-    supportsWatermark: false,
-    defaultRatio: null,
-    defaultResolution: null,
-    defaultDuration: null
-};
 
 const DEFAULT_IMAGE_SIZES = [
     { value: '', label: '自动（匹配比例，优先最大）' },
@@ -362,6 +217,11 @@ export class AgentSidebar {
         this.pendingAgentAttachments = [];
         this.pendingAgentSource = null;
         this.isAgentSending = false;
+        this.runtimeClient = null;
+        this.runtimeStarting = new Set();
+        this.runtimeCards = new Map();
+        this.runtimeStartErrors = new Map();
+        this.activeRuntimeProjectId = this.options.getActiveProjectId?.() ?? null;
         this.agentModelKind = 'text';
         this.agentSkillCategory = 'all';
         this.customAgentSkills = this._loadCustomAgentSkills();
@@ -392,7 +252,6 @@ export class AgentSidebar {
         this.textModelSelectEl = document.getElementById('agentTextModelSelect');
         this.imageModelSelectEl = document.getElementById('agentImageModelSelect');
         this.videoModelSelectEl = document.getElementById('agentVideoModelSelect');
-        this.modePicker = document.getElementById('creationModePicker');
         this.modeTitle = document.getElementById('creationModeTitle');
         this.conversationMenuBtn = document.getElementById('agentConversationMenuBtn');
         this.conversationTitleBtn = document.getElementById('agentConversationTitleBtn');
@@ -524,14 +383,13 @@ export class AgentSidebar {
         this.imagePromptPresetDelete = document.getElementById('imagePromptPresetDelete');
         this.imagePromptPresetCount = document.getElementById('imagePromptPresetCount');
         this.imagePromptPresetStatus = document.getElementById('imagePromptPresetStatus');
-        this.currentMode = 'review';
+        this.currentMode = 'canvas';
         this.taskHistoryOpen = false;
         this.taskHistoryFilter = 'all';
         this.generationTasks = [];
         this.processedBrowserSyncEventIds = new Set();
         this.browserSyncPolling = false;
         this.activeVideoWorkspaceTaskId = null;
-        this.modePickerHideTimer = null;
         this.lastCanvasSelection = this.options.getSelectedCanvasEntries?.() || [];
 
         // Form inputs
@@ -558,6 +416,7 @@ export class AgentSidebar {
 
         // 绑定事件
         this._bindEvents();
+        this._bindAgentSidebarResize();
         this._syncHudState();
 
         // 渲染 UI
@@ -575,6 +434,11 @@ export class AgentSidebar {
         this.apiConfigReady = this._restoreDurableApiConfig();
         this._restoreAgentConversation(this.activeProjectCacheKey);
         this._restorePendingAgentAttachments();
+        this._connectAgentRuntime();
+        this.runtimePageHide = () => this.runtimeClient?.dispose();
+        this.runtimePageShow = () => this._connectAgentRuntime();
+        window.addEventListener('pagehide', this.runtimePageHide);
+        window.addEventListener('pageshow', this.runtimePageShow);
         window.flowCanvas?.browserSync?.onTaskSubmitted?.((event) => this._handleTaskSubmitted(event));
         window.flowCanvas?.browserSync?.onTaskCompleted?.((event) => this._handleTaskCompleted(event));
         window.flowCanvas?.mcp?.onVideoProgress?.((event) => this._handleVideoProgress(event));
@@ -652,6 +516,7 @@ export class AgentSidebar {
                 && message.content.trim())
             .slice(-AGENT_CONVERSATION_MESSAGE_LIMIT)
             .map(message => ({
+                ...message,
                 role: message.role,
                 content: message.content.slice(0, 12000)
             }));
@@ -662,10 +527,19 @@ export class AgentSidebar {
     }
 
     _normalizeAgentConversationProject(state) {
-        return normalizeAgentConversationProject(state, {
+        const originals = Array.isArray(state?.conversations) ? state.conversations : [];
+        const normalized = normalizeAgentConversationProject(state, {
             createId: () => this._createAgentConversationId(),
             normalizeMessages: messages => this._normalizeAgentMessages(messages)
         });
+        return {
+            ...state,
+            ...normalized,
+            conversations: normalized.conversations.map(conversation => ({
+                ...originals.find(entry => entry.id === conversation.id),
+                ...conversation
+            }))
+        };
     }
 
     _saveAgentConversationProject(key, project, store = this._loadAgentConversationStore()) {
@@ -734,6 +608,7 @@ export class AgentSidebar {
         this._saveAgentConversationProject(key, project, store);
         this._renderAgentMessages();
         this._renderAgentConversationHeader(project);
+        this._watchAgentRuntime();
     }
 
     _renderAgentConversationHeader(projectState = null) {
@@ -815,6 +690,7 @@ export class AgentSidebar {
         this._renderAgentConversationHeader(project);
         this._closeAgentHeaderPopovers();
         this.inputEl?.focus();
+        this._watchAgentRuntime();
     }
 
     _switchAgentConversation(conversationId) {
@@ -1162,42 +1038,55 @@ export class AgentSidebar {
     _renderAgentMessages() {
         if (!this.messagesEl) return;
         this.messagesEl.innerHTML = '';
+        this.runtimeCards?.clear();
         if (this.messages.length === 0) {
             this._renderAgentWelcome();
+            this._renderAgentRuntimeCards();
             return;
         }
         this.messages.forEach(message => {
-            const element = this._appendAgentMessageElement(message.role, message.content);
-            if (message.role === 'assistant') this._attachAgentPlanAction(element, message.content);
+            const element = this._appendAgentMessageElement(message.role, message.content, message);
+            if (message.runtimeRunId) element.dataset.runtimeMessageId = message.runtimeRunId;
+            if (message.role === 'assistant' && !message.runtimeRunId) this._attachAgentPlanAction(element, message.content);
         });
+        this._renderAgentRuntimeCards();
         this._scrollAgentMessages();
     }
 
-    _appendAgentMessageElement(role, content) {
+    _appendAgentMessageElement(role, content, metadata = {}) {
         if (!this.messagesEl) return null;
         this.messagesEl.querySelector('.agent-welcome')?.remove();
         const element = document.createElement('div');
         element.className = `agent-msg ${role}`;
 
-        const roleElement = document.createElement('span');
-        roleElement.className = 'agent-msg-role';
-        roleElement.setAttribute('aria-hidden', 'true');
-        if (role === 'assistant') {
-            roleElement.innerHTML = '<svg class="flow-icon flow-icon-sm"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>';
-        } else {
-            roleElement.textContent = role === 'user' ? '你' : '!';
-        }
-
         const body = document.createElement('div');
         body.className = 'agent-msg-body';
-        const label = document.createElement('span');
-        label.className = 'agent-msg-label';
-        label.textContent = role === 'assistant' ? 'AI Agent' : role === 'user' ? '你' : '请求错误';
+        element.setAttribute('aria-label', role === 'assistant' ? '助手回复' : role === 'user' ? '你的消息' : '请求错误');
+        if (role === 'error') element.setAttribute('role', 'alert');
+        const duration = role === 'assistant' ? formatAgentElapsed(metadata.elapsedMs) : '';
+        if (duration) {
+            const elapsed = document.createElement('div');
+            elapsed.className = 'agent-msg-duration';
+            elapsed.textContent = duration;
+            elapsed.title = '从发送到完成的总用时';
+            body.append(elapsed);
+        }
         const contentElement = document.createElement('div');
         contentElement.className = 'agent-msg-content';
         contentElement.textContent = content;
-        body.append(label, contentElement);
-        element.append(roleElement, body);
+        body.append(contentElement);
+        if (Number.isFinite(metadata.createdAt)) {
+            const timestamp = new Date(metadata.createdAt);
+            if (Number.isFinite(timestamp.getTime())) {
+                const time = document.createElement('time');
+                time.className = 'agent-msg-time';
+                time.dateTime = timestamp.toISOString();
+                time.textContent = timestamp.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+                time.title = timestamp.toLocaleString('zh-CN');
+                body.append(time);
+            }
+        }
+        element.append(body);
         this.messagesEl.appendChild(element);
         this._scrollAgentMessages();
         return element;
@@ -1227,6 +1116,18 @@ export class AgentSidebar {
     }
 
     _clearAgentConversation() {
+        const store = this._loadAgentConversationStore();
+        const conversation = store[this.activeProjectCacheKey]?.conversations?.find(entry => entry.id === this.activeConversationId);
+        if (conversation) {
+            conversation.runtimeReceipts ||= {};
+            for (const run of this.runtimeClient?.runs.values() || []) {
+                if (this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)) {
+                    conversation.runtimeReceipts[run.id] = { ignored: true };
+                }
+            }
+            for (const receipt of Object.values(conversation.runtimeReceipts)) receipt.ignored = true;
+            this._saveAgentConversationProject(this.activeProjectCacheKey, store[this.activeProjectCacheKey], store);
+        }
         this.messages = [];
         this.conversationFiles = [];
         this._saveAgentConversation(this.activeProjectCacheKey, this.messages, {
@@ -1607,6 +1508,225 @@ export class AgentSidebar {
         return this._activeAgentSkills().map(skill => `${skill.name}：${skill.instruction}`);
     }
 
+    _connectAgentRuntime() {
+        const api = window.flowCanvas?.agent;
+        if (!api?.start) return;
+        if (!this.runtimeClient || this.runtimeClient.closed) {
+            const previousRuns = this.runtimeClient?.runs;
+            this.runtimeClient = new AgentRuntimeClient(api, {
+                onChange: run => this._onAgentRuntimeChange(run),
+                onSync: scope => {
+                    if (this.runtimeSyncError && this._isActiveConversation(this._projectCacheKey(scope.projectId), scope.conversationId)) {
+                        this.runtimeSyncError = '';
+                        this._renderAgentRuntimeCards();
+                    }
+                },
+                onError: (error, scope) => {
+                    console.warn('[AgentRuntime] Sync failed:', error);
+                    if (!scope || this._isActiveConversation(this._projectCacheKey(scope.projectId), scope.conversationId)) {
+                        this.runtimeSyncError = '运行状态同步失败，正在重试';
+                        this._renderAgentRuntimeCards();
+                    }
+                }
+            });
+            if (previousRuns) this.runtimeClient.runs = previousRuns;
+            this.runtimeClient.connect();
+        }
+        this._watchAgentRuntime();
+    }
+
+    _watchAgentRuntime() {
+        this.runtimeSyncError = '';
+        this._syncAgentRuntimeSendState();
+        this._renderAgentRuntimeCards();
+        if (this.runtimeClient && !this.runtimeClient.closed) {
+            void this.runtimeClient.watch({
+                projectId: this.activeRuntimeProjectId
+            });
+        }
+    }
+
+    _syncAgentRuntimeSendState() {
+        if (window.flowCanvas?.agent?.start && this.sendBtn) {
+            const activeRuns = [...(this.runtimeClient?.runs.values() || [])].some(run =>
+                this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+                && !isRuntimeTerminal(run.status));
+            this.sendBtn.disabled = this.runtimeStarting.has(this._activeConversationCacheKey()) || activeRuns;
+        }
+    }
+
+    _onAgentRuntimeChange(run) {
+        if (!run) return;
+        const key = this._projectCacheKey(run.projectId);
+        const store = this._loadAgentConversationStore();
+        let project = store[key];
+        if (run.external && !project?.conversations?.some(entry => entry.id === run.conversationId)) {
+            project ||= { conversations: [], activeConversationId: run.conversationId };
+            project.conversations.push(createAgentConversation({ id: run.conversationId, title: '外部助手任务', customTitle: true }));
+            this._saveAgentConversationProject(key, project, store);
+            if (key === this.activeProjectCacheKey) this._renderAgentConversationHeader();
+        }
+        const index = project?.conversations?.findIndex(entry => entry.id === run.conversationId) ?? -1;
+        let changed = false;
+        if (index >= 0) {
+            const previous = project.conversations[index];
+            let next = settleRuntimeConversation(previous, run);
+            if (isRuntimeTerminal(run.status) && !previous.runtimeReceipts?.[run.id]?.ignored) {
+                const files = mergeAgentConversationFiles(previous.files, runtimeOutputFiles(run), 'output');
+                if (JSON.stringify(files) !== JSON.stringify(previous.files || [])) next = { ...next, files };
+            }
+            if (next !== previous) {
+                next.messages = this._normalizeAgentMessages(next.messages);
+                next.updatedAt = Date.now();
+                project.conversations[index] = next;
+                changed = this._saveAgentConversationProject(key, project, store);
+                if (changed && this._isActiveConversation(key, run.conversationId)) {
+                    this.messages = next.messages;
+                    this.conversationFiles = next.files;
+                    this._renderAgentConversationHeader();
+                }
+            }
+        }
+        if (this._isActiveConversation(key, run.conversationId)) {
+            this.runtimeSyncError = '';
+            if (changed) this._renderAgentMessages();
+            else this._renderAgentRuntimeCards();
+            this._syncAgentRuntimeSendState();
+        } else if (key === this.activeProjectCacheKey) this._renderAgentRuntimeCards();
+    }
+
+    _renderAgentRuntimeCards() {
+        if (!this.messagesEl || !this.runtimeCards) return;
+        this.messagesEl.querySelector('.agent-runtime-external-notice')?.remove();
+        const externalPending = [...(this.runtimeClient?.runs.values() || [])].find(run => run.external
+            && this._projectCacheKey(run.projectId) === this.activeProjectCacheKey
+            && run.conversationId !== this.activeConversationId && run.status === 'awaiting_confirmation');
+        if (externalPending) {
+            const button = document.createElement('button');
+            button.type = 'button'; button.className = 'agent-runtime-external-notice agent-apply-plan-btn';
+            button.textContent = '查看外部助手的待确认任务';
+            button.addEventListener('click', () => this._switchAgentConversation(externalPending.conversationId));
+            this.messagesEl.prepend(button);
+        }
+        const conversation = this._loadAgentConversationStore()[this.activeProjectCacheKey]?.conversations
+            ?.find(entry => entry.id === this.activeConversationId);
+        for (const run of this.runtimeClient?.runs.values() || []) {
+            if (!this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+                || conversation?.runtimeReceipts?.[run.id]?.ignored) continue;
+            let card = this.runtimeCards.get(run.id);
+            if (!card) {
+                card = createRuntimeCard({
+                    onAction: (runId, action, instruction) => this.runtimeClient.act(runId, action, instruction),
+                    onLocate: window.flowCanvas?.shell?.showInExplorer
+                        ? file => window.flowCanvas.shell.showInExplorer(file.filePath)
+                        : null
+                });
+                this.runtimeCards.set(run.id, card);
+                this.messagesEl.querySelector('.agent-welcome')?.remove();
+                const anchor = [...this.messagesEl.querySelectorAll('[data-runtime-message-id]')]
+                    .find(node => node.dataset.runtimeMessageId === run.id);
+                if (anchor) anchor.after(card.root);
+                else this.messagesEl.append(card.root);
+            }
+            card.update(run, {
+                busy: this.runtimeClient.actions.has(run.id),
+                confirmed: this.runtimeClient.confirmedVersions.get(run.id) === run.plan?.version && run.plan?.version != null,
+                saved: this.messages.some(message => message.role === 'assistant' && message.runtimeRunId === run.id)
+            });
+        }
+        let notice = this.messagesEl.querySelector('.agent-runtime-notice');
+        const noticeText = this.runtimeStartErrors.get(this._activeConversationCacheKey())
+            || this.runtimeSyncError
+            || (this.runtimeStarting.has(this._activeConversationCacheKey()) ? '正在提交任务' : '');
+        if (noticeText) {
+            if (!notice) {
+                notice = document.createElement('p');
+                notice.className = 'agent-runtime-notice';
+                notice.setAttribute('role', 'status');
+                this.messagesEl.append(notice);
+            }
+            notice.textContent = noticeText;
+        } else notice?.remove();
+    }
+
+    async _startAgentRuntime({ text, attachments = [], source = null, clearInput = false }) {
+        this._connectAgentRuntime();
+        const projectKey = this.activeProjectCacheKey;
+        const projectId = this.activeRuntimeProjectId;
+        const conversationId = this.activeConversationId;
+        const cacheKey = this._activeConversationCacheKey(projectKey, conversationId);
+        const running = [...this.runtimeClient.runs.values()].some(run =>
+            this._isActiveConversation(this._projectCacheKey(run.projectId), run.conversationId)
+            && !isRuntimeTerminal(run.status));
+        if (this.runtimeStarting.has(cacheKey) || running) return { ok: false, reason: '当前对话已有运行中的任务' };
+        const provider = this._getTextProvider();
+        if (!provider?.endpoint || !provider?.apiKey || !provider?.model) {
+            const reason = '请先配置并选择文字 API。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
+        }
+        // Capture identity and request synchronously; the parent owns flushing and source binding.
+        const requestMessages = this._normalizeAgentMessages([...this.messages, { role: 'user', content: text, createdAt: Date.now() }]);
+        const selection = this.options.getSelectedCanvasEntries?.() ?? this.lastCanvasSelection ?? [];
+        const request = {
+            projectId, conversationId, provider: { ...provider },
+            messages: requestMessages.map(({ role, content }) => ({ role, content })),
+            selectedItemIds: [...new Set(selection.map(entry => entry?.id).filter(id => typeof id === 'string' && id))],
+            attachments: structuredClone(attachments),
+            ...(source ? { source: structuredClone(source) } : {}),
+            mode: this.globalConfig.agentExecutionMode === 'ask' ? 'ask' : 'auto',
+            skillInstructions: this._agentImageSkillInstructions()
+        };
+        this._saveAgentConversation(projectKey, requestMessages, {
+            conversationId, files: this._captureAgentConversationFiles(attachments, 'input')
+        });
+        this.runtimeStarting.add(cacheKey);
+        this.runtimeStartErrors.delete(cacheKey);
+        this._renderAgentMessages();
+        this._syncAgentRuntimeSendState();
+        if (clearInput && this.inputEl) {
+            this.inputEl.value = '';
+            this.inputEl.style.height = 'auto';
+        }
+        this.setMode('agent');
+        try {
+            if (await this.options.flushBoard?.() === false) {
+                throw new Error('本地画板保存冲突，任务未启动。请先解决保存冲突后重试。');
+            }
+            const snapshot = await window.flowCanvas.agent.start(request);
+            if (!snapshot?.id || snapshot.projectId !== projectId || snapshot.conversationId !== conversationId) {
+                throw new Error('Runtime 返回的任务身份无效');
+            }
+            const store = this._loadAgentConversationStore();
+            const project = store[projectKey];
+            const conversation = project?.conversations?.find(entry => entry.id === conversationId);
+            // Events can arrive before start resolves. Never replace the newer conversation.
+            if (conversation) {
+                const message = conversation.messages[requestMessages.length - 1];
+                if (message?.role === 'user' && message.content === text) message.runtimeRunId = snapshot.id;
+                this._saveAgentConversationProject(projectKey, project, store);
+                if (this._isActiveConversation(projectKey, conversationId)) {
+                    this.messages = this._normalizeAgentMessages(conversation.messages);
+                }
+            }
+            this.runtimeClient.accept(snapshot);
+            void this.runtimeClient.refresh(snapshot.id);
+            this._consumePendingAgentAttachments(cacheKey, attachments, this._normalizePendingAgentSource(source));
+            if (this._isActiveConversation(projectKey, conversationId)) this._renderAgentMessages();
+            return { ok: true, runId: snapshot.id, run: snapshot };
+        } catch (error) {
+            const reason = `任务提交失败：${error?.message || error}`;
+            this.runtimeStartErrors.set(cacheKey, reason);
+            // No legacy retry: a failed IPC response may still have started a paid run.
+            void this.runtimeClient.watch({ projectId, conversationId });
+            return { ok: false, reason };
+        } finally {
+            this.runtimeStarting.delete(cacheKey);
+            this._syncAgentRuntimeSendState();
+            this._renderAgentRuntimeCards();
+        }
+    }
+
     async generateImageFromNode(details = {}, instruction = '', { fromSidebar = false } = {}) {
         const canRefreshContext = details?.nodeId && typeof this.options.getAgentNodeContext === 'function';
         const latest = canRefreshContext ? this.options.getAgentNodeContext(details.nodeId) : null;
@@ -1624,6 +1744,18 @@ export class AgentSidebar {
             const reason = '当前 Agent 上下文没有可执行的图片生成节点。';
             this._appendAgentError(reason);
             return { ok: false, reason };
+        }
+        if (window.flowCanvas?.agent?.start) {
+            this.pendingAgentAttachments = attachments;
+            this.pendingAgentSource = source;
+            this._savePendingAgentAttachments();
+            this._renderPendingAgentAttachments();
+            return this._startAgentRuntime({
+                text: String(instruction || '').trim() || source.effectivePrompt || source.prompt || '生成图片',
+                attachments,
+                source: { ...context, ...source, details: context },
+                clearInput: fromSidebar
+            });
         }
         if (this.isAgentSending) {
             return { ok: false, reason: 'Agent 正在整理上一条请求' };
@@ -1655,10 +1787,10 @@ export class AgentSidebar {
         const conversationFiles = this._captureAgentConversationFiles(attachments, 'input');
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
-            { role: 'user', content: displayPrompt }
+            { role: 'user', content: displayPrompt, createdAt: Date.now() }
         ]);
         this.messages = requestMessages;
-        this._appendAgentMessageElement('user', displayPrompt);
+        this._appendAgentMessageElement('user', displayPrompt, requestMessages.at(-1));
         this._saveAgentConversation(projectKey, requestMessages, {
             conversationId,
             files: conversationFiles
@@ -1676,6 +1808,7 @@ export class AgentSidebar {
         this.isAgentSending = true;
         if (this.sendBtn) this.sendBtn.disabled = true;
         const typing = this._appendAgentTyping();
+        const startedAt = Date.now();
         let compilation;
         try {
             const result = await window.flowCanvas.ai.generateText({
@@ -1705,11 +1838,11 @@ export class AgentSidebar {
             : `已整理并提交生图：\n\n${compilation.prompt}`;
         const completedMessages = this._normalizeAgentMessages([
             ...requestMessages,
-            { role: 'assistant', content: assistantContent }
+            { role: 'assistant', content: assistantContent, createdAt: Date.now(), elapsedMs: Date.now() - startedAt }
         ]);
         if (this._isActiveConversation(projectKey, conversationId)) {
             this.messages = completedMessages;
-            this._appendAgentMessageElement('assistant', assistantContent);
+            this._appendAgentMessageElement('assistant', assistantContent, completedMessages.at(-1));
         }
         this._saveAgentConversation(projectKey, completedMessages, {
             conversationId,
@@ -1762,6 +1895,14 @@ export class AgentSidebar {
             return this.generateImageFromNode(latest, this.inputEl?.value || '', { fromSidebar: true });
         }
         const text = String(prompt ?? this.inputEl?.value ?? '').trim();
+        if (text && window.flowCanvas?.agent?.start) {
+            return this._startAgentRuntime({
+                text,
+                attachments: this._normalizePendingAgentAttachments(this.pendingAgentAttachments),
+                source: this.pendingAgentSource,
+                clearInput: true
+            });
+        }
         if (!text || this.isAgentSending) return;
         const projectKey = this.activeProjectCacheKey;
         const conversationId = this.activeConversationId;
@@ -1781,10 +1922,10 @@ export class AgentSidebar {
 
         const requestMessages = this._normalizeAgentMessages([
             ...this.messages,
-            { role: 'user', content: text }
+            { role: 'user', content: text, createdAt: Date.now() }
         ]);
         this.messages = requestMessages;
-        this._appendAgentMessageElement('user', text);
+        this._appendAgentMessageElement('user', text, requestMessages.at(-1));
         this._saveAgentConversation(projectKey, requestMessages, {
             conversationId,
             files: conversationFiles
@@ -1797,6 +1938,7 @@ export class AgentSidebar {
         this.isAgentSending = true;
         if (this.sendBtn) this.sendBtn.disabled = true;
         const typing = this._appendAgentTyping();
+        const startedAt = Date.now();
         try {
             const result = await window.flowCanvas.ai.generateText({
                 provider,
@@ -1812,12 +1954,12 @@ export class AgentSidebar {
             const content = String(result.text || '').trim() || '模型没有返回可显示的文本。';
             const completedMessages = this._normalizeAgentMessages([
                 ...requestMessages,
-                { role: 'assistant', content }
+                { role: 'assistant', content, createdAt: Date.now(), elapsedMs: Date.now() - startedAt }
             ]);
             typing?.remove();
             if (this._isActiveConversation(projectKey, conversationId)) {
                 this.messages = completedMessages;
-                const messageElement = this._appendAgentMessageElement('assistant', content);
+                const messageElement = this._appendAgentMessageElement('assistant', content, completedMessages.at(-1));
                 this._attachAgentPlanAction(messageElement, content);
             }
             this._saveAgentConversation(projectKey, completedMessages, {
@@ -1999,6 +2141,7 @@ export class AgentSidebar {
         }
         this.options.endMediaReferencePick?.({ silent: true, clearHighlights: true });
         this.activeProjectCacheKey = nextKey;
+        this.activeRuntimeProjectId = projectId ?? null;
         this._restoreAgentConversation(nextKey);
         this._restorePendingAgentAttachments();
 
@@ -2445,6 +2588,91 @@ export class AgentSidebar {
         this._persistShortcutBindings('已恢复默认快捷键');
     }
 
+    _bindAgentSidebarResize() {
+        const handle = document.getElementById('agentSidebarResizeHandle');
+        const panel = document.getElementById('agentSidebar');
+        if (!handle || !panel) return;
+        const storageKey = 'flow-canvas-agent-panel-width';
+        let preferredWidth = 420;
+        try {
+            const saved = Number(localStorage.getItem(storageKey));
+            if (Number.isFinite(saved) && saved >= 320) preferredWidth = Math.min(saved, 960);
+        } catch (_) { }
+        const bounds = () => {
+            const viewport = window.innerWidth;
+            const leftWidth = document.getElementById('sidebarWrapper')?.getBoundingClientRect().width || 0;
+            const min = Math.min(320, viewport);
+            const max = viewport <= 520 ? viewport : Math.max(min, Math.min(960, viewport - leftWidth - 240));
+            return { min, max };
+        };
+        const apply = width => {
+            const { min, max } = bounds();
+            const value = Math.round(Math.max(min, Math.min(max, width)));
+            document.body.style.setProperty('--agent-panel-width', `${value}px`);
+            handle.setAttribute('aria-valuemin', String(min));
+            handle.setAttribute('aria-valuemax', String(max));
+            handle.setAttribute('aria-valuenow', String(value));
+            return value;
+        };
+        const save = () => {
+            try { localStorage.setItem(storageKey, String(preferredWidth)); } catch (_) { }
+        };
+        let drag = null;
+        let frame = null;
+        const renderDrag = () => {
+            frame = null;
+            if (drag) preferredWidth = apply(drag.width + drag.x - drag.latestX);
+        };
+        const finish = () => {
+            if (!drag) return;
+            if (frame !== null) cancelAnimationFrame(frame);
+            renderDrag();
+            const pointerId = drag.pointerId;
+            drag = null;
+            document.body.classList.remove('agent-sidebar-resizing');
+            if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+            save();
+        };
+        handle.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || drag || this.currentMode !== 'agent') return;
+            event.preventDefault();
+            event.stopPropagation();
+            drag = { pointerId: event.pointerId, x: event.clientX, latestX: event.clientX, width: panel.getBoundingClientRect().width };
+            handle.setPointerCapture(event.pointerId);
+            document.body.classList.add('agent-sidebar-resizing');
+        });
+        handle.addEventListener('pointermove', event => {
+            if (!drag || event.pointerId !== drag.pointerId) return;
+            drag.latestX = event.clientX;
+            if (frame === null) frame = requestAnimationFrame(renderDrag);
+        });
+        for (const eventName of ['pointerup', 'pointercancel', 'lostpointercapture']) handle.addEventListener(eventName, finish);
+        handle.addEventListener('dblclick', event => {
+            event.preventDefault();
+            preferredWidth = 420;
+            apply(preferredWidth);
+            save();
+        });
+        handle.addEventListener('keydown', event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(event.key)) return;
+            event.preventDefault();
+            preferredWidth = event.key === 'Home' ? 420
+                : Number(handle.getAttribute('aria-valuenow')) + (event.key === 'ArrowLeft' ? 24 : -24);
+            preferredWidth = apply(preferredWidth);
+            save();
+        });
+        window.addEventListener('resize', () => apply(preferredWidth));
+        window.addEventListener('blur', finish);
+        window.addEventListener('pagehide', finish);
+        this._finishAgentSidebarResize = finish;
+        const leftSidebar = document.getElementById('sidebarWrapper');
+        if (leftSidebar) {
+            this.agentSidebarWidthObserver = new ResizeObserver(() => apply(preferredWidth));
+            this.agentSidebarWidthObserver.observe(leftSidebar);
+        }
+        apply(preferredWidth);
+    }
+
     _bindEvents() {
         // 主 HUD：左键打开 Agent，右键把主窗口收进置顶浮动按钮。
         const toggleBtn = document.getElementById('agentToggleBtn');
@@ -2454,7 +2682,6 @@ export class AgentSidebar {
             collapsingToOrb = true;
             toggleBtn.classList.add('activating');
             toggleBtn.setAttribute('aria-busy', 'true');
-            this.modePicker?.classList.remove('mode-picker-visible');
 
             try {
                 await new Promise(resolve => setTimeout(resolve, 140));
@@ -2470,9 +2697,8 @@ export class AgentSidebar {
         toggleBtn?.addEventListener('click', event => {
             if (event.button !== 0) return;
             if (document.body.classList.contains('agent-open')) {
-                this.modePicker?.classList.remove('mode-picker-visible');
                 if (this.currentMode === 'settings') {
-                    this.setMode('review');
+                    this.setMode('canvas');
                     return;
                 }
                 this.close();
@@ -2484,16 +2710,6 @@ export class AgentSidebar {
             event.preventDefault();
             void collapseToOrb();
         });
-        toggleBtn?.addEventListener('pointerenter', () => this._showModePicker());
-        toggleBtn?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
-        toggleBtn?.addEventListener('focusin', () => this._showModePicker());
-        toggleBtn?.addEventListener('focusout', () => this._scheduleModePickerHide());
-        this.modePicker?.addEventListener('pointerenter', () => this._showModePicker());
-        this.modePicker?.addEventListener('pointerleave', () => this._scheduleModePickerHide());
-        this.modePicker?.addEventListener('focusin', () => this._showModePicker());
-        this.modePicker?.addEventListener('focusout', () => this._scheduleModePickerHide());
-        document.getElementById('creationModeSettingsBtn')?.addEventListener('click', () => this.setMode('settings'));
-        document.getElementById('creationModeReviewBtn')?.addEventListener('click', () => this.setMode('review'));
         this.settingsTabs?.addEventListener('click', event => {
             const button = event.target.closest('[data-settings-tab]');
             if (button) this._setSettingsTab(button.dataset.settingsTab);
@@ -2608,7 +2824,6 @@ export class AgentSidebar {
             event.stopPropagation();
             const open = !this.taskHistoryOpen;
             this._setTaskHistoryOpen(open);
-            this.modePicker?.classList.remove('mode-picker-visible');
         });
         this.taskHistoryCloseBtn?.addEventListener('click', () => this._setTaskHistoryOpen(false));
         this.taskHistoryFilters?.addEventListener('click', event => {
@@ -2625,6 +2840,22 @@ export class AgentSidebar {
             this._renderGenerationTasks();
         });
         this.taskHistoryList?.addEventListener('click', (event) => {
+            const stopRecovery = event.target.closest('[data-stop-recovery]');
+            if (stopRecovery) {
+                void this._cancelGenerationTask(stopRecovery.dataset.stopRecovery);
+                return;
+            }
+            const recoverButton = event.target.closest('[data-recover-task]');
+            if (recoverButton) {
+                void this._recoverGenerationTask(recoverButton.dataset.recoverTask, recoverButton.dataset.editTaskId === 'true');
+                return;
+            }
+            const copyIdButton = event.target.closest('[data-copy-remote-task]');
+            if (copyIdButton) {
+                const task = this.generationTasks.find(item => item.id === copyIdButton.dataset.copyRemoteTask);
+                void window.flowCanvas?.clipboard?.writeText?.(task?.taskId || '');
+                return;
+            }
             const copyPromptButton = event.target.closest('[data-copy-task-prompt]');
             if (copyPromptButton) {
                 this._copyGenerationTaskPrompt(copyPromptButton.dataset.copyTaskPrompt, copyPromptButton);
@@ -2635,6 +2866,7 @@ export class AgentSidebar {
         });
         document.addEventListener('pointerdown', event => {
             if (!this.taskHistoryOpen
+                || event.target.closest?.('.generation-recovery-dialog')
                 || this.taskHistoryDock?.contains(event.target)
                 || this.taskHistoryBtn?.contains(event.target)) return;
             this._setTaskHistoryOpen(false);
@@ -2714,10 +2946,11 @@ export class AgentSidebar {
         document.getElementById('videoModelOpenSettingsBtn')?.addEventListener('click', () => this.setMode('settings', 'api'));
         this.videoModelSearchInput?.addEventListener('input', () => this._renderVideoModelPicker());
 
-        // 右上角齿轮与圆球菜单都可进入设置模式。
+        // 左侧工具栏中的齿轮切换设置面板。
         document.getElementById('agentSettingsBtn')?.addEventListener('click', () => {
             this._closeAgentHeaderPopovers();
-            this.setMode('settings');
+            this.setMode(this.currentMode === 'settings' && document.body.classList.contains('agent-open')
+                ? 'canvas' : 'settings');
         });
 
         // 模板点击
@@ -2784,38 +3017,9 @@ export class AgentSidebar {
 
     }
 
-    _showModePicker() {
-        if (document.body.classList.contains('agent-open')) {
-            this.modePicker?.classList.remove('mode-picker-visible');
-            return;
-        }
-        if (this.modePickerHideTimer) {
-            clearTimeout(this.modePickerHideTimer);
-            this.modePickerHideTimer = null;
-        }
-        this.modePicker?.classList.add('mode-picker-visible');
-    }
-
-    _scheduleModePickerHide() {
-        if (this.modePickerHideTimer) clearTimeout(this.modePickerHideTimer);
-        this.modePickerHideTimer = setTimeout(() => {
-            const toggleBtn = document.getElementById('agentToggleBtn');
-            const activeElement = document.activeElement;
-            const remainsInteractive = toggleBtn?.matches(':hover')
-                || this.modePicker?.matches(':hover')
-                || toggleBtn?.contains(activeElement)
-                || this.modePicker?.contains(activeElement);
-            if (remainsInteractive) {
-                this.modePickerHideTimer = null;
-                return;
-            }
-            this.modePicker?.classList.remove('mode-picker-visible');
-            this.modePickerHideTimer = null;
-        }, 160);
-    }
-
-    setMode(mode = 'review', settingsTab = null) {
-        const nextMode = ['agent', 'settings', 'review'].includes(mode) ? mode : 'review';
+    setMode(mode = 'canvas', settingsTab = null) {
+        this._finishAgentSidebarResize?.();
+        const nextMode = ['agent', 'settings', 'canvas'].includes(mode) ? mode : 'canvas';
         const body = document.body;
         this._closeAgentComposerPopovers();
         this._closeAgentHeaderPopovers();
@@ -2825,17 +3029,12 @@ export class AgentSidebar {
         if (this.modeTitle) {
             this.modeTitle.textContent = {
                 agent: 'AI Agent',
-                settings: '\u8bbe\u7f6e\u6a21\u5f0f'
+                settings: '\u8bbe\u7f6e'
             }[nextMode] || '';
         }
 
         body.classList.remove('agent-mode', 'settings-mode', 'image-mode', 'video-mode');
-        document.querySelectorAll('.creation-mode-option').forEach(option => {
-            const optionId = 'creationMode' + nextMode[0].toUpperCase() + nextMode.slice(1) + 'Btn';
-            option.classList.toggle('active', option.id === optionId);
-        });
-
-        if (nextMode === 'review') {
+        if (nextMode === 'canvas') {
             body.classList.remove('creation-mode');
             this.close();
             this.settingsPanel?.classList.remove('show');
@@ -2843,7 +3042,6 @@ export class AgentSidebar {
             if (this.videoModelPicker) this.videoModelPicker.hidden = true;
             if (this.videoPromptDock) this.videoPromptDock.hidden = true;
             if (this.imageWorkspace) this.imageWorkspace.hidden = true;
-            this.modePicker?.classList.remove('mode-picker-visible');
             return;
         }
 
@@ -2855,7 +3053,6 @@ export class AgentSidebar {
         if (this.videoModelPicker) this.videoModelPicker.hidden = true;
         if (this.videoPromptDock) this.videoPromptDock.hidden = true;
         if (this.imageWorkspace) this.imageWorkspace.hidden = true;
-        this.modePicker?.classList.remove('mode-picker-visible');
         this.open();
         if (nextMode === 'agent') setTimeout(() => this.inputEl?.focus(), 120);
     }
@@ -3415,12 +3612,7 @@ export class AgentSidebar {
     }
 
     _getVideoModelProfile(provider) {
-        if (!provider?.model) return null;
-        const model = String(provider.model).trim();
-        const marker = `${provider.model} ${provider.name || ''} ${provider.endpoint || ''}`;
-        return VIDEO_MODEL_PROFILES.find(profile => profile.matchModel?.test(model))
-            || VIDEO_MODEL_PROFILES.find(profile => profile.match?.test(marker))
-            || DEFAULT_VIDEO_MODEL_PROFILE;
+        return getVideoModelProfile(provider);
     }
 
     _getVideoReferenceLimits(profile) {
@@ -3746,10 +3938,12 @@ export class AgentSidebar {
         const task = this.generationTasks.find(item => item.id === clientTaskId)
             || this.generationTasks.find(item => item.taskId === remoteTaskId);
         if (!task) return;
+        if (this.recoveringGenerationTasks?.has(task.id) && !event.recovered) return;
         this._updateGenerationTask(task.id, {
             status: 'success',
             taskId: remoteTaskId || task.taskId || null,
             filePath: event.filePath || task.filePath || null,
+            filePaths: event.filePaths || task.filePaths || [],
             error: null
         });
     }
@@ -3904,8 +4098,7 @@ export class AgentSidebar {
         const normalizedNodeId = String(nodeId || '').trim();
         if (!normalizedNodeId) return null;
         return this.generationTasks.find(task =>
-            task?.status === 'disconnected'
-            && task?.kind === 'video'
+            ['disconnected', 'failed', 'canceled'].includes(task?.status)
             && Boolean(task?.taskId)
             && String(task?.params?.nodeId || '') === normalizedNodeId
         ) || null;
@@ -3926,6 +4119,7 @@ export class AgentSidebar {
     }
 
     _recordGenerationError(taskId, error) {
+        if (this.recoveringGenerationTasks?.has(taskId)) return this.generationTasks.find(task => task.id === taskId);
         const current = this.generationTasks.find(task => task.id === taskId);
         if (current?.status === 'canceled') return current;
         const message = error?.message || String(error || '请求失败');
@@ -3995,7 +4189,10 @@ export class AgentSidebar {
             this.taskHistoryBtn.title = nextOpen ? '关闭任务记录' : '打开任务记录';
             this.taskHistoryBtn.setAttribute('aria-label', this.taskHistoryBtn.title);
         }
-        if (nextOpen) this._renderGenerationTasks();
+        if (nextOpen) {
+            this._renderGenerationTasks();
+            void this._syncRecoverableGenerations();
+        }
     }
 
     _escapeTaskText(value) {
@@ -4101,14 +4298,15 @@ export class AgentSidebar {
             const sourceCount = (Array.isArray(task.sourcePaths) ? task.sourcePaths.length : 0)
                 + (task.params?.videoSourcePaths?.length || 0)
                 + (task.params?.audioSourcePaths?.length || 0);
-            const canRetry = status === 'failed' || status === 'disconnected';
+            const recovering = this.recoveringGenerationTasks?.has(task.id);
             const promptModerationFailed = task.kind === 'video'
                 && task.params?.syncStage === 'prompt_moderation_failed'
                 && Boolean(task.taskId);
-            const retryLabel = status === 'disconnected' || promptModerationFailed ? '继续恢复' : '重试';
+            const canRetry = !task.taskId && !task.filePath && (status === 'failed' || status === 'disconnected');
+            const retryLabel = '重新提交';
             const errorCopy = status === 'disconnected'
-                ? '与生成服务断开，任务参数已保留。'
-                : task.error;
+                ? task.error || '与生成服务断开，任务 ID 和参数已保留。'
+                : task.error || (recovering ? task.params?.recoveryError : null);
             return `
                 <article class="agent-task-item status-${status}">
                     <div class="agent-task-item-topline">
@@ -4129,10 +4327,17 @@ export class AgentSidebar {
                         ${sourceCount ? `<span>${sourceCount} 个参考素材</span>` : ''}
                     </div>
                     ${task.filePath ? `<p class="agent-task-file" title="${this._escapeTaskText(task.filePath)}">${this._escapeTaskText(task.filePath)}</p>` : ''}
-                    ${errorCopy ? `<p class="agent-task-error">${this._escapeTaskText(errorCopy)}</p>` : ''}
+                    ${errorCopy ? `<p class="agent-task-error" title="${this._escapeTaskText(errorCopy)}">${this._escapeTaskText(errorCopy)}</p>` : ''}
+                    <div class="agent-task-recovery">
+                        <code title="${this._escapeTaskText(task.taskId || '')}">${this._escapeTaskText(task.taskId || '未记录上游任务 ID')}</code>
+                        ${task.taskId ? `<button type="button" data-copy-remote-task="${this._escapeTaskText(task.id)}" title="复制任务 ID" aria-label="复制任务 ID"><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-copy"></use></svg></button>` : ''}
+                        <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" data-edit-task-id="true" title="补填任务 ID" aria-label="补填任务 ID" ${recovering ? 'disabled' : ''}><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-connections"></use></svg></button>
+                        <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" ${recovering ? 'disabled' : ''}>${recovering ? '正在恢复' : (promptModerationFailed ? '继续恢复' : '拉取产物')}</button>
+                        ${recovering ? `<button type="button" data-stop-recovery="${this._escapeTaskText(task.id)}">停止</button>` : ''}
+                    </div>
                     ${canRetry ? `
                         <div class="agent-task-retry-row">
-                            <span>${status === 'disconnected' || promptModerationFailed ? (task.taskId ? '使用任务 ID 恢复，不会重复提交' : '缺少任务 ID，只能重新提交') : `第 ${task.attempts || 1} 次请求未完成`}</span>
+                            <span>没有任务 ID，重新提交会创建新任务</span>
                             <button type="button" data-retry-task="${this._escapeTaskText(task.id)}">
                                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                                     <path d="M20 7v5h-5"></path><path d="M4 17v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.4-2L20 12M4 12l2.5 5a7 7 0 0 0 11.4-2"></path>
@@ -4173,8 +4378,80 @@ export class AgentSidebar {
         }, 1400);
     }
 
+    async _syncRecoverableGenerations() {
+        if (!window.flowCanvas?.mcp?.listRecoverableGenerations || this.syncingRecoverableGenerations) return;
+        this.syncingRecoverableGenerations = true;
+        try {
+            const records = await window.flowCanvas.mcp.listRecoverableGenerations();
+            for (const record of records) {
+                let task = this.generationTasks.find(item => item.id === record.clientTaskId);
+                if (!task) {
+                    if (!record.taskId && !record.filePath) continue;
+                    task = { id: record.clientTaskId, kind: record.kind, projectId: record.projectId,
+                        providerId: record.providerId, providerName: record.model, model: record.model,
+                        prompt: record.prompt, sourcePaths: record.sourcePaths || [], params: record.params || {}, attempts: 1,
+                        createdAt: record.createdAt || record.updatedAt, updatedAt: record.updatedAt,
+                        status: 'disconnected' };
+                    this.generationTasks.unshift(task);
+                }
+                if (this.recoveringGenerationTasks?.has(task.id)) continue;
+                task.taskId = record.taskId || task.taskId;
+                task.filePath = record.filePath || task.filePath;
+                task.filePaths = record.filePaths?.length ? record.filePaths : task.filePaths;
+                task.params = { ...task.params, nodeId: task.params?.nodeId || record.nodeId,
+                    targetDir: record.targetDir || task.params?.targetDir };
+            }
+            this._saveGenerationTasks();
+            this._renderGenerationTasks();
+        } catch (error) { console.warn('[Agent] 恢复记录同步失败', error); }
+        finally { this.syncingRecoverableGenerations = false; }
+    }
+
+    async _recoverGenerationTask(taskId, editId = false) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (!task) return;
+        this.recoveringGenerationTasks ||= new Set();
+        if (this.recoveringGenerationTasks.has(taskId)) return;
+        let remoteTaskId = task.taskId;
+        if (editId || (!remoteTaskId && !task.filePath)) {
+            remoteTaskId = await requestRecoveryTaskId(task);
+            if (!remoteTaskId) return;
+        }
+        if (this.recoveringGenerationTasks.has(taskId)) return;
+        const sourceProviderId = String(task.providerId || '').split('::model:')[0];
+        const currentProvider = this.providers.find(item => item.id === sourceProviderId);
+        this.recoveringGenerationTasks.add(taskId);
+        this._updateGenerationTask(taskId, { status: 'running', error: null, taskId: remoteTaskId,
+            ...(remoteTaskId !== task.taskId ? { filePath: null, filePaths: [] } : {}),
+            params: { syncStage: 'recovering', recoveryStartedAt: Date.now() } });
+        try {
+            if (!window.flowCanvas?.mcp?.recoverGeneration) throw new Error('请重启 Flow Canvas 以启用新版任务恢复接口');
+            const result = await window.flowCanvas.mcp.recoverGeneration({
+                clientTaskId: task.id, taskId: remoteTaskId, kind: task.kind,
+                projectId: task.projectId || this.options.getActiveProjectId?.(), nodeId: task.params?.nodeId,
+                prompt: task.prompt, params: task.params, sourcePaths: task.sourcePaths,
+                targetDir: task.params?.targetDir,
+                providerConfig: { ...currentProvider, sourceProviderId, model: task.model || currentProvider?.model }
+            });
+            if (result?.success === false) {
+                this._updateGenerationTask(taskId, { status: result.canceled ? 'canceled' : 'disconnected', error: result.error });
+                return;
+            }
+            this._updateGenerationTask(taskId, { status: 'success', error: null,
+                projectId: result.projectId || task.projectId,
+                taskId: result.taskId || remoteTaskId, filePath: result.filePath, filePaths: result.filePaths || [result.filePath],
+                params: { nodeId: result.nodeId || task.params?.nodeId, syncStage: 'completed' } });
+        } catch (error) {
+            this._updateGenerationTask(taskId, { status: 'disconnected', error: error.message });
+        } finally {
+            this.recoveringGenerationTasks.delete(taskId);
+            this._renderGenerationTasks();
+        }
+    }
+
     async _retryGenerationTask(taskId, options = {}) {
         const task = this.generationTasks.find(item => item.id === taskId);
+        if (task?.taskId || task?.filePath) return this._recoverGenerationTask(taskId);
         if (!task || !['failed', 'disconnected'].includes(task.status)) return;
         const originalNodeId = String(task.params?.nodeId || '').trim();
         const restoreOnOriginalNode = options.restoreOnOriginalNode === true
@@ -4733,6 +5010,7 @@ export class AgentSidebar {
                 ...(task.params || {}),
                 syncStage: stage,
                 progress,
+                recoveryError: event.lastError || null,
                 remoteStatus: event.remoteStatus || null
             }
         });
@@ -4894,6 +5172,7 @@ export class AgentSidebar {
     }
 
     close() {
+        this._finishAgentSidebarResize?.();
         this._closeAgentHeaderPopovers();
         document.body.classList.remove('agent-open');
         this._syncHudState();
@@ -4905,6 +5184,10 @@ export class AgentSidebar {
     }
 
     _syncHudState() {
+        const settingsButton = document.getElementById('agentSettingsBtn');
+        const settingsOpen = this.currentMode === 'settings' && document.body.classList.contains('agent-open');
+        settingsButton?.classList.toggle('active', settingsOpen);
+        settingsButton?.setAttribute('aria-expanded', String(settingsOpen));
         const button = document.getElementById('agentToggleBtn');
         if (!button) return;
         const isOpen = document.body.classList.contains('agent-open');

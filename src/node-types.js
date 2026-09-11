@@ -78,7 +78,7 @@ function collectGenerationSources(inputs, legacyKeys = []) {
     return asArray([
         inputs?.source,
         ...legacyKeys.map(key => inputs?.[key])
-    ]);
+    ].flat(Infinity));
 }
 
 /** multi 端口给数组，普通端口给单值，统一成数组处理。 */
@@ -103,10 +103,13 @@ function restoreReferenceCitations(prompt, config = {}) {
     const offsets = config.referenceCitationOffsets && typeof config.referenceCitationOffsets === 'object'
         ? config.referenceCitationOffsets
         : {};
-    const insertions = ids.map((id, index) => ({
+    const occurrences = Array.isArray(config.referenceCitationOccurrences)
+        ? config.referenceCitationOccurrences
+        : ids.map(id => ({ connectionId: id, offset: offsets[id] }));
+    const insertions = occurrences.map((entry, index) => ({
         index,
-        label: typeof labels[index] === 'string' ? labels[index].trim() : '',
-        offset: Number(offsets[id])
+        label: String(labels[ids.indexOf(entry.connectionId)] || '').trim(),
+        offset: Number(entry.offset)
     })).filter(entry => entry.label && Number.isFinite(entry.offset) && entry.offset >= 0 && entry.offset <= text.length);
 
     let restored = text;
@@ -303,9 +306,12 @@ async function prepareGenerationReferences(references, prepare) {
     if (typeof prepare !== 'function') return references;
     const prepared = await prepare(references);
     if (!prepared) throw new Error('已取消参考图处理');
-    if (Array.isArray(prepared)) return prepared;
-    if (Array.isArray(prepared.references)) return prepared.references;
-    throw new Error('参考图预处理未返回有效素材');
+    const result = Array.isArray(prepared) ? prepared : prepared.references;
+    if (!Array.isArray(result)) throw new Error('参考图预处理未返回有效素材');
+    if (result.length !== references.length || result.some(reference => !reference?.filePath)) {
+        throw new Error(`参考图处理不完整：选择了 ${references.length} 张，但只返回 ${result.filter(reference => reference?.filePath).length} 张有效素材，请重新添加素材`);
+    }
+    return result;
 }
 
 function expandGenerationPrompts(inputs, config = {}) {
@@ -528,6 +534,8 @@ NODE_TYPES['image'] = {
                     provider: 'openai',
                     providerConfig: provider,
                     clientTaskId: clientTaskId || undefined,
+                    nodeId: ctx?.item?.id,
+                    projectId: generationTask?.projectId,
                     prompt: requestPrompt,
                     size: imageRequestParams.size,
                     quality: imageRequestParams.quality,
@@ -629,6 +637,7 @@ NODE_TYPES['image'] = {
                 _generation: {
                     nodeType: 'image',
                     prompt: requestPrompt,
+                    promptDraftConfig: JSON.parse(JSON.stringify(config)),
                     model: imageModel || '',
                     providerId: provider?.id || null,
                     sourceProviderId: provider?.sourceProviderId || provider?.id || null,
@@ -776,6 +785,8 @@ NODE_TYPES['video'] = {
                     provider: 'openai-video',
                     providerConfig: provider,
                     clientTaskId: clientTaskId || undefined,
+                    nodeId: ctx?.item?.id,
+                    projectId: generationTask?.projectId,
                     prompt,
                     resolution: config.resolution || undefined,
                     ratio,

@@ -6,6 +6,8 @@
 
 ### 实施进度
 
+2026-09-09 更新：主进程 Agent Runtime、项目隔离服务、工具调用、任务卡、一次批次确认、素材观察及恢复通道已落地。当前接口与验证方式见 [Agent Runtime v1](agent-runtime-v1.md)。下文保留最初设计基线，其中“下一切片”描述以此更新为准。
+
 - 已完成：`BoardSnapshot`、`BoardTransaction`、项目级 revision、幂等键、原子预演/提交、整笔 undo token。
 - 已完成：节点增删改/复制、连线增删、横排/竖排/网格排列，以及共享画板工具注册表。
 - 已完成：AgentSidebar 与标准 MCP 共用 `flow_canvas.board.get_snapshot`、`flow_canvas.board.transaction.preview/apply/undo`。

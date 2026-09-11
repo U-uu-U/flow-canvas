@@ -81,3 +81,37 @@ test('image API preferences are persisted with the model-specific settings', () 
         stream: true
     });
 });
+
+test('node drafts preserve repeated citation identities without sharing mutable config', () => {
+    const config = {
+        prompt: 'Use  with ', referenceCitationIds: ['old-connection'], referenceCitationLabels: ['图一'],
+        referenceCitationOccurrences: [
+            { id: 'a', connectionId: 'old-connection', sourceNodeId: 'image-a', offset: 4 },
+            { id: 'b', connectionId: 'old-connection', sourceNodeId: 'image-a', offset: 10 }
+        ]
+    };
+    const draft = createImageNodePromptDraft(config);
+    config.referenceCitationOccurrences[0].offset = 0;
+    const restored = mergeImageNodePromptConfig({}, { generationPromptDraft: draft });
+    assert.equal(restored.referenceCitationOccurrences[0].offset, 4);
+    assert.equal(restored.referenceCitationOccurrences.length, 2);
+    restored.referenceCitationOccurrences[0].offset = 1;
+    assert.equal(draft.referenceCitationOccurrences[0].offset, 4);
+});
+
+test('generated results reuse raw draft citations instead of expanded request offsets', () => {
+    const generation = {
+        config: { prompt: 'Use 图一', referenceCitationIds: ['old'], referenceCitationOccurrences: [{ offset: 4 }] },
+        promptDraftConfig: { prompt: 'Use ', referenceCitationIds: ['old'], referenceCitationOccurrences: [{ offset: 4, sourceNodeId: 'image-a' }] }
+    };
+    const restored = mergeImageNodePromptConfig(generation.config, { generation });
+    assert.equal(restored.prompt, 'Use ');
+    assert.equal(restored.referenceCitationOccurrences[0].sourceNodeId, 'image-a');
+    restored.referenceCitationOccurrences[0].offset = 0;
+    assert.equal(generation.promptDraftConfig.referenceCitationOccurrences[0].offset, 4);
+    delete generation.promptDraftConfig;
+    const legacy = mergeImageNodePromptConfig(generation.config, { generation });
+    assert.equal(legacy.prompt, 'Use 图一');
+    assert.deepEqual(legacy.referenceCitationOccurrences, []);
+    assert.deepEqual(legacy.referenceCitationIds, []);
+});

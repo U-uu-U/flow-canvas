@@ -75,7 +75,9 @@ test('renderer refresh rejects pending requests and late responses are ignored',
     }), false);
 });
 
-test('board tool request timeout clears the pending request', async () => {
+test('board tool request timeout clears the pending request', async t => {
+    const keepAlive = setInterval(() => {}, 1000);
+    t.after(() => clearInterval(keepAlive));
     const { bridge } = createBridge({ timeoutMs: 20 });
     bridge.setBoardToolsReady(true);
     await assert.rejects(

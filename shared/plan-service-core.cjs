@@ -14,12 +14,15 @@ const DEFAULT_PLAN_COLUMNS = [
 ];
 
 const DEFAULT_PLAN_STATUSES = ['未开始', '进行中', '待确认', '已完成'];
-const MCP_BOARD_TOOLS_VERSION = 2;
+const { AGENT_TOOL_DEFINITIONS, AGENT_RUN_TOOLS } = require('./agent-tools.cjs');
+const MCP_BOARD_TOOLS_VERSION = 3;
 const BOARD_TRANSACTION_MCP_TOOLS = [
     'flow_canvas.board.get_snapshot',
     'flow_canvas.board.transaction.preview',
     'flow_canvas.board.transaction.apply',
-    'flow_canvas.board.transaction.undo'
+    'flow_canvas.board.transaction.undo',
+    ...AGENT_TOOL_DEFINITIONS.map(tool => tool.name),
+    ...AGENT_RUN_TOOLS.filter(tool => !tool.name.endsWith('.confirm')).map(tool => tool.name)
 ];
 
 const DEFAULT_MCP_CONFIG = {

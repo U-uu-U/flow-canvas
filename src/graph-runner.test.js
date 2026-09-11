@@ -1,5 +1,5 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
 let R, NT;
 test.before(async () => {
@@ -356,4 +356,94 @@ test('runFrom: 批量生成结果逐个触发落地', async () => {
     assert.equal(result.ok, true);
     assert.deepEqual(landed, ['one.png', 'two.png']);
     delete NT.__test_batch_output;
+});
+
+test('two media references reach image submission in connection order with matching prompt labels', async () => {
+    const previousWindow = globalThis.window;
+    let submitted;
+    globalThis.window = { flowCanvas: { mcp: { generateImage: async body => {
+        submitted = body;
+        return { success: true, filePaths: ['result.png'] };
+    } } } };
+    try {
+        const items = [media('a', '/fixtures/person.png'), media('b', '/fixtures/ship.png'), op('g', 'image', {
+            prompt: '以的背景放入的人物',
+            referenceCitationIds: ['a->g', 'b->g'], referenceCitationLabels: ['图一', '图二'],
+            referenceCitationOccurrences: [
+                { id: 'one', connectionId: 'b->g', offset: 1 },
+                { id: 'two', connectionId: 'a->g', offset: 6 }
+            ]
+        })];
+        const ctx = makeCtx(items, [conn('a', 'out', 'g', 'source'), conn('b', 'out', 'g', 'source')]);
+        ctx.getImageProvider = () => ({ apiKey: 'fixture', model: 'gpt-image-2.5-sunburst' });
+        ctx.prepareImageReferences = async references => references.map(reference => ({ filePath: reference.filePath.replace('.png', '-small.png') }));
+        const result = await new R.GraphRunner(ctx).runFrom('g');
+        assert.equal(result.ok, true, result.reason);
+        assert.deepEqual(submitted.sourceReferences.map(reference => reference.filePath), ['/fixtures/person-small.png', '/fixtures/ship-small.png']);
+        assert.match(submitted.prompt, /图一=第1张，图二=第2张/);
+        assert.match(submitted.prompt, /以图二的背景放入图一的人物/);
+    } finally {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+    }
+});
+
+test('cancel: clicking an upstream node cancels its whole pending chain, not an independent run', async t => {
+    const releases = new Map();
+    NT.__audit_slow = { title: 'Slow', inputs: [], outputs: [{ name: 'out', dataType: 'string' }],
+        execute: (_input, _config, ctx) => new Promise(resolve => releases.set(ctx.item.id, resolve)) };
+    t.after(() => delete NT.__audit_slow);
+    const items = [op('upstream', '__audit_slow'), op('target', 'text'), op('independent', '__audit_slow')];
+    const canceled = [];
+    const ctx = makeCtx(items, [conn('upstream', 'out', 'target', 'context')]);
+    ctx.cancelGenerationTasks = async id => { canceled.push(id); releases.get(id)?.({ out: 'late' }); };
+    const runner = new R.GraphRunner(ctx);
+    const chain = runner.runFrom('target');
+    const independent = runner.runFrom('independent');
+    assert.equal(await runner.cancel('upstream'), true);
+    assert.deepEqual(canceled.sort(), ['target', 'upstream']);
+    assert.equal((await chain).canceled, true);
+    assert.equal(items[0].runStatus, 'canceled');
+    assert.equal(items[1].runStatus, 'canceled');
+    assert.equal(items[2].runStatus, 'running');
+    releases.get('independent')({ out: 'ok' });
+    assert.equal((await independent).ok, true);
+});
+
+test('failure ends queued sibling animations instead of leaving them running forever', async t => {
+    NT.__audit_fail = { title: 'Fail', inputs: [], outputs: [{ name: 'out', dataType: 'string' }],
+        execute: async () => { throw new Error('provider failed'); } };
+    t.after(() => delete NT.__audit_fail);
+    const items = [op('fail', '__audit_fail'), op('queued', 'text'), op('target', 'text')];
+    const ctx = makeCtx(items, [conn('fail', 'out', 'target', 'context'), conn('queued', 'text', 'target', 'context')]);
+    const result = await new R.GraphRunner(ctx).runFrom('target');
+    assert.equal(result.ok, false);
+    assert.equal(items[1].runStatus, 'canceled');
+    assert.ok(items.every(item => !['queued', 'running'].includes(item.runStatus)));
+});
+
+test('canvas persistence failure is reported and cached outputs are retained for recovery', async () => {
+    const item = op('text', 'text', { text: 'saved response' });
+    const ctx = makeCtx([item]);
+    ctx.onResult = async () => { throw new Error('disk unavailable'); };
+    const runner = new R.GraphRunner(ctx);
+    const result = await runner.runFrom(item.id);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /画布保存失败/);
+    assert.equal(item.runStatus, 'error');
+    assert.deepEqual(runner.getResult(item.id), { text: 'saved response' });
+});
+
+test('timer start is stable during status changes and renewed for a new run', () => {
+    const item = op('video', 'video');
+    const runner = new R.GraphRunner(makeCtx([item]));
+    runner._setStatus(item, R.STATUS.QUEUED);
+    item.runStartedAt -= 10000;
+    const original = item.runStartedAt;
+    runner._setStatus(item, R.STATUS.RUNNING);
+    assert.equal(item.runStartedAt, original);
+    runner._setStatus(item, R.STATUS.DONE);
+    assert.equal(item.runStartedAt, original);
+    runner._setStatus(item, R.STATUS.QUEUED);
+    assert.ok(item.runStartedAt > original);
 });

@@ -13,9 +13,6 @@
     <div class="titlebar" id="titlebar">
         <div class="titlebar-drag" aria-hidden="true"></div>
         <div class="titlebar-status" id="titlebarStatus"></div>
-        <button class="agent-settings-btn" id="agentSettingsBtn" type="button" title="设置" aria-label="设置">
-            <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
-        </button>
     </div>
 
     <!-- 主布局 -->
@@ -23,10 +20,6 @@
         <!-- 左侧边栏容器 -->
         <div class="sidebar-wrapper" id="sidebarWrapper">
             <aside class="sidebar" id="sidebar">
-                <button class="sidebar-collapse-btn" id="collapseSidebarBtn" type="button" title="收起左侧栏"
-                    aria-label="收起左侧栏" aria-controls="sidebar" aria-expanded="true">
-                    <span class="sidebar-collapse-triangle" aria-hidden="true"></span>
-                </button>
                 <div class="sidebar-content">
                     <div class="resource-saver-panel">
                         <button class="resource-saver-toggle" id="resourceSaverBtn" type="button" role="switch"
@@ -160,6 +153,10 @@
                 </button>
                 <button class="canvas-tool-btn" id="canvasToolPlan" type="button" title="新建规划表" aria-label="新建规划表">
                     <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-canvas"></use></svg>
+                </button>
+                <button class="canvas-tool-btn" id="agentSettingsBtn" type="button" title="设置"
+                    aria-label="设置" aria-controls="agentSidebar" aria-expanded="false">
+                    <svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
                 </button>
                 <span class="canvas-tool-separator" aria-hidden="true"></span>
                 <button class="canvas-tool-btn canvas-task-history-btn" id="agentTaskHistoryBtn" type="button"
@@ -313,6 +310,9 @@
 
         <!-- 右侧 Agent 边栏 -->
         <div class="agent-sidebar-wrapper" id="agentSidebarWrapper">
+            <div class="agent-sidebar-resize-handle" id="agentSidebarResizeHandle" role="separator"
+                tabindex="0" aria-label="调整聊天侧栏宽度" aria-orientation="vertical" aria-controls="agentSidebar"
+                title="拖动调整宽度，双击恢复默认"></div>
             <aside class="agent-sidebar" id="agentSidebar">
                 <!-- 头部 -->
                 <div class="agent-header">
@@ -321,7 +321,7 @@
                             <svg class="flow-icon flow-icon-sm"><use href="./icons/flow-icons.svg#icon-sparkles"></use></svg>
                         </span>
                         <span class="agent-header-copy">
-                            <span class="creation-mode-title" id="creationModeTitle">设置模式</span>
+                            <span class="creation-mode-title" id="creationModeTitle">设置</span>
                             <span class="agent-header-context">当前画板</span>
                         </span>
                     </div>
@@ -546,10 +546,7 @@
 
                         <button class="agent-send-btn" id="agentSendBtn" type="button" title="发送"
                             aria-label="发送消息">
-                            <svg class="agent-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                <line x1="22" y1="2" x2="11" y2="13"></line>
-                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                            </svg>
+                            <svg class="agent-send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>
                         </button>
                     </div>
                 </div>
@@ -1010,17 +1007,6 @@
             </section>
         </div>
 
-        <!-- 图片和视频创作都在画布节点中完成；这里只保留全局工具。 -->
-        <div class="creation-mode-picker" id="creationModePicker" aria-label="模式选择">
-            <button class="creation-mode-option settings" id="creationModeSettingsBtn" type="button">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-settings"></use></svg>
-                设置模式
-            </button>
-            <button class="creation-mode-option review" id="creationModeReviewBtn" type="button">
-                <svg class="flow-icon creation-mode-option-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-window"></use></svg>
-                阅览模式
-            </button>
-        </div>
         <button class="agent-toggle-btn" id="agentToggleBtn" title="左键打开 AI Agent，右键收起画布"
             aria-label="左键打开 AI Agent，右键收起画布" aria-controls="agentSidebar" aria-expanded="false">
             <div class="toggle-btn-glow"></div>

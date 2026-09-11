@@ -37,7 +37,11 @@ export const IMAGE_NODE_PROMPT_KEYS = Object.freeze([
     'prompt',
     'promptMergeMode',
     'negativePrompt',
-    'promptTemplate'
+    'promptTemplate',
+    'referenceCitationIds',
+    'referenceCitationLabels',
+    'referenceCitationOffsets',
+    'referenceCitationOccurrences'
 ]);
 
 export const IMAGE_GENERATION_PREFERENCES_VERSION = 1;
@@ -55,8 +59,8 @@ function copyNodePromptConfig(config = {}) {
     if (!config || typeof config !== 'object' || Array.isArray(config)) return {};
     return IMAGE_NODE_PROMPT_KEYS.reduce((result, key) => {
         if (!Object.prototype.hasOwnProperty.call(config, key) || config[key] === undefined) return result;
-        result[key] = key === 'promptTemplate' && config[key] && typeof config[key] === 'object'
-            ? { ...config[key] }
+        result[key] = config[key] && typeof config[key] === 'object'
+            ? JSON.parse(JSON.stringify(config[key]))
             : config[key];
         return result;
     }, {});
@@ -64,8 +68,16 @@ function copyNodePromptConfig(config = {}) {
 
 export function resolveImageNodePromptConfig(source = {}) {
     const generationConfig = source?.generation?.config;
+    const promptDraftConfig = source?.generation?.promptDraftConfig;
+    const historical = copyNodePromptConfig(promptDraftConfig || generationConfig);
+    // Legacy records store the expanded request, whose offsets no longer match the editor draft.
+    if (!promptDraftConfig) {
+        for (const key of IMAGE_NODE_PROMPT_KEYS.filter(key => key.startsWith('referenceCitation'))) {
+            if (Object.prototype.hasOwnProperty.call(historical, key)) historical[key] = [];
+        }
+    }
     return {
-        ...copyNodePromptConfig(generationConfig),
+        ...historical,
         ...copyNodePromptConfig(source?.generationPromptDraft)
     };
 }

@@ -38,6 +38,9 @@ const {
     shouldUseNativeMidjourneyRoute
 } = require('./openai-image-request');
 const { ReferenceCache } = require('./reference-cache');
+const { GenerationRecoveryStore } = require('./generation-recovery-store.cjs');
+const { imageRequestFailure } = require('./image-request-diagnostics.cjs');
+const { diagnostic: recordDiagnostic } = require('./diagnostics.cjs');
 const {
     buildMiniMaxH3RequestBody,
     buildSeedance25RequestBody,
@@ -188,7 +191,7 @@ const KNOWN_TOOL_NAMES = new Set([
 ]);
 
 class FlowCanvasBridge {
-    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted, notifyVideoProgress, boardToolRequestTimeoutMs }) {
+    constructor({ store, getMainWindow, getDefaultSaveFolder, getFallbackSaveDir, notifyRenderer, notifyTaskSubmitted, notifyTaskCompleted, notifyVideoProgress, boardToolRequestTimeoutMs, recoveryDirectory }) {
         this.store = store;
         this.getMainWindow = getMainWindow;
         this.getDefaultSaveFolder = getDefaultSaveFolder;
@@ -196,7 +199,18 @@ class FlowCanvasBridge {
         this.notifyRenderer = notifyRenderer;
         this.notifyTaskSubmitted = notifyTaskSubmitted;
         this.notifyTaskCompleted = notifyTaskCompleted;
-        this.notifyVideoProgress = notifyVideoProgress;
+        const progressStates = new Map();
+        this.notifyVideoProgress = event => {
+            const key = event.clientTaskId || 'unknown';
+            const signature = `${event.stage}:${Math.floor((Number(event.progress) || 0) / 10)}:${event.retryCount || 0}`;
+            if (progressStates.get(key) !== signature) {
+                if (progressStates.size >= 500) progressStates.delete(progressStates.keys().next().value);
+                progressStates.set(key, signature);
+                recordDiagnostic('info', 'generation.progress', { clientTaskId: event.clientTaskId, stage: event.stage,
+                    progress: event.progress, retryCount: event.retryCount, lastError: event.lastError });
+            }
+            notifyVideoProgress?.(event);
+        };
         this.server = null;
         this.host = DEFAULT_MCP_CONFIG.host;
         this.port = DEFAULT_MCP_CONFIG.port;
@@ -206,6 +220,8 @@ class FlowCanvasBridge {
         this.pendingBoardToolRequests = new Map();
         this.activeGenerationRequests = new Map();
         this.canceledGenerationRequests = new Map();
+        this.recoveryStore = new GenerationRecoveryStore(recoveryDirectory);
+        this.recoveryRequests = new Map();
         this.boardToolRequestTimeoutMs = sanitizeBoardToolTimeout(boardToolRequestTimeoutMs);
     }
 
@@ -220,9 +236,14 @@ class FlowCanvasBridge {
         }
         try {
             throwIfGenerationCanceled(controller.signal);
+            recordDiagnostic('info', 'generation.start', { clientTaskId: id });
             const result = await action(controller.signal);
             throwIfGenerationCanceled(controller.signal);
+            recordDiagnostic('info', 'generation.complete', { clientTaskId: id, taskId: result?.taskId });
             return result;
+        } catch (error) {
+            recordDiagnostic('error', 'generation.failed', { clientTaskId: id, canceled: controller.signal.aborted, error });
+            throw error;
         } finally {
             if (id && this.activeGenerationRequests.get(id) === controller) {
                 this.activeGenerationRequests.delete(id);
@@ -239,7 +260,109 @@ class FlowCanvasBridge {
         this.canceledGenerationRequests.set(id, Date.now() + 60_000);
         const controller = this.activeGenerationRequests.get(id);
         controller?.abort();
+        this.activeGenerationRequests.get(`recover:${id}`)?.abort();
         return { canceled: true, active: Boolean(controller) };
+    }
+
+    _rememberGeneration(kind, body) {
+        const request = { ...body, clientTaskId: body.clientTaskId || crypto.randomUUID(),
+            projectId: body.projectId || this.store.load().activeGroupId || null };
+        recordDiagnostic('info', 'generation.prepare', { kind, clientTaskId: request.clientTaskId,
+            projectId: request.projectId, nodeId: body.nodeId, model: body.providerConfig?.model || body.model,
+            endpoint: body.providerConfig?.endpoint, imageCount: body.sourceReferences?.length || 0,
+            videoCount: body.videoReferences?.length || 0, audioCount: body.audioReferences?.length || 0,
+            size: body.size, duration: body.duration, resolution: body.resolution, stream: body.stream });
+        const params = Object.fromEntries(['size', 'quality', 'responseFormat', 'historyDisabled', 'stream',
+            'ratio', 'resolution', 'duration', 'cameraFixed', 'generateAudio', 'webSearch', 'watermark', 'n', 'midjourney']
+            .filter(key => body[key] !== undefined).map(key => [key, body[key]]));
+        params.videoSourcePaths = (body.videoReferences || []).map(reference => reference.filePath).filter(Boolean);
+        params.audioSourcePaths = (body.audioReferences || []).map(reference => reference.filePath).filter(Boolean);
+        this.recoveryStore.update(request.clientTaskId, {
+            kind, projectId: request.projectId, nodeId: body.nodeId || null,
+            providerId: body.providerConfig?.sourceProviderId || body.providerConfig?.id || null,
+            endpoint: body.providerConfig?.endpoint || '', model: body.providerConfig?.model || body.model || '',
+            prompt: body.prompt || '', taskId: null, result: null, location: null,
+            params, sourcePaths: (body.sourceReferences || []).map(reference => reference.filePath).filter(Boolean),
+            targetDir: body.targetDir || null, state: 'submitting', createdAt: new Date().toISOString()
+        });
+        return request;
+    }
+
+    _rememberSubmitted(body, event) {
+        recordDiagnostic('info', 'generation.submitted', { clientTaskId: body.clientTaskId, projectId: body.projectId,
+            nodeId: body.nodeId, taskId: event.remoteTaskId, model: event.model, location: event.location });
+        this.recoveryStore.update(body.clientTaskId, { taskId: event.remoteTaskId,
+            targetDir: event.targetDir, model: event.model, state: 'submitted',
+            ...(event.location ? { location: event.location } : {}) });
+        this.notifyTaskSubmitted?.({ ...event, projectId: body.projectId });
+    }
+
+    _rememberResult(body, result) {
+        recordDiagnostic('info', 'generation.downloaded', { clientTaskId: body.clientTaskId, projectId: body.projectId,
+            taskId: result.taskId, count: result.filePaths?.length || (result.filePath ? 1 : 0) });
+        if (!this.recoveryStore.get(body.clientTaskId)?.kind) {
+            this.recoveryStore.update(body.clientTaskId, { kind: result.mediaType || body.kind,
+                projectId: body.projectId, nodeId: body.nodeId, prompt: body.prompt,
+                endpoint: body.providerConfig?.endpoint, model: body.providerConfig?.model,
+                providerId: body.providerConfig?.sourceProviderId || body.providerConfig?.id });
+        }
+        this.recoveryStore.update(body.clientTaskId, { result, state: 'downloaded',
+            ...(result.targetDir ? { targetDir: result.targetDir } : {}),
+            ...(result.taskId ? { taskId: result.taskId } : {}) });
+    }
+
+    async recoverGenerationFromRenderer(body = {}) {
+        let existing = this.recoveryStore.find({ clientTaskId: body.clientTaskId, taskId: body.taskId,
+            kind: body.kind, endpoint: body.providerConfig?.endpoint });
+        const original = this.recoveryStore.get(body.clientTaskId);
+        if (!existing && original) existing = { ...original, taskId: body.taskId, result: null, location: null };
+        const kind = existing?.kind || body.kind;
+        if (!['image', 'video'].includes(kind)) throw new Error('请选择图片或视频任务');
+        const taskId = String(body.taskId || existing?.taskId || '').trim();
+        const clientTaskId = existing?.clientTaskId || body.clientTaskId || crypto.randomUUID();
+        const key = clientTaskId;
+        if (this.recoveryRequests.has(key)) return this.recoveryRequests.get(key);
+        this.activeGenerationRequests.get(clientTaskId)?.abort();
+        const config = { ...body.providerConfig };
+        // Route and model are frozen; only the current credential is supplied by the caller.
+        if (existing?.endpoint) config.endpoint = existing.endpoint;
+        if (existing?.model) config.model = existing.model;
+        const request = { ...body, kind, taskId, clientTaskId, providerConfig: config,
+            projectId: existing?.projectId || body.projectId,
+            nodeId: existing?.nodeId || body.nodeId, prompt: existing?.prompt || body.prompt || '',
+            params: existing?.params || body.params, sourcePaths: existing?.sourcePaths || body.sourcePaths,
+            targetDir: existing?.targetDir || body.targetDir, location: existing?.location, addToCanvas: false };
+        request.targetSignature = this.captureRecoveryTarget?.(request);
+        const work = this._runCancelableGeneration(`recover:${clientTaskId}`, async signal => {
+            let result = existing?.result;
+            const paths = result?.filePaths?.length ? result.filePaths : [result?.filePath].filter(Boolean);
+            if (!paths.length || !paths.every(filePath => fs.existsSync(filePath))) {
+                if (!taskId) throw new Error('没有上游任务 ID，请从服务商后台复制任务 ID 后拉取；不会重新提交生成');
+                if (!config.apiKey || !config.endpoint) throw new Error('请先恢复原任务使用的 API 配置');
+                if (existing?.providerId && body.providerConfig?.id
+                    && String(existing.providerId).split('::model:')[0] !== String(body.providerConfig.sourceProviderId || body.providerConfig.id).split('::model:')[0]) {
+                    throw new Error('恢复必须使用原任务的 API 账号');
+                }
+                this.recoveryStore.update(clientTaskId, { kind, taskId, projectId: request.projectId,
+                    nodeId: request.nodeId, endpoint: config.endpoint, model: config.model, prompt: request.prompt,
+                    providerId: existing?.providerId || config.sourceProviderId || config.id,
+                    result: null, location: request.location || null, state: 'recovering' });
+                result = await (kind === 'video' ? this._resumeVideoFromRenderer(request, signal)
+                    : this._resumeImageFromRenderer(request, signal));
+                this._rememberResult(request, result);
+            }
+            throwIfGenerationCanceled(signal);
+            if (typeof this.attachRecoveredGeneration !== 'function') throw new Error('画板恢复服务尚未就绪，产物已保留');
+            const attached = await this.attachRecoveredGeneration(request, result, signal);
+            this.recoveryStore.update(clientTaskId, { state: 'attached', nodeId: attached.nodeId });
+            this.notifyTaskCompleted?.({ clientTaskId, remoteTaskId: result.taskId || taskId,
+                projectId: request.projectId, filePath: result.filePath, filePaths: result.filePaths,
+                recovered: true, nodeId: attached.nodeId });
+            return { ...result, ...attached, taskId: result.taskId || taskId, recovered: true };
+        });
+        this.recoveryRequests.set(key, work);
+        try { return await work; }
+        finally { if (this.recoveryRequests.get(key) === work) this.recoveryRequests.delete(key); }
     }
 
     _commitBoardMutation(action) {
@@ -327,6 +450,7 @@ class FlowCanvasBridge {
     }
 
     _requestBoardTool(toolName, input = {}) {
+        if (this.agentBoardExecutor) return Promise.resolve(this.agentBoardExecutor(toolName, input));
         if (!this.boardToolsReady) {
             return Promise.reject(createBridgeError(
                 'RENDERER_NOT_READY',
@@ -415,6 +539,14 @@ class FlowCanvasBridge {
     }
 
     _matchRoute(method, pathname) {
+        if (method === 'POST' && pathname.startsWith('/agent/tools/')) {
+            const toolName = decodeURIComponent(pathname.slice('/agent/tools/'.length));
+            if (!KNOWN_TOOL_NAMES.has(toolName)) return null;
+            return { toolName, params: {}, handler: async (_, body) => {
+                if (!this.agentExecutor) throw new Error('Agent runtime unavailable');
+                return { result: await this.agentExecutor(toolName, body) };
+            } };
+        }
         const routes = [
             ['GET', /^\/health$/, ROUTE_TO_TOOL['GET /health'], () => this._health()],
             ['GET', /^\/config$/, ROUTE_TO_TOOL['GET /config'], () => this._getConfig()],
@@ -704,6 +836,7 @@ class FlowCanvasBridge {
     }
 
     async generateImageFromRenderer(body) {
+        body = this._rememberGeneration('image', body);
         return this._runCancelableGeneration(body?.clientTaskId, signal =>
             this._generateImageFromRenderer(body, signal)
         );
@@ -719,10 +852,9 @@ class FlowCanvasBridge {
         const targetInfo = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
         const targetDir = targetInfo.targetDir;
 
-        const sourceContext = collectImageSourceReferences(data, planService, body);
-        if (sourceContext.missing.length > 0 && body.provider !== 'builtin') {
-            throw missingImageEditReferencesError(sourceContext.missing);
-        }
+        const sourceContext = collectImageSourceReferences(data, planService, body, {
+            requireAll: body.provider !== 'builtin'
+        });
         const generationOptions = await resolveImageGenerationOptions({
             ...body,
             sourceReferences: sourceContext.references
@@ -733,7 +865,11 @@ class FlowCanvasBridge {
             result = await tryGenerateWithOpenAI(prompt, targetDir, {
                 ...generationOptions,
                 signal,
-                onTaskSubmitted: ({ taskId, model, status }) => this.notifyTaskSubmitted?.({
+                onRequestDiagnostic: diagnostic => this.recoveryStore.update(body.clientTaskId, {
+                    requestDiagnostic: diagnostic,
+                    ...(diagnostic.state ? { state: diagnostic.state } : {})
+                }),
+                onTaskSubmitted: ({ taskId, model, status, location }) => this._rememberSubmitted(body, {
                     clientTaskId: body.clientTaskId || null,
                     remoteTaskId: taskId,
                     targetDir,
@@ -741,8 +877,10 @@ class FlowCanvasBridge {
                     prompt,
                     kind: 'image',
                     status,
+                    location,
                     createdAt: new Date().toISOString()
-                })
+                }),
+                onDownloaded: result => this._rememberResult(body, result)
             });
             if (!result?.success && (body.provider || body.providerConfig)) {
                 throw new Error(result?.error || 'Image generation API failed');
@@ -837,6 +975,7 @@ class FlowCanvasBridge {
     }
 
     async generateVideoFromRenderer(body) {
+        body = this._rememberGeneration('video', body);
         return this._runCancelableGeneration(body?.clientTaskId, signal =>
             this._generateVideoFromRenderer(body, signal)
         );
@@ -860,7 +999,7 @@ class FlowCanvasBridge {
             sourceReferences: sourceContext.references,
             videoReferences: videoSourceContext.references,
             audioReferences: audioSourceContext.references,
-            onTaskSubmitted: ({ taskId, model, recovering, recovered }) => this.notifyTaskSubmitted?.({
+            onTaskSubmitted: ({ taskId, model, recovering, recovered }) => this._rememberSubmitted(body, {
                 clientTaskId: body.clientTaskId || null,
                 remoteTaskId: taskId,
                 targetDir,
@@ -870,6 +1009,7 @@ class FlowCanvasBridge {
                 recovered: recovered === true,
                 createdAt: new Date().toISOString()
             }),
+            onDownloaded: result => this._rememberResult(body, result),
             onProgress: (progress) => this.notifyVideoProgress?.({
                 clientTaskId: body.clientTaskId || null,
                 ...progress
@@ -1056,9 +1196,42 @@ class FlowCanvasBridge {
     }
 
     async resumeVideoFromRenderer(body) {
+        this.canceledGenerationRequests.delete(String(body?.clientTaskId || ''));
         return this._runCancelableGeneration(body?.clientTaskId, signal =>
             this._resumeVideoFromRenderer(body, signal)
         );
+    }
+
+    async resumeImageFromRenderer(body) {
+        this.canceledGenerationRequests.delete(String(body?.clientTaskId || ''));
+        return this._runCancelableGeneration(body.clientTaskId, signal => this._resumeImageFromRenderer(body, signal));
+    }
+
+    async _resumeImageFromRenderer(body, signal) {
+            const config = body.providerConfig || {};
+            if (!body.taskId || !config.apiKey || !config.endpoint) throw new Error('图片恢复参数不完整');
+            const requestedTargetDir = body.targetDir || this.getFallbackSaveDir?.();
+            if (!requestedTargetDir) throw new Error('没有可用的图片保存目录');
+            const { targetDir } = resolveWritableTargetDir(requestedTargetDir, this.getFallbackSaveDir?.());
+            const endpoint = buildOpenAiImageEndpoint(config.endpoint, 'generations');
+            const completed = await pollOpenAiImageTask(endpoint, config.apiKey, body.taskId,
+                { id: body.taskId, status: 'pending' }, { model: config.model, signal, location: body.location,
+                    onProgress: progress => this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId, ...progress }),
+                    nativeMidjourney: shouldUseNativeMidjourneyRoute(config.model, config.endpoint) });
+            const entries = getGeneratedImageDataList(completed.payload);
+            if (!entries.length && completed.image) entries.push(completed.image);
+            const saved = (await Promise.all(entries.map(entry => saveGeneratedImage(entry, endpoint,
+                targetDir, body.prompt, config.apiKey, signal)))).filter(Boolean);
+            if (!saved.length) throw new Error('图片任务没有返回可保存的结果');
+            let outputs = saved;
+            if (isMidjourneyImagineModel(config.model) && saved.length === 1 && saved[0].mediaType === 'image') {
+                const split = await splitMidjourneyGrid(saved[0]);
+                if (split.length === 4) outputs = split;
+            }
+            const result = { filePath: outputs[0].filePath, filePaths: outputs.map(output => output.filePath),
+                images: outputs, mediaType: outputs[0].mediaType || 'image', taskId: body.taskId, targetDir };
+            this._rememberResult(body, result);
+            return result;
     }
 
     async _resumeVideoFromRenderer(body, signal) {
@@ -1090,7 +1263,7 @@ class FlowCanvasBridge {
                 model,
                 signal,
                 preferVideoTaskEndpoint: isMiniMaxH3Model(model) || isSeedance25Model(model),
-                onTaskIdResolved: (resolvedTaskId) => this.notifyTaskSubmitted?.({
+                onTaskIdResolved: (resolvedTaskId) => this._rememberSubmitted(body, {
                     clientTaskId: body.clientTaskId || null,
                     remoteTaskId: resolvedTaskId,
                     targetDir,
@@ -1109,9 +1282,11 @@ class FlowCanvasBridge {
         const resolvedTaskId = completed.taskId || taskId;
         this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'download' });
         const filePath = await downloadVideo(completed.url, targetDir, prompt, model, signal);
+        this._rememberResult(body, { filePath, filePaths: [filePath], taskId: resolvedTaskId,
+            mediaType: 'video', video: { url: completed.url }, targetDir });
         throwIfGenerationCanceled(signal);
         this.notifyVideoProgress?.({ clientTaskId: body.clientTaskId || null, stage: 'completed' });
-        this.notifyTaskCompleted?.({ remoteTaskId: resolvedTaskId, filePath });
+        if (body.addToCanvas !== false) this.notifyTaskCompleted?.({ clientTaskId: body.clientTaskId, remoteTaskId: resolvedTaskId, filePath });
         const item = body.addToCanvas === false
             ? null
             : addBoardItem(data, filePath, {
@@ -1124,7 +1299,7 @@ class FlowCanvasBridge {
                     providerConfig: { ...providerConfig, model }
                 }, prompt, [], { taskId: resolvedTaskId })
             });
-        this._saveAndNotify(data, 'mcp:video-recovered');
+        if (item) this._saveAndNotify(data, 'mcp:video-recovered');
         return {
             item,
             filePath,
@@ -1379,14 +1554,17 @@ function syncPlanReferencesForItemUpdate(planService, oldItem, nextItem) {
     return updated;
 }
 
-function collectImageSourceReferences(data, planService, body = {}) {
+function collectImageSourceReferences(data, planService, body = {}, { requireAll = false } = {}) {
     const requested = Array.isArray(body.sourceReferences) ? body.sourceReferences : [];
     const references = [];
     const missing = [];
     const pushReference = reference => {
         const normalized = normalizeSourceReference(reference, data);
-        if (!normalized) return;
-        if (references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
+        if (!normalized) {
+            if (requireAll) missing.push({ name: '未找到路径的参考素材' });
+            return;
+        }
+        if (!requireAll && references.some(existing => normalizeFsPath(existing.filePath) === normalizeFsPath(normalized.filePath))) return;
         if (isSupportedSourceImage(normalized.filePath) && fs.existsSync(normalized.filePath)) {
             references.push(normalized);
         } else {
@@ -1408,16 +1586,10 @@ function collectImageSourceReferences(data, planService, body = {}) {
         }
     }
 
+    if (requireAll && missing.length) {
+        throw new Error(`参考图文件不存在或无法读取：${missing.map(reference => reference.name).join('、')}。已阻止编辑请求，请重新选择参考图后再试。`);
+    }
     return { references, missing };
-}
-
-function missingImageEditReferencesError(references = []) {
-    const names = references
-        .slice(0, 3)
-        .map(reference => String(reference?.name || path.basename(String(reference?.filePath || '')) || '未命名参考图'))
-        .filter(Boolean);
-    const label = names.length > 0 ? `：${names.join('、')}` : '';
-    return new Error(`参考图文件不存在或无法读取${label}。已阻止编辑请求，请重新选择参考图后再试。`);
 }
 
 async function resolveImageGenerationOptions(options = {}) {
@@ -1593,62 +1765,6 @@ function decodeImageBase64(value) {
     return Buffer.from(source.replace(/\s+/g, ''), 'base64');
 }
 
-async function downloadGeneratedImageBuffer(imageUrl, requestHeaders, signal = null) {
-    let lastError;
-    let attemptsMade = 0;
-    let http1FallbackAttempts = 0;
-    for (let attempt = 0; attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS; attempt += 1) {
-        attemptsMade = attempt + 1;
-        throwIfGenerationCanceled(signal);
-        try {
-            const response = await net.fetch(imageUrl, {
-                headers: requestHeaders,
-                redirect: 'follow',
-                signal
-            });
-            if (!response.ok) {
-                const error = generatedMediaDownloadHttpError(response.status);
-                if (!isRetryableGeneratedMediaDownloadError(error)) throw error;
-                lastError = error;
-            } else {
-                const declaredLength = Number(response.headers.get('content-length'));
-                if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
-                    throw new Error('生成产物超过 512 MB 下载限制');
-                }
-                const buffer = Buffer.from(await response.arrayBuffer());
-                if (buffer.length === 0) throw new Error('服务器返回了空图片文件');
-                return buffer;
-            }
-        } catch (error) {
-            throwIfGenerationCanceled(signal);
-            lastError = error;
-            if (shouldFallbackToHttp1GeneratedMediaDownload(error)) {
-                http1FallbackAttempts += 1;
-                try {
-                    const fallback = await downloadRemoteBinaryOverHttp1(
-                        imageUrl,
-                        signal,
-                        'image/*,application/octet-stream;q=0.9,*/*;q=0.1'
-                    );
-                    if (fallback.buffer.length === 0) throw new Error('服务器返回了空图片文件');
-                    return fallback.buffer;
-                } catch (fallbackError) {
-                    throwIfGenerationCanceled(signal);
-                    lastError = fallbackError;
-                    if (!isRetryableGeneratedMediaDownloadError(fallbackError)) break;
-                }
-            } else if (!isRetryableGeneratedMediaDownloadError(error)) {
-                break;
-            }
-        }
-        if (attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS - 1) {
-            await sleep(GENERATED_MEDIA_DOWNLOAD_RETRY_DELAY_MS * (attempt + 1), signal);
-        }
-    }
-    const fallbackText = http1FallbackAttempts > 0 ? `，其中 HTTP/1.1 回退 ${http1FallbackAttempts} 次` : '';
-    throw new Error(`下载生成图片失败（${describeRemoteEndpoint(imageUrl)}，已尝试 ${attemptsMade} 次${fallbackText}）：${describeRemoteFailure(lastError)}`);
-}
-
 async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '', signal = null) {
     const base64Value = String(
         image?.b64_json
@@ -1693,7 +1809,8 @@ async function resolveGeneratedImageBuffer(image, endpoint, apiKey = '', signal 
     } catch (_) {
         // Keep the download unauthenticated if either URL is malformed.
     }
-    return downloadGeneratedImageBuffer(imageUrl, requestHeaders, signal);
+    const { buffer } = await downloadGeneratedBuffer(imageUrl, { headers: requestHeaders, signal });
+    return buffer;
 }
 
 async function saveGeneratedImage(image, endpoint, targetDir, prompt, apiKey = '', signal = null) {
@@ -1703,6 +1820,7 @@ async function saveGeneratedImage(image, endpoint, targetDir, prompt, apiKey = '
     const source = image?.url?.url || image?.url || image?.image_url?.url || image?.image_url || '';
     const contentType = image?.content_type || image?.contentType || image?.mime_type || image?.mimeType || '';
     const media = describeGeneratedMedia(buffer, metadata, { source, contentType });
+    if (media.mediaType === 'image' && !metadata.width) throw new Error('产物下载地址未返回有效图片，可稍后重新拉取');
     const filePath = path.join(targetDir, uniqueImageName('ai', prompt, media.extension));
     fs.writeFileSync(filePath, buffer);
     return {
@@ -1733,11 +1851,15 @@ async function splitMidjourneyGrid(gridImage) {
 
 async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPayload, options = {}) {
     const standardEndpoint = buildImageTaskEndpoint(generationEndpoint, taskId, options.location);
+    const genericEndpoint = new URL(generationEndpoint);
+    genericEndpoint.pathname = genericEndpoint.pathname.replace(/\/images\/(generations|edits)\/?$/i, '/tasks') + `/${encodeURIComponent(taskId)}`;
+    genericEndpoint.search = '';
     const midjourneyEndpoint = buildMidjourneyTaskEndpoint(generationEndpoint, taskId);
     const taskEndpoints = (options.nativeMidjourney
         ? [midjourneyEndpoint]
         : [
             standardEndpoint,
+            genericEndpoint.toString(),
             ...(isMidjourneyImageModel(options.model) ? [midjourneyEndpoint] : [])
         ]).filter((value, index, values) => values.indexOf(value) === index);
     let taskEndpointIndex = 0;
@@ -1745,6 +1867,11 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
     let payload = initialPayload;
     let retryDelay = imageTaskRetryDelayMs(options.retryAfter);
     let consecutiveConnectionFailures = 0;
+    let transientFailures = 0;
+    let emptyCompleted = 0;
+    let queried = false;
+    const wait = options.wait || sleep;
+    const fetchTask = options.fetchTask || fetchTextWithRetry;
 
     while (Date.now() < deadline) {
         const currentImage = getGeneratedImageData(payload);
@@ -1756,15 +1883,18 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
             throw new Error(`图片生成任务失败：${reason}`);
         }
         if (isCompletedImageTaskStatus(status)) {
-            throw new Error('图片生成任务已完成，但响应中没有图片数据');
+            if (++emptyCompleted > 12) throw new Error(`图片任务 ${taskId} 已完成，但上游尚未返回产物地址；可稍后再次拉取`);
         }
 
-        await sleep(retryDelay, options.signal);
+        options.onProgress?.({ stage: emptyCompleted ? 'ready' : 'recovering', remoteStatus: status });
+        if (queried) await wait(retryDelay, options.signal);
+        queried = true;
+        throwIfGenerationCanceled(options.signal);
         let response;
         let text;
         try {
             let taskEndpoint = taskEndpoints[taskEndpointIndex];
-            ({ response, text } = await fetchTextWithRetry(taskEndpoint, {
+            ({ response, text } = await fetchTask(taskEndpoint, {
                 method: 'GET',
                 headers: {
                     Authorization: `Bearer ${apiKey}`,
@@ -1776,7 +1906,7 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
             if ([404, 405].includes(response.status) && taskEndpointIndex < taskEndpoints.length - 1) {
                 taskEndpointIndex += 1;
                 taskEndpoint = taskEndpoints[taskEndpointIndex];
-                ({ response, text } = await fetchTextWithRetry(taskEndpoint, {
+                ({ response, text } = await fetchTask(taskEndpoint, {
                     method: 'GET',
                     headers: {
                         Authorization: `Bearer ${apiKey}`,
@@ -1791,20 +1921,29 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
             throwIfGenerationCanceled(options.signal);
             consecutiveConnectionFailures += 1;
             if (consecutiveConnectionFailures < 8) {
+                options.onProgress?.({ stage: 'recovering', retryCount: consecutiveConnectionFailures, lastError: error.message });
                 console.warn('[FlowCanvasBridge] Image task polling interrupted; retrying:', error.message);
                 continue;
             }
             throw error;
         }
 
+        if ([408, 425, 429, 500, 502, 503, 504, 404].includes(response.status) && ++transientFailures <= 24) {
+            retryDelay = Math.min(30000, 2000 * transientFailures);
+            if (response.status === 404) taskEndpointIndex = (taskEndpointIndex + 1) % taskEndpoints.length;
+            options.onProgress?.({ stage: 'recovering', retryCount: transientFailures, lastError: `HTTP ${response.status}` });
+            continue;
+        }
         if (!response.ok) {
             const taskEndpoint = taskEndpoints[taskEndpointIndex];
             throw new Error(`查询图片任务失败（${describeRemoteEndpoint(taskEndpoint)}）：HTTP ${response.status} ${text.slice(0, 1000)}`);
         }
         payload = parseImageApiResponseText(text, response.headers.get('content-type'));
         if (!payload) {
-            throw new Error('查询图片任务时，服务器未返回有效 JSON');
+            if (++transientFailures <= 24) continue;
+            throw new Error(`查询图片任务 ${taskId} 时，服务器持续返回无效 JSON；可稍后再次拉取`);
         }
+        transientFailures = 0;
         retryDelay = imageTaskRetryDelayMs(response.headers.get('retry-after'), retryDelay);
     }
 
@@ -1895,14 +2034,29 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
 
         const requestId = options.requestId || crypto.randomUUID?.() || crypto.randomBytes(16).toString('hex');
         let res;
+        let responseText = '';
         let responseErrorText = '';
         let requestAttempt = 0;
         let compatibilityFallbackUsed = false;
-        const retryDelays = [2000, 5000];
+        const retryDelays = options.noSubmissionRetry === true ? [] : [2000, 5000];
         for (; requestAttempt <= retryDelays.length; requestAttempt += 1) {
             throwIfGenerationCanceled(options.signal);
             const requestAbort = createLinkedAbortController(options.signal, 300000);
             const activeRequestId = compatibilityFallbackUsed ? `${requestId}-mj-compat` : requestId;
+            const startedAt = Date.now();
+            let phase = '等待响应';
+            const diagnostic = {
+                requestId: activeRequestId, startedAt,
+                clientTaskId: options.clientTaskId, projectId: options.projectId, nodeId: options.nodeId,
+                payloadBytes: Buffer.byteLength(requestPayload), imageCount: sourceImages.length,
+                referenceManifest: sourceImages.map((image, index) => ({
+                    uploadIndex: index + 1, bytes: image.buffer.length, mimeType: image.mimeType,
+                    sha256: crypto.createHash('sha256').update(image.buffer).digest('hex'),
+                    multipartField: openAiImageEdit ? (sourceImages.length === 1 ? 'image' : 'image[]') : null
+                }))
+            };
+            options.onRequestDiagnostic?.({ ...diagnostic, phase });
+            recordDiagnostic('info', 'image.request', { ...diagnostic, endpoint, model });
             try {
                 res = await net.fetch(endpoint, {
                     method: 'POST',
@@ -1919,11 +2073,32 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                     signal: requestAbort.controller.signal,
                     redirect: 'follow'
                 });
+                phase = '读取结果';
+                recordDiagnostic('info', 'image.responseHeaders', { requestId: activeRequestId,
+                    status: res.status, elapsedMs: Date.now() - startedAt,
+                    serverRequestId: res.headers.get('x-request-id') || res.headers.get('x-log-id') || res.headers.get('request-id'),
+                    contentType: res.headers.get('content-type') });
+                const location = res.headers.get('location');
+                const earlyTaskId = location && getImageTaskId({}, res.status, location);
+                if (res.ok && earlyTaskId) options.onTaskSubmitted?.({ taskId: earlyTaskId, model, status: 'queued', location });
+                responseText = await res.text();
+                recordDiagnostic('info', 'image.responseBody', { requestId: activeRequestId,
+                    elapsedMs: Date.now() - startedAt, responseBytes: Buffer.byteLength(responseText) });
             } catch (error) {
                 throwIfGenerationCanceled(options.signal);
                 const attempts = requestAttempt + 1;
+                const timedOut = requestAbort.controller.signal.aborted;
+                recordDiagnostic('error', 'image.requestFailed', { ...diagnostic, phase, timedOut,
+                    elapsedMs: Date.now() - startedAt, error });
+                // A dropped POST response does not prove the server rejected the paid task.
+                if (phase === '读取结果' || timedOut || /ERR_EMPTY_RESPONSE/i.test(error?.message || '')) {
+                    options.onRequestDiagnostic?.({ ...diagnostic, phase, state: 'submission_unknown' });
+                    throw remoteConnectionError('提交图片生成请求', endpoint,
+                        imageRequestFailure(error, { ...diagnostic, phase, timedOut }), attempts);
+                }
                 if (!isRetryableImageNetworkError(error) || requestAttempt >= retryDelays.length) {
-                    throw remoteConnectionError('提交图片生成请求', endpoint, error, attempts);
+                    throw remoteConnectionError('提交图片生成请求', endpoint,
+                        imageRequestFailure(error, { ...diagnostic, phase, timedOut }), attempts);
                 }
                 const retryDelay = retryDelays[requestAttempt];
                 console.warn(`[FlowCanvasBridge] Image API connection failed; retrying in ${retryDelay}ms (${attempts}/${retryDelays.length}): ${error.message}`);
@@ -1934,9 +2109,10 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             }
             if (res.ok) break;
 
-            responseErrorText = await res.text();
+            responseErrorText = responseText;
             if (
                 midjourneyModel
+                && options.noSubmissionRetry !== true
                 && !compatibilityFallbackUsed
                 && isAllVendorsFailedImageResponse(res.status, responseErrorText)
             ) {
@@ -1955,7 +2131,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             await sleep(retryDelay, options.signal);
         }
         if (!res.ok) {
-            const text = responseErrorText || await res.text();
+            const text = responseErrorText || responseText;
             if (res.status === 413) {
                 return {
                     success: false,
@@ -1972,7 +2148,6 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
                 })
             };
         }
-        const responseText = await res.text();
         const location = res.headers.get('location');
         const json = parseImageApiResponseText(responseText, res.headers.get('content-type'))
             || (location ? { status: 'queued' } : null);
@@ -1985,6 +2160,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             options.onTaskSubmitted?.({
                 taskId,
                 model,
+                location,
                 status: imageTaskStatus(json) || 'queued'
             });
             if (!image) {
@@ -2017,7 +2193,6 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         const savedImages = (await Promise.all(imageEntries.map(entry =>
             saveGeneratedImage(entry, endpoint, targetDir, prompt, apiKey, options.signal)
         ))).filter(Boolean);
-        throwIfGenerationCanceled(options.signal);
         if (!savedImages.length) return { success: false, error: 'OpenAI response did not include image data' };
 
         let outputImages = savedImages;
@@ -2034,6 +2209,8 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
         const filePath = primary.filePath;
         const actualSize = primary.width && primary.height ? `${primary.width}x${primary.height}` : null;
         const buttons = finalPayload?.buttons || finalPayload?.result?.buttons || [];
+        options.onDownloaded?.({ filePath, filePaths: outputImages.map(entry => entry.filePath),
+            images: outputImages, mediaType: primary.mediaType || 'image', taskId: taskId || null, targetDir });
         return {
             success: true,
             provider: 'openai',
@@ -2114,15 +2291,16 @@ async function fetchTextWithRetry(url, options, stage, attempts = 3) {
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
         throwIfGenerationCanceled(options?.signal);
+        const linked = createLinkedAbortController(options?.signal, 45000);
         try {
-            const response = await net.fetch(url, options);
+            const response = await net.fetch(url, { ...options, signal: linked.controller.signal });
             const text = await response.text();
             return { response, text };
         } catch (error) {
             throwIfGenerationCanceled(options?.signal);
             lastError = error;
             if (attempt < attempts - 1) await sleep(750 * (attempt + 1), options?.signal);
-        }
+        } finally { linked.cleanup(); }
     }
     throw remoteConnectionError(stage, url, lastError, attempts);
 }
@@ -2652,16 +2830,20 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
     let taskUrlIndex = 0;
     let recoveryNotFoundCount = 0;
     let consecutiveConnectionFailures = 0;
+    let transientFailures = 0;
+    let emptyCompleted = 0;
+    const wait = options.wait || sleep;
+    const fetchTask = options.fetchTask || fetchTextWithRetry;
     const isRecoveringSubmission = initialResponse?.recovering === true;
     options.onProgress?.({ stage: isRecoveringSubmission ? 'recovering' : 'queued' });
     for (let attempt = 0; attempt < 720; attempt += 1) {
-        if (attempt > 0) await sleep(5000, options.signal);
+        if (attempt > 0) await wait(Math.min(30000, 5000 * Math.max(1, transientFailures)), options.signal);
         throwIfGenerationCanceled(options.signal);
         let taskUrl = taskUrls[taskUrlIndex];
         let response;
         let text;
         try {
-            ({ response, text } = await fetchTextWithRetry(taskUrl, {
+            ({ response, text } = await fetchTask(taskUrl, {
                 method: 'GET',
                 headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
                 redirect: 'follow',
@@ -2674,7 +2856,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
                 } else {
                     taskUrlIndex += 1;
                     taskUrl = taskUrls[taskUrlIndex];
-                    ({ response, text } = await fetchTextWithRetry(taskUrl, {
+                    ({ response, text } = await fetchTask(taskUrl, {
                         method: 'GET',
                         headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
                         redirect: 'follow',
@@ -2687,6 +2869,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
             throwIfGenerationCanceled(options.signal);
             consecutiveConnectionFailures += 1;
             if (consecutiveConnectionFailures < 24) {
+                options.onProgress?.({ stage: 'recovering', retryCount: consecutiveConnectionFailures, lastError: error.message });
                 console.warn('[FlowCanvasBridge] Video status connection interrupted; polling will continue:', error.message);
                 continue;
             }
@@ -2697,6 +2880,10 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
             taskUrlIndex = 0;
             continue;
         }
+        if ([408, 425, 429, 500, 502, 503, 504].includes(response.status) && ++transientFailures <= 24) {
+            options.onProgress?.({ stage: 'recovering', retryCount: transientFailures, lastError: `HTTP ${response.status}` });
+            continue;
+        }
         if (!response.ok) {
             throw new Error(`\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u5931\u8d25\uff08${describeRemoteEndpoint(taskUrl)}\uff09\uff1a${response.status} ${text.slice(0, 1000)}`);
         }
@@ -2705,8 +2892,10 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         try {
             payload = JSON.parse(text);
         } catch (_) {
-            throw new Error('\u67e5\u8be2\u89c6\u9891\u4efb\u52a1\u65f6\uff0c\u670d\u52a1\u5668\u672a\u8fd4\u56de\u6709\u6548 JSON');
+            if (++transientFailures <= 24) continue;
+            throw new Error(`查询视频任务 ${currentTaskId} 时，服务器持续返回无效 JSON；可稍后再次拉取`);
         }
+        transientFailures = 0;
         const payloadError = getVideoPayloadError(payload);
         if (payloadError && !getVideoResultUrl(payload)) {
             throw new Error(formatVideoTaskFailure(payloadError, describeRemoteEndpoint(taskUrl), '查询视频任务失败'));
@@ -2727,6 +2916,9 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         if (isFailedVideoStatus(taskStatus)) {
             const reason = getVideoPayloadError(payload) || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
             throw new Error(formatVideoTaskFailure(reason));
+        }
+        if (isCompletedVideoStatus(taskStatus) && !url && ++emptyCompleted > 12) {
+            throw new Error(`视频任务 ${currentTaskId} 已完成，但上游尚未返回产物地址；可稍后再次拉取`);
         }
         options.onProgress?.({
             stage: videoTaskProgressStage(taskStatus),
@@ -2769,46 +2961,66 @@ function uniqueVideoName(prefix, prompt, ext = '.mp4') {
 }
 
 async function downloadVideo(url, targetDir, prompt, model = '', signal = null) {
-    let buffer;
+    const { buffer, contentType, finalUrl } = await downloadGeneratedBuffer(url, {
+        signal,
+        accept: 'video/*,application/octet-stream;q=0.9,*/*;q=0.1'
+    });
+    const filePath = path.join(targetDir, uniqueVideoName(
+        videoModelFilePrefix(model), prompt, videoExtensionFromUrl(finalUrl, contentType)
+    ));
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+}
+
+async function downloadGeneratedBuffer(url, {
+    headers,
+    signal,
+    accept = 'application/octet-stream,*/*;q=0.1'
+} = {}) {
     let lastError;
-    let contentType = '';
-    let downloadedUrl = url;
     let http1FallbackAttempts = 0;
     let attemptsMade = 0;
     for (let attempt = 0; attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS; attempt += 1) {
         attemptsMade = attempt + 1;
         throwIfGenerationCanceled(signal);
+        const linked = createLinkedAbortController(signal, 180000);
         try {
-            const response = await net.fetch(url, { method: 'GET', redirect: 'follow', signal });
+            const response = await net.fetch(url, {
+                method: 'GET',
+                headers,
+                redirect: 'follow',
+                signal: linked.controller.signal
+            });
             if (!response.ok) {
                 const error = generatedMediaDownloadHttpError(response.status);
-                if (!isRetryableGeneratedMediaDownloadError(error)) throw error;
-                lastError = error;
-            } else {
-                const declaredLength = Number(response.headers.get('content-length'));
-                if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
-                    throw new Error('生成产物超过 512 MB 下载限制');
-                }
-                buffer = Buffer.from(await response.arrayBuffer());
-                contentType = response.headers.get('content-type') || '';
-                downloadedUrl = response.url || url;
-                break;
+                await response.body?.cancel();
+                throw error;
             }
+            const declaredLength = Number(response.headers.get('content-length'));
+            if (Number.isFinite(declaredLength) && declaredLength > GENERATED_MEDIA_DOWNLOAD_MAX_BYTES) {
+                await response.body?.cancel();
+                throw Object.assign(new Error('生成产物超过 512 MB 下载限制'), { retryable: false });
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            if (!buffer.length) throw new Error('服务器返回了空生成产物');
+            return {
+                buffer,
+                contentType: response.headers.get('content-type') || '',
+                finalUrl: response.url || url
+            };
         } catch (error) {
             throwIfGenerationCanceled(signal);
             lastError = error;
             if (shouldFallbackToHttp1GeneratedMediaDownload(error)) {
                 http1FallbackAttempts += 1;
                 try {
-                    const fallback = await downloadRemoteBinaryOverHttp1(
-                        url,
-                        signal,
-                        'video/*,application/octet-stream;q=0.9,*/*;q=0.1'
-                    );
-                    buffer = fallback.buffer;
-                    contentType = fallback.contentType;
-                    downloadedUrl = fallback.url;
-                    break;
+                    const fallback = await downloadRemoteBinaryOverHttp1(url, signal, accept, headers);
+                    if (!fallback.buffer.length) throw new Error('服务器返回了空生成产物');
+                    return {
+                        buffer: fallback.buffer,
+                        contentType: fallback.contentType,
+                        finalUrl: fallback.url
+                    };
                 } catch (fallbackError) {
                     throwIfGenerationCanceled(signal);
                     lastError = fallbackError;
@@ -2817,23 +3029,15 @@ async function downloadVideo(url, targetDir, prompt, model = '', signal = null) 
             } else if (!isRetryableGeneratedMediaDownloadError(error)) {
                 break;
             }
+        } finally {
+            linked.cleanup();
         }
         if (attempt < GENERATED_MEDIA_DOWNLOAD_ATTEMPTS - 1) {
             await sleep(GENERATED_MEDIA_DOWNLOAD_RETRY_DELAY_MS * (attempt + 1), signal);
         }
     }
-    if (!buffer) {
-        const fallbackText = http1FallbackAttempts > 0 ? `，其中 HTTP/1.1 回退 ${http1FallbackAttempts} 次` : '';
-        throw new Error(`下载生成视频失败（${describeRemoteEndpoint(url)}，已尝试 ${attemptsMade} 次${fallbackText}）：${describeRemoteFailure(lastError)}。可使用“继续下载”再次拉取产物。`);
-    }
-    if (buffer.length === 0) throw new Error('服务器返回了空视频文件');
-    const filePath = path.join(targetDir, uniqueVideoName(
-        videoModelFilePrefix(model),
-        prompt,
-        videoExtensionFromUrl(downloadedUrl, contentType)
-    ));
-    fs.writeFileSync(filePath, buffer);
-    return filePath;
+    const fallbackText = http1FallbackAttempts > 0 ? `，其中 HTTP/1.1 回退 ${http1FallbackAttempts} 次` : '';
+    throw new Error(`下载生成产物失败（${describeRemoteEndpoint(url)}，已尝试 ${attemptsMade} 次${fallbackText}）：${describeRemoteFailure(lastError)}。可使用“继续下载”再次拉取产物。`);
 }
 
 function generatedMediaDownloadHttpError(status) {
@@ -2853,10 +3057,16 @@ function isRetryableGeneratedMediaDownloadError(error) {
 
 function shouldFallbackToHttp1GeneratedMediaDownload(error) {
     const marker = `${error?.code || ''} ${error?.message || error || ''}`;
-    return /quic|http.?2|ERR_HTTP2|ERR_QUIC_PROTOCOL_ERROR/i.test(marker);
+    return /quic|http.?2|http.?3|ERR_HTTP2|ERR_HTTP3|ERR_QUIC_PROTOCOL_ERROR/i.test(marker);
 }
 
-async function downloadRemoteBinaryOverHttp1(rawUrl, signal = null, accept = 'application/octet-stream,*/*;q=0.1', redirects = 0) {
+async function downloadRemoteBinaryOverHttp1(
+    rawUrl,
+    signal = null,
+    accept = 'application/octet-stream,*/*;q=0.1',
+    requestHeaders = {},
+    redirects = 0
+) {
     throwIfGenerationCanceled(signal);
     const url = new URL(rawUrl);
     const transport = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
@@ -2877,6 +3087,7 @@ async function downloadRemoteBinaryOverHttp1(rawUrl, signal = null, accept = 'ap
         };
         const request = transport.get(url, {
             headers: {
+                ...requestHeaders,
                 Accept: accept,
                 'Accept-Encoding': 'identity'
             }
@@ -2889,7 +3100,7 @@ async function downloadRemoteBinaryOverHttp1(rawUrl, signal = null, accept = 'ap
                     fail(new Error(`产物下载重定向超过 ${GENERATED_MEDIA_DOWNLOAD_REDIRECT_LIMIT} 次`));
                     return;
                 }
-                downloadRemoteBinaryOverHttp1(new URL(location, url).toString(), signal, accept, redirects + 1)
+                downloadRemoteBinaryOverHttp1(new URL(location, url).toString(), signal, accept, requestHeaders, redirects + 1)
                     .then(value => finish(resolve, value), fail);
                 return;
             }
@@ -2919,7 +3130,7 @@ async function downloadRemoteBinaryOverHttp1(rawUrl, signal = null, accept = 'ap
                 chunks.push(chunk);
             });
             response.once('error', fail);
-            response.once('aborted', () => fail(new Error('视频下载连接被服务器中断')));
+            response.once('aborted', () => fail(new Error('生成产物下载连接被服务器中断')));
             response.once('end', () => finish(resolve, {
                 buffer: Buffer.concat(chunks),
                 contentType: String(response.headers['content-type'] || ''),
@@ -3167,6 +3378,8 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
         throwIfGenerationCanceled(options.signal);
         options.onProgress?.({ stage: 'download' });
         const filePath = await downloadVideo(completed.url, targetDir, prompt, model, options.signal);
+        options.onDownloaded?.({ filePath, filePaths: [filePath], taskId: completed.taskId || taskId,
+            mediaType: 'video', video: { url: completed.url }, targetDir });
         throwIfGenerationCanceled(options.signal);
         options.onProgress?.({ stage: 'completed' });
         return {
@@ -3463,3 +3676,5 @@ function clone(value) {
 }
 
 module.exports = FlowCanvasBridge;
+module.exports.pollOpenAiImageTask = pollOpenAiImageTask;
+module.exports.pollOpenAiVideoTask = pollOpenAiVideoTask;

@@ -1,0 +1,37 @@
+.generation-recovery-dialog {
+    width: min(420px, calc(100vw - 32px));
+    margin: auto;
+    font-family: inherit;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color, #414247);
+    border-radius: 8px;
+    padding: 20px;
+    background: var(--bg-panel, #232427);
+    color: var(--text-primary, #e5e5e7);
+}
+.generation-recovery-dialog::backdrop { background: #0008; }
+.generation-recovery-dialog h3 { margin: 0 0 12px; font-size: 15px; }
+.generation-recovery-dialog p { font-size: 12px; overflow-wrap: anywhere; color: #a6a7ad; }
+.generation-recovery-dialog label { display: grid; gap: 8px; font-size: 12px; }
+.generation-recovery-dialog input {
+    min-width: 0; width: 100%; box-sizing: border-box; padding: 9px;
+    background: #191a1d; color: inherit; border: 1px solid #48494f; border-radius: 4px;
+    user-select: text; -webkit-user-select: text;
+}
+.recovery-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.recovery-dialog-actions button, .agent-task-recovery button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    padding: 5px 8px; border: 1px solid #46474d; border-radius: 4px;
+    background: #303136; color: #c6c7cc; cursor: pointer; font: inherit;
+}
+.recovery-dialog-actions button { font-family: inherit; font-size: 12px; }
+.agent-task-recovery { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; font-size: 11px; }
+.agent-task-recovery code {
+    flex: 1; min-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #a4a5ad; user-select: text; -webkit-user-select: text;
+}
+.agent-task-recovery button:hover, .recovery-dialog-actions button:hover { background: #404147; color: #eeeef0; }
+.agent-task-recovery button:disabled { opacity: .55; cursor: default; }
+.agent-task-item .agent-task-error {
+    white-space: normal; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
+}

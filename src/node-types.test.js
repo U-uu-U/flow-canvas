@@ -1,5 +1,5 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
 let helpers;
 test.before(async () => {
@@ -53,6 +53,37 @@ test('expandGenerationPrompts: 按胶囊位置还原图一和图二的编辑职�
         }),
         ['参考图编号与上传顺序一致：图一=第1张，图二=第2张。\n使用图一的机器人和人的比例重新绘制图二']
     );
+});
+
+test('expandGenerationPrompts: repeated citations retain occurrence order without duplicating upload labels', () => {
+    const config = {
+        prompt: 'A B C',
+        referenceCitationIds: ['first', 'second'],
+        referenceCitationLabels: ['图一', '图二'],
+        referenceCitationOffsets: { first: 0, second: 0 },
+        referenceCitationOccurrences: [
+            { id: 'a', connectionId: 'first', offset: 0 },
+            { id: 'b', connectionId: 'second', offset: 2 },
+            { id: 'c', connectionId: 'first', offset: 4 },
+            { id: 'd', connectionId: 'second', offset: 4 }
+        ]
+    };
+    assert.deepEqual(helpers.expandGenerationPrompts({}, JSON.parse(JSON.stringify(config))), [
+        '参考图编号与上传顺序一致：图一=第1张，图二=第2张。\n图一A 图二B 图一图二C'
+    ]);
+    config.referenceCitationOccurrences.splice(0, 1);
+    assert.match(helpers.expandGenerationPrompts({}, config)[0], /\nA 图二B 图一图二C$/);
+    config.referenceCitationOccurrences = [];
+    assert.match(helpers.expandGenerationPrompts({}, config)[0], /\nA B C$/);
+});
+
+test('reference preprocessing cannot silently drop selected images', async () => {
+    const refs = [{ filePath: 'first.png' }, { filePath: 'second.png' }];
+    await assert.rejects(helpers.prepareGenerationReferences(refs, async () => []), /参考图处理不完整/);
+    await assert.rejects(helpers.prepareGenerationReferences(refs, async () => ({ references: [refs[0]] })), /参考图处理不完整/);
+    await assert.rejects(helpers.prepareGenerationReferences(refs, async () => [refs[0], {}]), /参考图处理不完整/);
+    const compressed = [{ filePath: 'first-small.png' }, { filePath: 'second-small.png' }];
+    assert.deepEqual(await helpers.prepareGenerationReferences(refs, async () => ({ references: compressed })), compressed);
 });
 
 test('mapWithConcurrency: 保持结果顺序并限制并发', async () => {
@@ -132,7 +163,10 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
         const output = await helpers.NODE_TYPES.image.execute({
             source: [
                 '上游场景描述',
-                'local-res://' + encodeURIComponent('C:/refs/first.png')
+                [
+                    'local-res://' + encodeURIComponent('C:/refs/first.png'),
+                    'local-res://' + encodeURIComponent('C:/refs/second.png')
+                ]
             ]
         }, {
             prompt: '测试图片',
@@ -151,13 +185,16 @@ test('image execute: 由节点 runner 唯一负责结果落地', async () => {
 
         assert.equal(calls.length, 1);
         assert.equal(calls[0].prompt, '测试图片\n\n上游场景描述');
-        assert.deepEqual(calls[0].sourceReferences, [{ filePath: 'C:/refs/first.png' }]);
+        assert.deepEqual(calls[0].sourceReferences, [
+            { filePath: 'C:/refs/first.png' }, { filePath: 'C:/refs/second.png' }
+        ]);
         assert.equal(calls[0].size, '1536x1024');
         assert.equal(calls[0].addToCanvas, false);
         assert.equal(output._resultFilePath, 'C:/output/result.png');
         assert.equal(output._generation.prompt, '测试图片\n\n上游场景描述');
         assert.equal(output._generation.model, 'gpt-image-2');
         assert.equal(output._generation.config.prompt, calls[0].prompt);
+        assert.equal(output._generation.promptDraftConfig.prompt, '测试图片');
     } finally {
         global.window = previousWindow;
     }

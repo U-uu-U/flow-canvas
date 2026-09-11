@@ -3,15 +3,75 @@
 // ============================================================
 
 const { contextBridge, ipcRenderer } = require('electron');
+window.addEventListener('error', event => ipcRenderer.send('diagnostics:renderer', {
+    type: 'error', message: event.message, stack: event.error?.stack
+}));
+window.addEventListener('unhandledrejection', event => ipcRenderer.send('diagnostics:renderer', {
+    type: 'unhandledrejection', message: event.reason?.message || String(event.reason), stack: event.reason?.stack
+}));
+
+let sourceRevisions = {};
+let sourceActiveGroupId = null;
+function rememberStore(data) {
+    sourceRevisions = Object.fromEntries((data?.folderGroups || []).map(group => [group.id, Number(group.boardRevision) || 0]));
+    sourceActiveGroupId = data?.activeGroupId ?? null;
+    return data;
+}
+function storeEnvelope(data) {
+    const revisions = { ...sourceRevisions };
+    for (const group of data.folderGroups || []) if (!(group.id in revisions)) revisions[group.id] = null;
+    return { data, sourceRevisions: revisions, sourceActiveGroupId };
+}
+function savedStore(result) {
+    if (typeof result === 'boolean') return result;
+    if (result?.sourceRevisions) sourceRevisions = result.sourceRevisions;
+    if (result && Object.prototype.hasOwnProperty.call(result, 'activeGroupId')) sourceActiveGroupId = result.activeGroupId;
+    if (result?.conflicts?.length) ipcRenderer.emit('agent:save-conflict', {}, result);
+    return result?.ok === true;
+}
 
 contextBridge.exposeInMainWorld('flowCanvas', {
     platform: process.platform,
+    diagnostics: {
+        summary: () => ipcRenderer.invoke('diagnostics:summary'),
+        copy: () => ipcRenderer.invoke('diagnostics:copy'),
+        export: () => ipcRenderer.invoke('diagnostics:export'),
+    },
 
     // 数据存储
     store: {
-        load: () => ipcRenderer.invoke('store:load'),
-        save: (data) => ipcRenderer.invoke('store:save', data),
-        saveSync: (data) => ipcRenderer.sendSync('store:saveSync', data),
+        load: async () => rememberStore(await ipcRenderer.invoke('store:load')),
+        loadSync: () => rememberStore(ipcRenderer.sendSync('store:loadSync')),
+        save: async (data) => savedStore(ipcRenderer.sendSync('store:saveSync', storeEnvelope(data))),
+        saveSync: (data) => savedStore(ipcRenderer.sendSync('store:saveSync', storeEnvelope(data))),
+    },
+
+    mcpClient: {
+        list: () => ipcRenderer.invoke('mcp-client:list'),
+        save: config => ipcRenderer.invoke('mcp-client:save', config),
+        remove: request => ipcRenderer.invoke('mcp-client:remove', request),
+        test: request => ipcRenderer.invoke('mcp-client:test', request),
+    },
+
+    agent: {
+        start: request => ipcRenderer.invoke('agent:start', request),
+        get: request => ipcRenderer.invoke('agent:get', request),
+        list: request => ipcRenderer.invoke('agent:list', request),
+        confirm: request => ipcRenderer.invoke('agent:confirm', request),
+        revise: request => ipcRenderer.invoke('agent:revise', request),
+        cancel: request => ipcRenderer.invoke('agent:cancel', request),
+        resume: request => ipcRenderer.invoke('agent:resume', request),
+        retry: request => ipcRenderer.invoke('agent:retry', request),
+        onEvent: callback => {
+            const listener = (_, event) => callback(event);
+            ipcRenderer.on('agent:event', listener);
+            return () => ipcRenderer.removeListener('agent:event', listener);
+        },
+        onSaveConflict: callback => {
+            const listener = (_, result) => callback(result);
+            ipcRenderer.on('agent:save-conflict', listener);
+            return () => ipcRenderer.removeListener('agent:save-conflict', listener);
+        }
     },
 
     apiConfig: {
@@ -98,6 +158,8 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     mcp: {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
         cancelGeneration: (clientTaskId) => ipcRenderer.invoke('mcp:generation:cancel', clientTaskId),
+        recoverGeneration: (body) => ipcRenderer.invoke('mcp:generation:recover', body),
+        listRecoverableGenerations: () => ipcRenderer.invoke('mcp:generation:recovery-list'),
         compressImageReferences: (body) => ipcRenderer.invoke('mcp:image:compress-references', body),
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),
         generateVideo: (body) => ipcRenderer.invoke('mcp:video:generate', body),

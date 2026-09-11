@@ -36,11 +36,21 @@ let thumbnailer = null;
 let flowCanvasBridge = null;
 let browserSyncService = null;
 let apiConfigStore = null;
+let agentServices = null;
 let mediaPreviewWasFullScreen = null;
 
 const isDev = !app.isPackaged;
 
 installSafeConsole();
+require('./diagnostics-electron.cjs').installDiagnostics({
+    getWindow: () => mainWindow,
+    getTasks: () => flowCanvasBridge?.recoveryStore.list() || [],
+    getSecrets: () => {
+        const keys = (apiConfigStore?.load()?.config?.providers || []).map(provider => provider.apiKey).filter(Boolean);
+        try { keys.push(...(agentServices?.runtime?.getSecrets?.() || [])); } catch { /* Runtime may still be initializing. */ }
+        return keys;
+    }
+});
 
 if (IS_MAC) {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
@@ -379,7 +389,7 @@ function restoreMainWindowFromOrb() {
 }
 
 // ── 初始化服务 ──────────────────────────────────────────
-function initServices() {
+async function initServices() {
     store = new Store();
     apiConfigStore = new ApiConfigStore(app.getPath('userData'), {
         protect: value => safeStorage.isEncryptionAvailable()
@@ -408,6 +418,7 @@ function initServices() {
 
     flowCanvasBridge = new FlowCanvasBridge({
         store,
+        recoveryDirectory: path.join(app.getPath('userData'), 'data', 'generation-recovery'),
         getDefaultSaveFolder: getBoardDefaultSaveFolder,
         getFallbackSaveDir: getSaveDir,
         getMainWindow: () => mainWindow,
@@ -437,6 +448,9 @@ function initServices() {
             }
         }
     });
+    const { createAgentServices } = require('./agent-services.cjs');
+    agentServices = await createAgentServices({ store, bridge: flowCanvasBridge, apiConfigStore,
+        dataDir: path.join(app.getPath('userData'), 'data'), getSaveDir, getMainWindow: () => mainWindow, BrowserWindow, net, safeStorage });
     flowCanvasBridge.start(mcpConfig);
 
     const activeGroup = (boardData.folderGroups || []).find(group => group.id === boardData.activeGroupId);
@@ -1247,10 +1261,37 @@ function isCurrentMainWindowSender(event) {
 
 // 数据存储
 ipcMain.handle('store:load', () => store.load());
-ipcMain.handle('store:save', (_, data) => store.save(data));
-ipcMain.on('store:saveSync', (event, data) => {
-    event.returnValue = store.save(data);
+ipcMain.on('store:loadSync', event => { event.returnValue = store.load(); });
+ipcMain.handle('store:save', async (_, data) => {
+    if (!agentServices) return store.save(data?.data || data);
+    await agentServices.board.whenIdle();
+    return agentServices.saveRenderer(data);
 });
+ipcMain.on('store:saveSync', (event, data) => {
+    event.returnValue = agentServices ? agentServices.saveRenderer(data) : store.save(data?.data || data);
+    if (event.returnValue === false || event.returnValue?.ok === false) {
+        require('./diagnostics.cjs').diagnostic('error', 'board.saveConflict', {
+            projectId: data?.data?.activeGroupId, sourceRevisions: data?.sourceRevisions,
+            conflicts: event.returnValue?.conflicts, code: event.returnValue?.code
+        });
+    }
+});
+
+for (const action of ['list', 'save', 'remove', 'test']) {
+    ipcMain.handle(`mcp-client:${action}`, (event, request) => {
+        if (!isCurrentMainWindowSender(event)) throw new Error('MCP 请求来源无效');
+        if (!agentServices) throw new Error('Agent 服务尚未初始化');
+        return agentServices.mcpClient[action](request || {});
+    });
+}
+
+for (const action of ['start', 'get', 'list', 'confirm', 'revise', 'cancel', 'resume', 'retry']) {
+    ipcMain.handle(`agent:${action}`, (event, request) => {
+        if (!isCurrentMainWindowSender(event)) throw new Error('Agent 请求来源无效');
+        if (!agentServices) throw new Error('Agent 服务尚未初始化');
+        return agentServices.runtime[action](request || {});
+    });
+}
 
 ipcMain.on('mcp:board-tools-ready', (event, ready) => {
     if (!isCurrentMainWindowSender(event)) return;
@@ -3036,16 +3077,41 @@ async function downloadImageFromUrl(url, targetDir, redirectDepth = 0) {
 }
 
 // ── 应用生命周期 ────────────────────────────────────────
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
     // 监听本地文件加载
     protocol.handle('local-res', handleLocalResourceRequest);
 
-    initServices();
+    await initServices();
     createWindow();
 });
 
-app.on('before-quit', () => {
+let agentShutdownPromise = null;
+let agentShutdownComplete = false;
+app.on('before-quit', event => {
     isQuitting = true;
+    if (agentServices && !agentShutdownComplete) {
+        event.preventDefault();
+        agentShutdownPromise ||= agentServices.close().catch(() => {}).finally(() => {
+            agentShutdownComplete = true;
+            app.quit();
+        });
+    }
+});
+
+ipcMain.handle('mcp:generation:recover', async (event, body) => {
+    if (event.sender !== mainWindow?.webContents) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge) throw new Error('任务恢复服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.recoverGenerationFromRenderer(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code,
+            canceled: error.code === 'GENERATION_CANCELED' || error.name === 'AbortError' };
+    }
+});
+
+ipcMain.handle('mcp:generation:recovery-list', event => {
+    if (event.sender !== mainWindow?.webContents) return [];
+    return flowCanvasBridge?.recoveryStore.list() || [];
 });
 
 app.on('window-all-closed', () => {

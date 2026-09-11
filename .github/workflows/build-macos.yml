@@ -2,6 +2,15 @@ name: Build macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_run_id:
+        description: "Publish the DMG from an existing successful Build macOS run"
+        required: false
+        type: string
+      publish_tag:
+        description: "Existing draft release tag matching the build commit"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -11,24 +20,128 @@ permissions:
 
 jobs:
   build:
+    if: ${{ !inputs.publish_run_id }}
     name: macOS universal
     runs-on: macos-14
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      ELECTRON_MIRROR: "https://github.com/electron/electron/releases/download/"
+      npm_config_electron_mirror: "https://github.com/electron/electron/releases/download/"
+      npm_config_registry: "https://registry.npmjs.org"
+      npm_config_replace_registry_host: "registry.npmmirror.com"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+      - name: Cache Electron packaging downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: macos-electron-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            macos-electron-${{ runner.arch }}-
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node -e "if ('v' + require('./package.json').version !== process.env.RELEASE_TAG) process.exit(1)"
       - name: Install dependencies
         run: npm ci --include=optional
       - name: Build renderer
         run: npm run build
+      - name: Test shared runtime and project isolation
+        run: npm test
       - name: Package macOS app
-        run: npx electron-builder --mac --universal --publish never
+        run: npx electron-builder --mac --universal --publish never -c.electronDownload.mirror=https://github.com/electron/electron/releases/download/
+      - name: Install smoke-test tooling
+        run: |
+          npm install --no-save --package-lock=false playwright
+          command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: Exercise packaged runtime and video decoding
+        env:
+          FLOW_CANVAS_SMOKE_ASAR: ${{ github.workspace }}/release/mac-universal/Flow Canvas.app/Contents/Resources/app.asar
+          FLOW_CANVAS_SMOKE_VIDEO: "1"
+        run: node scripts/agent-smoke.cjs
+      - name: Verify released UI controls
+        run: node scripts/release-ui-smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-release-ui-screenshots
+          path: output/playwright/release-ui-*.png
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: flow-canvas-macos-universal
           path: release/*.dmg
           if-no-files-found: error
+
+  publish-on-tag:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    name: Publish tested macOS release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: flow-canvas-macos-universal
+          path: artifact
+      - name: Publish this run's verified DMG
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          dmg="artifact/Flow.Canvas.${RELEASE_TAG#v}.mac.universal.dmg"
+          test -s "$dmg"
+          sha256sum "$dmg"
+          if ! gh release view "$RELEASE_TAG" --json isDraft >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Flow Canvas $RELEASE_TAG · macOS" --generate-notes
+          fi
+          [[ $(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft) == true ]]
+          gh release upload "$RELEASE_TAG" "$dmg" --clobber
+          prerelease=false
+          [[ "$RELEASE_TAG" != *-* ]] || prerelease=true
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_run_id }}
+    name: Publish verified macOS artifact
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ inputs.publish_run_id }}
+      RELEASE_TAG: ${{ inputs.publish_tag }}
+    steps:
+      - name: Verify build provenance and draft release
+        shell: bash
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]
+          build=$(gh run view "$RUN_ID" --json conclusion,headSha,workflowName)
+          [[ $(jq -r .conclusion <<< "$build") == success ]]
+          [[ $(jq -r .workflowName <<< "$build") == 'Build macOS' ]]
+          tag_sha=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq .object.sha)
+          [[ $(jq -r .headSha <<< "$build") == "$tag_sha" ]]
+          [[ $(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft) == true ]]
+      - name: Transfer DMG and publish release
+        shell: bash
+        run: |
+          gh run download "$RUN_ID" --name flow-canvas-macos-universal --dir artifact
+          dmg="artifact/Flow.Canvas.${RELEASE_TAG#v}.mac.universal.dmg"
+          test -s "$dmg"
+          sha256sum "$dmg"
+          gh release upload "$RELEASE_TAG" "$dmg"
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease

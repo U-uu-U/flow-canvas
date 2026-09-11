@@ -62,7 +62,6 @@ export class SidebarManager {
 
         this.dom = {
             sidebar: document.getElementById('sidebar'),
-            collapseBtn: document.getElementById('collapseSidebarBtn'),
             addGroupBtn: document.getElementById('addGroupBtn'),
             emptyAddBtn: document.getElementById('emptyAddBtn'),
             folderGroupList: document.getElementById('folderGroupList'),
@@ -944,7 +943,6 @@ export class SidebarManager {
         const setSidebarClosed = (isClosed) => {
             document.body.classList.toggle('sidebar-closed', isClosed);
             this.toggleAssetLibrary(false);
-            this.dom.collapseBtn?.setAttribute('aria-expanded', isClosed ? 'false' : 'true');
             this.storeData.sidebarClosed = isClosed;
             if (window.flowCanvas && window.flowCanvas.store) {
                 window.flowCanvas.store.save(this.storeData);
@@ -969,17 +967,6 @@ export class SidebarManager {
         document.addEventListener('asset-library-archived', event => {
             void this.revealArchivedAsset(event.detail || {});
         });
-
-        if (this.dom.collapseBtn) {
-            this.dom.collapseBtn.addEventListener('pointerdown', (e) => {
-                e.stopPropagation();
-            });
-            this.dom.collapseBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                toggleSidebar();
-            });
-        }
 
         if (this.dom.sidebar) {
             this.dom.sidebar.addEventListener('click', (e) => {

@@ -1,5 +1,5 @@
-const test = require('node:test');
-const assert = require('node:assert');
+import test from 'node:test';
+import assert from 'node:assert';
 
 // graph-model.js 是 ESM（浏览器侧代码），用动态 import 加载。
 let G;
