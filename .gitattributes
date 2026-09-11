@@ -1,0 +1,7 @@
+# 换行符策略
+#
+# 本仓库在 Windows 上开发（core.autocrlf=true 时检出会变 CRLF）。部署脚本要拷到 Linux 上
+# 以 root 执行，一旦带上 \r，shebang 会变成 "#!/usr/bin/env bash\r"，直接 bad interpreter。
+# 所以这里显式钉住 LF，并让 Git 在检出/提交两侧都做归一化。
+*.sh text eol=lf
+*.service text eol=lf
