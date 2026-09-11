@@ -7843,6 +7843,7 @@ select.plan-cell-input {
 .generation-composer-model-popover {
     width: min(320px, calc(100vw - 20px));
     max-height: min(390px, calc(100vh - 20px));
+    grid-template-rows: auto auto minmax(0, 1fr);
     padding: 11px;
 }
 
@@ -7904,10 +7905,21 @@ select.plan-cell-input {
 
 .generation-composer-model-options {
     display: grid;
+    grid-auto-rows: max-content;
+    align-content: start;
     min-height: 0;
     gap: 5px;
     overflow-y: auto;
 }
+
+.generation-composer-model-options::-webkit-scrollbar,
+.generation-composer-route-panel::-webkit-scrollbar { width: 5px; }
+.generation-composer-model-options::-webkit-scrollbar-track,
+.generation-composer-route-panel::-webkit-scrollbar-track { background: transparent; }
+.generation-composer-model-options::-webkit-scrollbar-thumb,
+.generation-composer-route-panel::-webkit-scrollbar-thumb { background: #505359; border-radius: 3px; }
+.generation-composer-model-options::-webkit-scrollbar-button,
+.generation-composer-route-panel::-webkit-scrollbar-button { display: none; }
 
 .generation-composer-model-option {
     display: grid;
@@ -7958,6 +7970,100 @@ select.plan-cell-input {
 
 .generation-composer-model-option.selected > span:last-child {
     color: #bfc2c7;
+}
+
+.generation-composer-model-routes {
+    border-radius: 6px;
+    overflow: hidden;
+    background: #292b2f;
+}
+
+.generation-composer-route-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 48px;
+    padding: 7px 9px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: #bcc0c6;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.generation-composer-route-trigger > span {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.generation-composer-route-trigger strong { font-size: 11px; }
+.generation-composer-route-trigger small { font-size: 9px; color: #7d828a; }
+.generation-composer-route-trigger .flow-icon {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    transform: rotate(180deg);
+    transition: transform 160ms ease;
+}
+
+.generation-composer-model-routes.expanded .generation-composer-route-trigger,
+.generation-composer-route-trigger.selected {
+    background: #33353a;
+    color: #f0f1f3;
+}
+
+.generation-composer-model-routes.expanded .flow-icon { transform: rotate(0); }
+
+.generation-composer-route-panel {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    padding: 4px;
+    box-sizing: border-box;
+    max-height: calc(100vh - 20px);
+    overflow-y: auto;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    background: #232427;
+    color: #bcc0c6;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+
+.generation-composer-route-panel:popover-open {
+    display: block;
+    animation: generation-composer-route-in 150ms ease-out;
+}
+
+@keyframes generation-composer-route-in {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.generation-composer-route-options {
+    min-height: 0;
+    overflow: hidden;
+}
+
+.generation-composer-model-routes .generation-composer-model-option {
+    min-width: 0;
+    border-radius: 4px;
+    gap: 4px;
+    width: 100%;
+    padding-left: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .generation-composer-route-panel,
+    .generation-composer-route-trigger .flow-icon { transition: none; animation: none; }
+}
+
+.generation-composer-model-routes button:focus-visible {
+    outline: 1px solid #bfc2c7;
+    outline-offset: -2px;
 }
 
 .generation-composer-prompt-library-popover {

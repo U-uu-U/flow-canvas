@@ -9152,7 +9152,8 @@ export class CanvasManager {
             provider.id === data.config?.providerId
             || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model)
         );
-        label.textContent = selected?.model || data.config?.model || (providers.length ? '选择模型' : '请先添加 API');
+        label.textContent = [selected?.routeLabel, selected?.model || data.config?.model].filter(Boolean).join(' · ')
+            || (providers.length ? '选择模型' : '请先添加 API');
         button.title = selected
             ? `${selected.name || '未命名 API'} · ${selected.model || '未命名模型'}`
             : (providers.length ? '选择 API 和模型' : '请先在设置中添加 API');
@@ -9218,11 +9219,33 @@ export class CanvasManager {
         `;
         const search = popover.querySelector('input');
         const list = popover.querySelector('.generation-composer-model-options');
+        const rows = [];
+        const groups = new Map();
+        for (const provider of providers) {
+            const sourceId = provider.sourceProviderId;
+            const key = sourceId && provider.routeGroup && provider.routeLabel
+                ? JSON.stringify([sourceId, provider.routeGroup]) : null;
+            let row = key && groups.get(key);
+            if (!row) {
+                row = [];
+                rows.push(row);
+                if (key) groups.set(key, row);
+            }
+            row.push(provider);
+        }
+        rows.forEach(row => row.sort((a, b) => (a.routeLabel || '') < (b.routeLabel || '') ? -1
+            : (a.routeLabel || '') > (b.routeLabel || '') ? 1 : 0));
+        const splitSeedanceSources = new Set(rows
+            .filter(row => row.length === 2 && row[0].routeGroup === 'seedance25-fixed'
+                && row[0].routeLabel !== row[1].routeLabel)
+            .map(row => row[0].sourceProviderId));
+        const visibleRows = rows.filter(row => !(row.length === 1
+            && row[0].model?.toLowerCase() === 'seedance_v2.5'
+            && splitSeedanceSources.has(row[0].sourceProviderId)));
         const render = () => {
             const query = search.value.trim().toLowerCase();
-            const matches = providers.filter(provider =>
-                !query || `${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)
-            );
+            const matches = visibleRows.filter(row => row.some(provider => !query
+                || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
                 const empty = document.createElement('div');
@@ -9233,35 +9256,114 @@ export class CanvasManager {
                 list.appendChild(empty);
                 return;
             }
-            matches.forEach(provider => {
-                const selected = provider.id === data.config?.providerId
-                    || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'generation-composer-model-option';
-                button.classList.toggle('selected', selected);
-                button.setAttribute('role', 'option');
-                button.setAttribute('aria-selected', String(selected));
-                const copy = document.createElement('span');
-                const model = document.createElement('strong');
-                model.textContent = provider.model || '未命名模型';
-                const source = document.createElement('small');
-                source.textContent = provider.name || '未命名 API';
-                copy.append(model, source);
-                const marker = document.createElement('span');
-                marker.textContent = selected ? '当前' : '›';
-                button.append(copy, marker);
-                button.addEventListener('click', () => {
-                    this._applyImageGenerationProviderSelection(data, provider);
-                    active.changed = true;
-                    this._closeGenerationComposerPopover(active);
-                    this._syncGenerationComposerModelButton(nodeId);
-                    this._renderGenerationComposerParameters(nodeId);
-                    this._syncGenerationComposerCount(nodeId);
-                    this.refreshOpNode(nodeId);
-                    this.emit('change');
+            matches.forEach(row => {
+                const split = row.length === 2 && row[0].routeLabel !== row[1].routeLabel;
+                let container = list;
+                if (split) {
+                    const group = document.createElement('div');
+                    group.className = 'generation-composer-model-routes';
+                    group.setAttribute('role', 'group');
+                    group.setAttribute('aria-label', 'Seedance 2.5 线路选择');
+                    const current = row.find(provider => provider.id === data.config?.providerId
+                        || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model));
+                    const trigger = document.createElement('button');
+                    trigger.type = 'button';
+                    trigger.className = 'generation-composer-route-trigger';
+                    trigger.classList.toggle('selected', !!current);
+                    trigger.innerHTML = '<span><strong>Seedance 2.5</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
+                    trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
+                    const panel = document.createElement('div');
+                    panel.className = 'generation-composer-route-panel';
+                    panel.setAttribute('popover', 'manual');
+                    container = document.createElement('div');
+                    container.className = 'generation-composer-route-options';
+                    panel.appendChild(container);
+                    let closeTimer;
+                    const expand = open => {
+                        clearTimeout(closeTimer);
+                        group.classList.toggle('expanded', open);
+                        trigger.setAttribute('aria-expanded', String(open));
+                        panel.inert = !open;
+                        if (open && group.isConnected) {
+                            const bounds = trigger.getBoundingClientRect();
+                            const menuBounds = popover.getBoundingClientRect();
+                            panel.style.width = `${Math.min(bounds.width, window.innerWidth - 20)}px`;
+                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - bounds.width - 10))}px`;
+                            panel.style.top = `${menuBounds.bottom + 5}px`;
+                            panel.showPopover();
+                            const height = panel.offsetHeight;
+                            const top = menuBounds.bottom + 5 + height <= window.innerHeight - 10
+                                ? menuBounds.bottom + 5 : Math.max(10, menuBounds.top - height - 5);
+                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - panel.offsetWidth - 10))}px`;
+                            panel.style.top = `${top}px`;
+                        } else if (panel.matches(':popover-open')) panel.hidePopover();
+                    };
+                    const deferClose = () => {
+                        clearTimeout(closeTimer);
+                        closeTimer = setTimeout(() => {
+                            if (!popover.matches(':hover') && !panel.matches(':hover')) expand(false);
+                        }, 120);
+                    };
+                    group.addEventListener('mouseenter', () => expand(true));
+                    group.addEventListener('mouseleave', deferClose);
+                    panel.addEventListener('mouseenter', () => clearTimeout(closeTimer));
+                    panel.addEventListener('mouseleave', deferClose);
+                    popover.addEventListener('mouseleave', deferClose);
+                    list.addEventListener('scroll', () => {
+                        if (!panel.matches(':popover-open')) return;
+                        const bounds = trigger.getBoundingClientRect();
+                        const viewport = list.getBoundingClientRect();
+                        expand(bounds.bottom > viewport.top && bounds.top < viewport.bottom);
+                    });
+                    group.addEventListener('focusin', () => expand(true));
+                    group.addEventListener('focusout', event => {
+                        if (!group.contains(event.relatedTarget)) expand(false);
+                    });
+                    trigger.addEventListener('click', () => expand(true));
+                    group.addEventListener('keydown', event => {
+                        if (event.key === 'Escape') {
+                            event.stopPropagation();
+                            trigger.focus();
+                            expand(false);
+                        }
+                    });
+                    expand(false);
+                    group.append(trigger, panel);
+                    list.appendChild(group);
+                }
+                row.forEach(provider => {
+                    const selected = provider.id === data.config?.providerId
+                        || (provider.sourceProviderId === data.config?.sourceProviderId && provider.model === data.config?.model);
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'generation-composer-model-option';
+                    button.classList.toggle('selected', selected);
+                    button.setAttribute('role', 'option');
+                    button.setAttribute('aria-selected', String(selected));
+                    button.title = [provider.routeLabel, provider.model, provider.name].filter(Boolean).join(' · ');
+                    const copy = document.createElement('span');
+                    const model = document.createElement('strong');
+                    model.textContent = (split
+                        ? provider.routeLabel + (provider.routeLabel === '线路一' ? '（推荐）' : '')
+                        : provider.model) || '未命名模型';
+                    const source = document.createElement('small');
+                    source.textContent = provider.name || '未命名 API';
+                    copy.append(model, source);
+                    const marker = document.createElement('span');
+                    marker.textContent = selected ? '当前' : '›';
+                    button.append(copy, marker);
+                    button.addEventListener('click', () => {
+                        this._applyImageGenerationProviderSelection(data, provider);
+                        active.changed = true;
+                        this._closeGenerationComposerPopover(active);
+                        this._syncGenerationComposerModelButton(nodeId);
+                        this._renderGenerationComposerParameters(nodeId);
+                        this._syncGenerationComposerCount(nodeId);
+                        this.refreshOpNode(nodeId);
+                        this.emit('change');
+                    });
+                    container.appendChild(button);
                 });
-                list.appendChild(button);
             });
         };
         search.addEventListener('input', render);

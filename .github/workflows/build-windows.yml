@@ -3,8 +3,8 @@ name: Build Windows
 # 仓库此前只有 macOS 工作流，Windows 安装包靠本地 `npm run electron:build` 手工构建，
 # 因此没有任何自动化验证能回答"这次改动还能不能打出 Windows 包"。
 #
-# 本工作流只做**构建验证**：确认 Windows 目标能构建成功。按团队约定，
-# 不上传产物、不自动发布 release（发布仍由同事在本地构建后人工上传）。
+# 构建验证并保存安装包产物，供同一提交的 Windows / macOS Release 使用。
+# 不在此自动公开 Release，发布前仍需确认两个平台产物齐全。
 #
 # 触发方式与 macOS 一致：tag 推送 / 手动触发。
 # 日常门禁（lint + 单元测试）由 lint-test.yml 在 ubuntu 上负责，不在此重复。
@@ -70,6 +70,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Build renderer
+        run: npm run build
+
       # nsis + portable（见 package.json 的 build.win.target）
       - name: Package Windows app
         run: npx electron-builder --win --publish never
@@ -94,3 +97,9 @@ jobs:
             exit 1
           }
           Write-Host "产物齐全：$($installer.Name -join ', ') / $($portable.Name -join ', ')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flow-canvas-windows-x64
+          path: release/*.exe
+          if-no-files-found: error

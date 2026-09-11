@@ -3,7 +3,7 @@ function isMiniMaxH3Model(model) {
 }
 
 function isSeedance25BackupModel(model) {
-    return /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i.test(String(model || '').trim());
+    return /^sd2(?:\.5|_5|-5)(?:-route[12]|-haidiyue-face)?$/i.test(String(model || '').trim());
 }
 
 function isSeedance25Model(model) {

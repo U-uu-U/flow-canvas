@@ -54,7 +54,9 @@ test('runFrom: 链式执行按拓扑序，结果向下游传递', async () => {
     const res = await runner.runFrom('m');
     assert.equal(res.ok, true);
     assert.deepEqual(runner.getResult('m'), { text: 'foo + bar' });
-    assert.equal(items.every(i => i.runStatus === R.STATUS.DONE), true);
+    assert.equal(items[2].runStatus, R.STATUS.DONE);
+    assert.equal(items[0].runStatus, undefined, '读取普通文本不修改上游状态');
+    assert.equal(items[1].runStatus, undefined, '读取普通文本不修改上游状态');
 });
 
 test('runFrom: 只跑上游闭包，无关节点保持 idle', async () => {
@@ -199,7 +201,7 @@ test('cancel: 中断运行节点并丢弃迟到结果', async () => {
     delete NT.__test_cancelable;
 });
 
-test('runFrom: 共享上游的两条链不能同时执行', async () => {
+test('runFrom: 共享正在执行的上游任务时拒绝重复执行', async () => {
     let release;
     NT.__test_shared_slow = {
         type: '__test_shared_slow', title: '共享慢节点', icon: 'clock', color: '#00f', width: 100,
@@ -231,6 +233,119 @@ test('runFrom: 共享上游的两条链不能同时执行', async () => {
     assert.equal((await first).ok, true);
     delete NT.__test_shared_slow;
     delete NT.__test_sink;
+});
+
+for (const sourceKind of ['media', 'text', 'product']) {
+    test(`runFrom: parallel video branches can share ${sourceKind} without sharing cancellation`, async t => {
+        const originalVideo = NT.video;
+        const releases = new Map();
+        const received = new Map();
+        NT.video = {
+            ...originalVideo,
+            execute: (inputs, _config, ctx) => new Promise(resolve => {
+                received.set(ctx.item.id, inputs);
+                releases.set(ctx.item.id, () => resolve({ video: `${ctx.item.id}.mp4` }));
+            })
+        };
+        t.after(() => { NT.video = originalVideo; });
+        const source = sourceKind === 'media'
+            ? media('source', 'C:/shared.png')
+            : sourceKind === 'text'
+                ? op('source', 'text', { text: 'shared prompt' })
+                : { ...op('source', 'image'), resultEntries: [{ filePath: 'C:/shared.png' }] };
+        source.runStatus = R.STATUS.DONE;
+        const sourceBefore = structuredClone(source);
+        const sourcePort = sourceKind === 'text' ? 'text' : sourceKind === 'media' ? 'out' : 'image';
+        const targetPort = 'source';
+        const items = [source, op('left', 'video'), op('right', 'video')];
+        const ctx = makeCtx(items, [
+            conn('source', sourcePort, 'left', targetPort),
+            conn('source', sourcePort, 'right', targetPort)
+        ]);
+        const landed = [];
+        const canceled = [];
+        ctx.onResult = item => landed.push(item.id);
+        ctx.cancelGenerationTasks = id => { canceled.push(id); releases.get(id)?.(); };
+        const runner = new R.GraphRunner(ctx);
+        const first = runner.runFrom('left');
+        const second = runner.runFrom('right');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual([...received.keys()], ['left', 'right']);
+        const expected = sourceKind === 'text' ? ['shared prompt'] : ['local-res://' + encodeURIComponent('C:/shared.png')];
+        for (const inputs of received.values()) {
+            assert.deepEqual([inputs[targetPort]].flat(), expected);
+        }
+        assert.deepEqual([...runner.activeNodes], ['left', 'right']);
+        assert.equal((await runner.runFrom('left')).ok, false, 'same node must not submit twice');
+        assert.equal(await runner.cancel('source'), false, 'shared input must not cancel an arbitrary branch');
+        assert.equal(await runner.cancel('left'), true);
+        assert.equal((await first).canceled, true);
+        assert.deepEqual(canceled, ['left']);
+        assert.equal(items[2].runStatus, R.STATUS.RUNNING);
+        releases.get('right')();
+        assert.equal((await second).ok, true);
+        assert.deepEqual(landed, ['right']);
+        assert.deepEqual(source, sourceBefore);
+        assert.equal(runner.activeNodes.size, 0);
+    });
+}
+
+test('runFrom: a failed branch does not change a parallel branch or its shared input', async t => {
+    const originalVideo = NT.video;
+    const pending = new Map();
+    NT.video = { ...originalVideo, execute: (_inputs, _config, ctx) => new Promise((resolve, reject) => {
+        pending.set(ctx.item.id, { resolve, reject });
+    }) };
+    t.after(() => { NT.video = originalVideo; });
+    const source = media('source', 'C:/shared.png');
+    const items = [source, op('left', 'video'), op('right', 'video')];
+    const ctx = makeCtx(items, [conn('source', 'out', 'left', 'source'), conn('source', 'out', 'right', 'source')]);
+    const runner = new R.GraphRunner(ctx);
+    const first = runner.runFrom('left');
+    const second = runner.runFrom('right');
+    await new Promise(resolve => setImmediate(resolve));
+    pending.get('left').reject(new Error('upstream unavailable'));
+    assert.equal((await first).ok, false);
+    assert.equal(items[1].runStatus, R.STATUS.ERROR);
+    assert.equal(items[2].runStatus, R.STATUS.RUNNING);
+    assert.equal(source.runStatus, undefined);
+    pending.get('right').resolve({ video: 'right.mp4' });
+    assert.equal((await second).ok, true);
+});
+
+test('runFrom: a text AI config override still locks the shared generating node', async t => {
+    const originalText = NT.text;
+    let release;
+    NT.text = { ...originalText, execute: () => new Promise(resolve => { release = resolve; }) };
+    t.after(() => { NT.text = originalText; });
+    const items = [op('source', 'text'), op('left', 'video'), op('right', 'video')];
+    const ctx = makeCtx(items, [conn('source', 'text', 'left', 'source'), conn('source', 'text', 'right', 'source')]);
+    ctx.cancelGenerationTasks = id => { if (id === 'source') release({ text: 'late' }); };
+    const runner = new R.GraphRunner(ctx);
+    const first = runner.runFrom('left', { configOverrides: new Map([['source', { useAi: true }]]) });
+    assert.equal(runner.activeNodes.has('source'), true);
+    assert.equal((await runner.runFrom('right')).ok, false);
+    await runner.cancel('left');
+    assert.equal((await first).canceled, true);
+});
+
+test('runFrom: editing a queued shared input cannot turn a read into an unconfirmed AI call', async t => {
+    let release;
+    NT.__test_gate = { inputs: [], outputs: [{ name: 'out', dataType: 'string' }],
+        execute: () => new Promise(resolve => { release = resolve; }) };
+    t.after(() => { delete NT.__test_gate; });
+    const source = op('source', 'text', { text: 'original' });
+    const target = op('target', 'text');
+    const runner = new R.GraphRunner(makeCtx([op('gate', '__test_gate'), source, target], [
+        conn('gate', 'out', 'target', 'context'), conn('source', 'text', 'target', 'context')
+    ]));
+    const pending = runner.runFrom('target');
+    source.config.useAi = true;
+    source.config.text = 'edited';
+    release({ out: 'ready' });
+    assert.equal((await pending).ok, true);
+    assert.equal(runner.getResult('target').text, 'ready\noriginal');
+    assert.deepEqual(source.config, { useAi: true, text: 'edited' });
 });
 
 test('runFrom: 环形脏数据被拒绝执行', async () => {
@@ -414,7 +529,7 @@ test('failure ends queued sibling animations instead of leaving them running for
     NT.__audit_fail = { title: 'Fail', inputs: [], outputs: [{ name: 'out', dataType: 'string' }],
         execute: async () => { throw new Error('provider failed'); } };
     t.after(() => delete NT.__audit_fail);
-    const items = [op('fail', '__audit_fail'), op('queued', 'text'), op('target', 'text')];
+    const items = [op('fail', '__audit_fail'), op('queued', 'text', { useAi: true }), op('target', 'text')];
     const ctx = makeCtx(items, [conn('fail', 'out', 'target', 'context'), conn('queued', 'text', 'target', 'context')]);
     const result = await new R.GraphRunner(ctx).runFrom('target');
     assert.equal(result.ok, false);

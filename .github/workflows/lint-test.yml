@@ -6,9 +6,9 @@ name: Lint & Test
 
 on:
   pull_request:
-    branches: [master, main]
+    branches: [master, main, dev]
   push:
-    branches: [master, main]
+    branches: [master, main, dev]
   workflow_dispatch:
 
 # 同一分支的旧运行自动取消，避免连续 push 排队堆积
