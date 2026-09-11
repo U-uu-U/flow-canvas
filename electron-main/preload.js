@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('flowCanvas', {
     // 缩略图
     thumb: {
         get: (filePath, maxDim) => ipcRenderer.invoke('thumb:get', filePath, maxDim),
+        preview: (filePath, maxDim, preferOriginal = false) => ipcRenderer.invoke('thumb:preview', filePath, maxDim, preferOriginal),
     },
 
     // 剪贴板
