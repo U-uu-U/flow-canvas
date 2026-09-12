@@ -4,7 +4,7 @@ Flow Canvas 是一款面向 Windows 和 macOS 的本地素材管理与 AI 创作
 
 当前稳定版本：`v1.3.0`
 
-最新测试版本：[`v1.5.0-beta.8`](https://github.com/U-uu-U/flow-canvas/releases/tag/v1.5.0-beta.8)，提供 Windows 安装版 / 便携版和 macOS 通用 DMG。详见[本版更新内容](docs/releases/v1.5.0-beta.8.md)。
+最新测试版本：[`v1.5.0-beta.9`](https://github.com/U-uu-U/flow-canvas/releases/tag/v1.5.0-beta.9)，提供 Windows 安装版 / 便携版和 macOS 通用 DMG。详见[本版更新内容](docs/releases/v1.5.0-beta.9.md)。
 
 ## v1.3.0 更新内容
 
@@ -254,7 +254,7 @@ API 配置和任务记录目前保存在 Electron 本地存储中。当前版本
 flowchart LR
     F["本地文件夹"] --> W["Watcher / Store"]
     W --> C["Konva 无限画布"]
-    C --> U["图片与视频工作区"]
+    C --> U["画布图片与视频生成节点"]
     U --> B["Electron 本地桥接"]
     B --> A["OpenAI 兼容 API"]
     A --> D["任务轮询与本地下载"]
@@ -266,7 +266,7 @@ flowchart LR
 
 | 目录 | 用途 |
 | --- | --- |
-| `src/` | Vite 前端、Konva 画布、素材侧栏及图片/视频工作区 |
+| `src/` | Vite 前端、Konva 画布、素材侧栏、Agent 及图片/视频生成节点 |
 | `electron-main/` | Electron 主进程、文件监听、缩略图、剪贴板、任务恢复与下载 |
 | `shared/` | Electron、renderer 与 MCP 共用的数据服务、schema 和画板工具契约 |
 | `mcp/` | stdio MCP 服务入口和工具定义 |
