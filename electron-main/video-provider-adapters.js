@@ -11,8 +11,20 @@ function isSeedance25Model(model) {
         || /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(String(model || ''));
 }
 
+function isSeedanceVideoModel(model) {
+    return isSeedance25Model(model) || /^seedance_v2\.0-933$/i.test(String(model || '').trim());
+}
+
+function seedanceReferenceLimits(model) {
+    const id = String(model || '').trim().toLowerCase();
+    if (id === 'seedance_v2.0-933') return { image: 9, video: 3, audio: 3 };
+    if (id === 'seedance_v2.5-101010') return { image: 10, video: 10, audio: 10 };
+    if (id === 'seedance_v2.5-301010') return { image: 30, video: 10, audio: 10 };
+    return { image: isSeedance25BackupModel(model) ? 9 : 10, video: 0, audio: 0 };
+}
+
 function seedance25ReferenceImageLimit(model) {
-    return isSeedance25BackupModel(model) ? 9 : 10;
+    return seedanceReferenceLimits(model).image;
 }
 
 function resolveSeedance25AspectRatio(selectedRatio, width, height) {
@@ -141,20 +153,24 @@ function buildSeedance25RequestBody({
     prompt,
     duration,
     aspectRatio,
-    referenceImages = []
+    referenceImages = [],
+    referenceVideos = [],
+    referenceAudios = []
     } = {}) {
+    const label = /^seedance_v2\.0-933$/i.test(String(model || '').trim()) ? 'Seedance 2.0' : 'Seedance 2.5';
+    const maxDuration = label === 'Seedance 2.0' ? 15 : 30;
     const promptValue = String(prompt || '').trim();
-    if (!promptValue) throw new Error('Seedance 2.5 提示词不能为空');
+    if (!promptValue) throw new Error(`${label} 提示词不能为空`);
 
     const durationValue = duration === undefined || duration === null || duration === ''
-        ? 30
+        ? maxDuration
         : Number(duration);
     if (isSeedance25BackupModel(model)) {
         if (durationValue !== 30) {
             throw new Error('Seedance 2.5 备用路线仅支持固定 30 秒视频');
         }
-    } else if (!Number.isInteger(durationValue) || durationValue < 4 || durationValue > 30) {
-        throw new Error('Seedance 2.5 时长仅支持 4 到 30 秒的整数');
+    } else if (!Number.isInteger(durationValue) || durationValue < 4 || durationValue > maxDuration) {
+        throw new Error(`${label} 时长仅支持 4 到 ${maxDuration} 秒的整数`);
     }
 
     const images = Array.isArray(referenceImages)
@@ -165,13 +181,20 @@ function buildSeedance25RequestBody({
         : [];
     const referenceImageLimit = seedance25ReferenceImageLimit(model);
     if (images.length > referenceImageLimit) {
-        throw new Error(`Seedance 2.5 最多支持 ${referenceImageLimit} 张参考图片`);
+        throw new Error(`${label} 最多支持 ${referenceImageLimit} 张参考图片`);
     }
+    const urls = values => (Array.isArray(values) ? values : [])
+        .map(value => String(typeof value === 'string' ? value : value?.url || '').trim()).filter(Boolean);
+    const videos = urls(referenceVideos);
+    const audios = urls(referenceAudios);
+    const limits = seedanceReferenceLimits(model);
+    if (videos.length > limits.video) throw new Error(`${label} 最多支持 ${limits.video} 个参考视频`);
+    if (audios.length > limits.audio) throw new Error(`${label} 最多支持 ${limits.audio} 段参考音频`);
 
     const ratioValue = aspectRatio == null ? '' : String(aspectRatio).trim();
     const allowedRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
     if (ratioValue && !allowedRatios.includes(ratioValue)) {
-        throw new Error(`Seedance 2.5 不支持画幅比例 ${ratioValue}`);
+        throw new Error(`${label} 不支持画幅比例 ${ratioValue}`);
     }
 
     const body = {
@@ -182,6 +205,8 @@ function buildSeedance25RequestBody({
     };
     if (ratioValue) body.ratio = ratioValue;
     if (images.length > 0) body.image_urls = images;
+    if (videos.length > 0) body.video_urls = videos;
+    if (audios.length > 0) body.audio_urls = audios;
     return body;
 }
 
@@ -189,7 +214,7 @@ function videoModelFilePrefix(model) {
     const value = String(model || '').trim();
     if (isMiniMaxH3Model(value)) return 'minimax_h3';
     if (isSeedance25Model(value)) return 'seedance_2_5';
-    if (/seedance[^a-z0-9]*2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i.test(value)) {
+    if (/seedance[^a-z0-9]*(?:v)?2(?:[._-]?0)?|doubao-seedance-2|artsdance[^a-z0-9]*2/i.test(value)) {
         return 'seedance_2_0';
     }
     const normalized = value
@@ -269,7 +294,7 @@ function buildUnifiedVideoEndpoint(endpoint) {
 }
 
 function buildVideoGenerationEndpoint(endpoint, model) {
-    if (isSeedance25Model(model)) {
+    if (isSeedanceVideoModel(model)) {
         try {
             const url = new URL(String(endpoint || '').trim());
             const isDirectUpstream = url.hostname.toLowerCase() === 'video.zhubo.asia'
@@ -493,6 +518,8 @@ module.exports = {
     isMiniMaxH3UnavailableResponse,
     isSeedance25BackupModel,
     isSeedance25Model,
+    isSeedanceVideoModel,
+    seedanceReferenceLimits,
     normalizeMiniMaxH3RequestModel,
     resolveSeedance25AspectRatio,
     seedance25ReferenceImageLimit,

@@ -33,7 +33,7 @@ const JSON_PATH = path.join(root, 'shared', 'model-config.default.json');
 const SCHEMA_PATH = path.join(root, 'shared', 'schemas', 'model-config.schema.json');
 const MODULE_PATH = path.join(root, 'src', 'model-config-default.js');
 // configserver 是独立部署的：它必须自带一份 schema（用 ajv 校验）和一份种子配置
-// （首次启动播种 /config）。这两份由本脚本同步，并有测试断言逐字一致——服务端不允许
+// （首次启动播种 /config）。这两份由本脚本同步，并有测试断言除换行外逐字一致——服务端不允许
 // 维护会漂移的手工副本。
 const SERVER_SCHEMA_PATH = path.join(root, 'configserver', 'schema', 'model-config.schema.json');
 const SERVER_SEED_PATH = path.join(root, 'configserver', 'seed', 'model-config.default.json');
@@ -229,14 +229,18 @@ function copiesToSync() {
     ];
 }
 
-// 同步给 configserver 的两份副本（逐字节），返回是否有变化 / 是否漂移。
+export function normalizeLineEndings(text) {
+    return text.replace(/\r\n/g, '\n');
+}
+
+// 只忽略检出时的 CRLF/LF 差异；内容变化仍从权威文件逐字节同步。
 function syncServerCopies({ write }) {
     const changed = [];
     const drifted = [];
     for (const { source, target, label } of copiesToSync()) {
         const sourceText = fs.readFileSync(source, 'utf8');
         const targetText = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : null;
-        if (targetText === sourceText) continue;
+        if (targetText !== null && normalizeLineEndings(targetText) === normalizeLineEndings(sourceText)) continue;
         if (write) {
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.writeFileSync(target, sourceText, 'utf8');
@@ -275,14 +279,15 @@ function main(argv) {
 
     const rendered = renderDefaultModule(config);
     const current = fs.existsSync(MODULE_PATH) ? fs.readFileSync(MODULE_PATH, 'utf8') : '';
+    const moduleDrifted = normalizeLineEndings(current) !== normalizeLineEndings(rendered);
     if (write) {
-        if (current !== rendered) {
+        if (moduleDrifted) {
             fs.writeFileSync(MODULE_PATH, rendered, 'utf8');
             console.log(`已生成 ${path.relative(root, MODULE_PATH)}`);
         } else {
             console.log(`${path.relative(root, MODULE_PATH)} 已是最新`);
         }
-    } else if (current !== rendered) {
+    } else if (moduleDrifted) {
         console.error('src/model-config-default.js 与 shared/model-config.default.json 不一致。');
         console.error('请运行：node scripts/sync-model-config.mjs --write');
         return 1;

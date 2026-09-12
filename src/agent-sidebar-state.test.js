@@ -129,3 +129,42 @@ test('existing remote IDs use recovery instead of a new generation', async t => 
     await sidebar._retryGenerationTask(task.id);
     assert.equal(recovered, task.id);
 });
+
+test('completed task outputs reuse canvas and shell actions without recovery or resubmission', async t => {
+    const previousWindow = globalThis.window;
+    const previousDocument = globalThis.document;
+    t.after(() => {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+        if (previousDocument === undefined) delete globalThis.document;
+        else globalThis.document = previousDocument;
+    });
+    const opened = [], located = [];
+    globalThis.document = new EventTarget();
+    document.addEventListener('library-asset-drop', () => assert.fail('locating must never add an asset'));
+    document.addEventListener('generation-task-locate', event => located.push(event.detail));
+    globalThis.window = { flowCanvas: { shell: { openFile: async path => opened.push(path) } } };
+    const task = { id: 'complete', projectId: 'original', status: 'success', taskId: 'remote',
+        params: { nodeId: 'generator' }, filePath: '/first.png', filePaths: ['/first.png', '/second.png'] };
+    const sidebar = Object.assign(Object.create(AgentSidebar.prototype), {
+        options: { getActiveProjectId: () => 'original' }, generationTasks: [task],
+        _recoverGenerationTask: () => assert.fail('output actions must not recover'),
+        _retryGenerationTask: () => assert.fail('output actions must not retry')
+    });
+    const before = structuredClone(task);
+    assert.equal(await sidebar._activateGenerationTaskOutput(task.id, 'locate', 1), true);
+    assert.equal(await sidebar._activateGenerationTaskOutput(task.id, 'open', 0), true);
+    assert.deepEqual(located, [{ projectId: 'original', nodeId: 'generator', filePath: '/second.png' }]);
+    assert.deepEqual(opened, ['/first.png']);
+    assert.deepEqual(task, before);
+    sidebar.options.getActiveProjectId = () => 'other';
+    assert.equal(await sidebar._activateGenerationTaskOutput(task.id, 'locate', 0), false);
+    assert.equal(await sidebar._activateGenerationTaskOutput(task.id, 'open', 1), true);
+    assert.deepEqual(located, [{ projectId: 'original', nodeId: 'generator', filePath: '/second.png' }]);
+    assert.deepEqual(opened, ['/first.png', '/second.png']);
+    for (const [id, action, index] of [[task.id, 'open', 8], ['missing', 'open', 0], [task.id, 'retry', 0]]) {
+        assert.equal(await sidebar._activateGenerationTaskOutput(id, action, index), false);
+    }
+    task.status = 'running';
+    assert.equal(await sidebar._activateGenerationTaskOutput(task.id, 'open', 0), false);
+});

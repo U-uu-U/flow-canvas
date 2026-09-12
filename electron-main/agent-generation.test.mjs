@@ -10,6 +10,7 @@ import { getGenerationReuseConfig } from '../src/generation-record.js';
 import { DEFAULT_MODEL_CONFIG } from '../src/model-config-default.js';
 import { imageGenerationRequestParams } from '../src/generation-request-params.js';
 import { createAgentServices } from './agent-services.cjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 
 const copy = value => structuredClone(value);
 const op = (id, nodeType = 'image', config = {}) => ({
@@ -64,8 +65,8 @@ async function setup(t, { items = [op('image')], connections = [], providers, mo
     const capabilities = { current: copy(modelConfig) };
     const generation = new AgentGeneration({ board, bridge, loadConfig: () => copy(config),
         loadModelConfig: () => copy(capabilities.current), fallbackDir: directory });
-    function plan(nodeIds = ['image'], source) {
-        const run = { id: 'run-1', projectId: 'original', source, steps: [] };
+    function plan(nodeIds = ['image'], source, attachments = []) {
+        const run = { id: 'run-1', projectId: 'original', source, attachments, steps: [] };
         const prepared = generation.prepare(run, { nodeIds, summary: 'Approved batch' });
         run.plan = { ...prepared, approved: true };
         run.steps = prepared.steps;
@@ -81,6 +82,112 @@ async function setup(t, { items = [op('image')], connections = [], providers, mo
 }
 
 describe('AgentGeneration planning', () => {
+    test('excluded files and URL-only upstream generators are pruned before topology and never submitted', async t => {
+        const h = await setup(t);
+        const kept = await h.file('kept.png');
+        const removed = path.join(h.directory, 'removed.png');
+        const removedUrl = 'https://cdn.example/removed.mp4';
+        h.projects.original.items.push(
+            { id: 'kept', kind: 'media', mediaType: 'image', filePath: kept },
+            { id: 'removed', kind: 'media', mediaType: 'image', filePath: removed },
+            { ...op('removed-upstream'), url: removedUrl.toUpperCase() },
+            op('hidden-text', 'text', { useAi: true })
+        );
+        h.projects.original.connections = [edge('removed', 'image'), edge('removed-upstream', 'image'),
+            edge('hidden-text', 'removed-upstream'), edge('kept', 'image')];
+        const before = copy(h.projects);
+        const source = { nodeId: 'image', excludedAttachmentKeys: [
+            `image:${removed.replace(/\\/g, '/').toLowerCase()}`, `video:${removedUrl}`
+        ] };
+        const run = h.plan(['image'], source, [
+            { sourceNodeId: 'removed', filePath: removed, mediaType: 'image' },
+            { sourceNodeId: 'kept', filePath: kept, mediaType: 'image' }
+        ]);
+        assert.deepEqual(h.projects, before);
+        assert.deepEqual(run.steps.map(step => step.nodeId), ['image']);
+        assert.deepEqual(run.steps[0].references.map(reference => reference.filePath), [kept]);
+        assert.deepEqual(Object.keys(run.steps[0].nodeFingerprints).sort(), ['image', 'kept']);
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests.length, 1);
+        assert.deepEqual(h.requests[0].body.sourceReferences, [{ filePath: kept }]);
+        assert.equal(h.requests[0].body.referenceBindings[0].sourceNodeId, 'kept');
+        assert.deepEqual(h.projects.original.connections.slice(0, before.original.connections.length), before.original.connections);
+        assert.deepEqual(h.projects.original.items.slice(0, before.original.items.length), before.original.items);
+        assert.deepEqual(h.projects.other, before.other);
+    });
+
+    test('visible attachment order uses sourceNodeId, itemId and normalized paths only on the source node', async t => {
+        const h = await setup(t, { items: [op('source'), op('other')] });
+        const files = {};
+        for (const id of ['a', 'b', 'c', 'd']) {
+            files[id] = await h.file(`${id}.png`);
+            h.projects.original.items.push({ id, kind: 'media', mediaType: 'image', filePath: files[id] });
+        }
+        h.projects.original.connections = [edge('c', 'source'), edge('a', 'source'), edge('b', 'source'), edge('d', 'source'),
+            edge('a', 'other'), edge('c', 'other'), edge('b', 'other')];
+        Object.assign(h.projects.original.items[0].config, {
+            prompt: 'A B', referenceCitationIds: ['a-source', 'b-source'], referenceCitationLabels: ['图一', '图二'],
+            referenceCitationOccurrences: [
+                { connectionId: 'a-source', sourceNodeId: 'a', offset: 0 },
+                { connectionId: 'b-source', sourceNodeId: 'b', offset: 2 }
+            ]
+        });
+        const before = copy(h.projects);
+        const run = h.plan(['source', 'other'], {
+            nodeId: 'source', excludedAttachmentKeys: [`image:${files.c.replace(/\\/g, '/').toLowerCase()}`]
+        }, [
+            { itemId: 'b', filePath: files.b, mediaType: 'image' },
+            { filePath: files.d.replace(/\\/g, '/').toUpperCase(), mediaType: 'image' },
+            { sourceNodeId: 'a', filePath: files.a, mediaType: 'image' }
+        ]);
+        assert.deepEqual(h.projects, before);
+        assert.deepEqual(run.steps[0].references.map(reference => reference.nodeId), ['b', 'd', 'a']);
+        assert.deepEqual(run.steps[1].references.map(reference => reference.nodeId), ['a', 'c', 'b']);
+        assert.deepEqual(run.steps[0].config.referenceCitationLabels, ['图三', '图一']);
+        for (const step of run.steps) await h.execute(step, run);
+        assert.deepEqual(h.requests[0].body.sourceReferences.map(ref => ref.filePath), [files.b, files.d, files.a]);
+        assert.match(h.requests[0].body.prompt, /\n图三A 图一B$/);
+        assert.deepEqual(h.requests[1].body.sourceReferences.map(ref => ref.filePath), [files.a, files.c, files.b]);
+        assert.deepEqual(h.projects.original.connections.slice(0, before.original.connections.length), before.original.connections);
+    });
+
+    test('excluded primary generator results do not pull their ancestors into the plan', async t => {
+        const h = await setup(t);
+        const removed = await h.file('removed-result.png');
+        h.projects.original.items.push({ ...op('completed-upstream'), resultEntries: [{ filePath: removed }] }, op('ancestor'));
+        h.projects.original.connections = [edge('ancestor', 'completed-upstream'), edge('completed-upstream', 'image')];
+        const run = h.plan(['image'], { nodeId: 'image', excludedAttachmentKeys: [`image:${removed.replace(/\\/g, '/').toLowerCase()}`] });
+        assert.deepEqual(run.steps.map(step => step.nodeId), ['image']);
+        assert.deepEqual(run.steps[0].references, []);
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests.length, 1);
+        assert.deepEqual(h.requests[0].body.sourceReferences, []);
+    });
+
+    test('citations to excluded images fail explicitly rather than rebinding to retained uploads', async t => {
+        const h = await setup(t);
+        const kept = await h.file('kept.png'), removed = await h.file('removed.png');
+        h.projects.original.items.push({ id: 'kept', kind: 'media', mediaType: 'image', filePath: kept },
+            { id: 'removed', kind: 'media', mediaType: 'image', filePath: removed });
+        h.projects.original.connections = [edge('removed', 'image'), edge('kept', 'image')];
+        const source = { nodeId: 'image', excludedAttachmentKeys: [`image:${removed.replace(/\\/g, '/').toLowerCase()}`] };
+        const attachments = [{ sourceNodeId: 'kept', filePath: kept, mediaType: 'image' }];
+        for (const citation of [
+            { referenceCitationIds: ['removed-image'], referenceCitationLabels: ['图一'] },
+            ...[{ sourceNodeId: 'removed' }, { itemId: 'removed' }, { connectionId: 'removed-image' },
+                { filePath: removed.replace(/\\/g, '/').toUpperCase() }].map(identity => ({
+                referenceCitationOccurrences: [{ id: 'removed-citation', offset: 0, ...identity }]
+            }))
+        ]) {
+            h.projects.original.items[0].config = { prompt: 'use ', ...citation };
+            const before = copy(h.projects);
+            assert.throws(() => h.plan(['image'], source, attachments), { code: 'EXCLUDED_REFERENCE' });
+            assert.deepEqual(h.projects, before);
+        }
+        assert.equal(h.requests.length, 0);
+        assert.deepEqual(h.mutations, []);
+    });
+
     test('topological generation order deduplicates shared ancestors and ignores history edges', async t => {
         const h = await setup(t, { items: [op('a'), op('b'), op('c')],
             connections: [edge('a', 'b'), edge('a', 'c'), edge('c', 'a', 'history')] });
@@ -440,6 +547,39 @@ describe('AgentGeneration effective CONFIG', () => {
 });
 
 describe('AgentGeneration execution', () => {
+    for (const kind of ['image', 'video']) {
+        test(`${kind} Agent landing shares stack state while retaining provenance and completed-output reuse`, async t => {
+            const h = await setup(t, { items: [op('source', kind)] });
+            const run = h.plan(['source']);
+            const filePaths = [await h.file(`one.${kind === 'image' ? 'png' : 'mp4'}`), await h.file(`two.${kind === 'image' ? 'png' : 'mp4'}`)];
+            const images = filePaths.map((filePath, index) => ({ filePath, candidateIndex: index ? 4 : 2,
+                naturalWidth: index ? 900 : 1800, naturalHeight: index ? 1800 : 900 }));
+            let pending, submissions = 0;
+            h.bridge[kind === 'image' ? 'generateImageFromRenderer' : 'generateVideoFromRenderer'] = async () => {
+                submissions++;
+                const node = h.projects.original.items.find(item => item.id === `result-${run.steps[0].id}`);
+                node.runError = 'earlier failure';
+                pending = copy(node);
+                return { filePaths, images, mediaType: kind, taskId: 'completed-task' };
+            };
+            const result = await h.execute(run.steps[0], run);
+            const actual = h.projects.original.items.find(item => item.id === result.nodeIds[0]);
+            for (const item of images) applyGeneratorStackResult(pending, {
+                _resultFilePath: item.filePath, _resultItem: { ...item, mediaType: kind, generation: actual.generation }
+            }, { generation: actual.generation, completed: true });
+            Object.assign(pending, { filePath: filePaths[0], mediaType: kind });
+            assert.deepEqual(actual, pending);
+            assert.deepEqual([actual.width, actual.height], kind === 'image' ? [264, 132] : [320, 160]);
+            assert.deepEqual(actual.resultItems.map(item => item.candidateIndex), [2, 4]);
+            assert.equal(actual.generation.agentRunId, run.id);
+            assert.equal(actual.generation.taskId, 'completed-task');
+            assert.equal(actual.runError, '');
+            assert.equal((await h.execute(run.steps[0], run)).reused, true);
+            assert.equal(submissions, 1);
+            assert.deepEqual(h.projects.original.items.find(item => item.id === result.nodeIds[0]), actual);
+        });
+    }
+
     test('terminal bridge errors retain UPSTREAM_TASK_FAILED and their original details', async t => {
         for (const [nodeType, resume] of [['image', false], ['video', false], ['image', true], ['video', true]]) {
             const h = await setup(t, { items: [op('target', nodeType)] });

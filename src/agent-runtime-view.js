@@ -436,7 +436,7 @@ export function createRuntimeCard({ onAction, onLocate }) {
             if (actionKey === renderedActions) return;
             renderedActions = actionKey;
             actions.replaceChildren();
-            const labels = { confirm: '确认执行', revise: '修改计划', cancel: '取消任务', resume: '恢复查询', retry: '重试失败项' };
+            const labels = { confirm: '确认执行', revise: '修改计划', cancel: '取消任务', resume: '继续已确认计划', retry: '重试失败项' };
             for (const action of runtimeActions(run)) {
                 const button = element('button', '', labels[action]);
                 button.type = 'button';

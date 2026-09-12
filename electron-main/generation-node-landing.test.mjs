@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AgentBoardService } from './agent-board-service.mjs';
 import { installGenerationNodeLanding } from './generation-node-landing.mjs';
 import { generationNodeSignature } from '../shared/generation-node-state.mjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 import { getGeneratorPlaceholderSize } from '../src/generator-placeholder-layout.js';
 import { appendGeneratorResult, rotateGeneratorResults } from '../src/generator-result-stack.js';
 
@@ -52,6 +53,37 @@ function sourceNode(h) {
 
 function overlaps(a, b) {
     return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+test('converting a generated image preserves the user display name without changing the saved file path', async () => {
+    const h = setup();
+    await h.board.updateProject('original', project => { project.items[0].displayName = 'User title'; });
+    const result = await h.bridge.landGenerationResult({ ...h.request, expectedNode: sourceNode(h) });
+    assert.equal(result.sourceNode.displayName, 'User title');
+    assert.equal(result.sourceNode.filePath, '/one.png');
+});
+
+for (const kind of ['image', 'video']) {
+    test(`${kind} node landing and direct stack application produce the same result state`, async () => {
+        const h = setup({ kind, active: 'other' });
+        const expected = clone(h.request.expectedNode);
+        let expectedNode = clone(expected);
+        for (const [index, dimensions] of [[2, [1800, 900]], [4, [900, 1800]]]) {
+            const output = {
+                _resultFilePath: `/candidate-${index}.png`, _resultUrl: `https://cdn.example/${index}`,
+                _preserveGeneratorStack: true, _candidateIndex: index,
+                _resultItem: { naturalWidth: dimensions[0], naturalHeight: dimensions[1], candidateIndex: 9 },
+                _generation: { nodeType: kind, generatedAt: 123, taskId: 'task', references: [{ filePath: '/reference.png' }] }
+            };
+            applyGeneratorStackResult(expected, output, { completed: true });
+            const result = await h.bridge.landGenerationResult({ ...h.request, output, expectedNode, operationId: `candidate:${index}` });
+            assert.deepEqual(result.sourceNode, expected);
+            expectedNode = result.sourceNode;
+        }
+        assert.equal(expected.runError, '');
+        assert.deepEqual(expected.resultItems.map(item => item.candidateIndex), [2, 4]);
+        assert.equal(h.board.readProject('original').items.length, 1);
+    });
 }
 
 test('a project switch while generation runs lands only in the original project', async () => {

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { generationNodeSignature } from '../shared/generation-node-state.mjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 import { convertGeneratorOutputConnections, getPorts, normalizeGeneratorInputPort } from '../src/graph-model.js';
-import { appendGeneratorResult, resolveGeneratorResultMediaType } from '../src/generator-result-stack.js';
+import { resolveGeneratorResultMediaType } from '../src/generator-result-stack.js';
 import { resolveGenerationDisplaySize } from '../src/image-node-settings.js';
 
 const clone = value => value === undefined ? undefined : structuredClone(value);
@@ -74,6 +75,7 @@ function convertImage(project, source, output, filePath) {
     const resultItem = object(output._resultItem) ? output._resultItem : {};
     const media = {
         ...clone(resultItem),
+        ...(source.displayName ? { displayName: source.displayName } : {}),
         id: source.id,
         kind: 'media',
         mediaType: resolveGeneratorResultMediaType(output, filePath),
@@ -93,33 +95,10 @@ function convertImage(project, source, output, filePath) {
 }
 
 function appendStack(project, source, output, filePath) {
-    if (output._preserveGeneratorStack) source.preserveGeneratorStack = true;
-    if (object(output._generation)) source.generation = clone(output._generation);
-    else if (!source.generation) source.generation = generationRecord(project, source, output);
-    const resultItem = object(output._resultItem) ? clone(output._resultItem) : null;
-    const candidateIndex = output._candidateIndex ?? resultItem?.candidateIndex ?? null;
-    const results = appendGeneratorResult(source, {
-        filePath,
-        url: output._resultUrl || '',
-        item: candidateIndex == null ? resultItem : { ...(resultItem || {}), candidateIndex }
+    applyGeneratorStackResult(source, { ...output, _resultFilePath: filePath }, {
+        generation: source.generation || generationRecord(project, source, output),
+        completed: true
     });
-    if (results.length === 1) {
-        const width = Number(resultItem?.naturalWidth || resultItem?.pixelWidth || resultItem?.width);
-        const height = Number(resultItem?.naturalHeight || resultItem?.pixelHeight || resultItem?.height);
-        if (output._forceSquarePreview === true || (width > 0 && height > 0)) {
-            // Same first-preview ratios and minimum edge as generator-placeholder-layout.
-            const size = resolveGenerationDisplaySize({
-                kind: source.nodeType,
-                ratio: output._forceSquarePreview === true ? '1:1' : '',
-                size: `${width}x${height}`,
-                longEdge: source.nodeType === 'video' ? 320 : 264
-            });
-            source.width = Math.max(112, size.width);
-            source.height = Math.max(112, size.height);
-        }
-    }
-    source.runStatus = 'done';
-    source.runError = '';
     return source.id;
 }
 

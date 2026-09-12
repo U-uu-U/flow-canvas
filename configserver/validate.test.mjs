@@ -4,20 +4,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createValidator, structuralValidate } from './lib/validate.mjs';
+import { normalizeLineEndings } from '../scripts/sync-model-config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA = path.join(HERE, 'schema', 'model-config.schema.json');
 const SEED = path.join(HERE, 'seed', 'model-config.default.json');
 
-test('configserver 自带的 schema 与种子配置和 shared/ 逐字一致（防止手工副本漂移）', () => {
+test('configserver 自带的 schema 与种子配置和 shared/ 除 CRLF/LF 外逐字一致（防止手工副本漂移）', () => {
     const root = path.join(HERE, '..');
     assert.equal(
-        fs.readFileSync(SCHEMA, 'utf8'),
-        fs.readFileSync(path.join(root, 'shared', 'schemas', 'model-config.schema.json'), 'utf8')
+        normalizeLineEndings(fs.readFileSync(SCHEMA, 'utf8')),
+        normalizeLineEndings(fs.readFileSync(path.join(root, 'shared', 'schemas', 'model-config.schema.json'), 'utf8'))
     );
     assert.equal(
-        fs.readFileSync(SEED, 'utf8'),
-        fs.readFileSync(path.join(root, 'shared', 'model-config.default.json'), 'utf8')
+        normalizeLineEndings(fs.readFileSync(SEED, 'utf8')),
+        normalizeLineEndings(fs.readFileSync(path.join(root, 'shared', 'model-config.default.json'), 'utf8'))
     );
     // 顺带确认这份 schema 真的是「含 models 定义」的那一份，而不是被换成了别的文件
     const schema = JSON.parse(fs.readFileSync(SCHEMA, 'utf8'));

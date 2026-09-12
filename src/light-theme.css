@@ -1,0 +1,1235 @@
+/* Global light theme. The canvas itself stays slightly tinted so media remains easy to inspect. */
+:root[data-theme='light'] {
+    color-scheme: light;
+    --bg-color: #f5f6ff;
+    --canvas-bg: #f7f7fa;
+    --panel-bg: #ffffff;
+    --border-color: #e6e6eb;
+    --text-primary: #17171c;
+    --text-secondary: #6b6b6b;
+    --accent: #6757e7;
+    --accent-hover: #6257de;
+    --accent-strong: #5747d5;
+    --accent-border: #cfc9fa;
+    --hover-bg: rgba(103, 87, 231, 0.07);
+    --scrollbar-thumb: rgba(103, 87, 231, 0.28);
+    --scrollbar-thumb-hover: rgba(103, 87, 231, 0.55);
+    --canvas-grid-dot: rgba(96, 93, 123, 0.16);
+    --canvas-node-bg: #ffffff;
+    --canvas-node-bg-subtle: #f9f9fb;
+    --canvas-node-border: #dedee6;
+    --canvas-node-text: #17171c;
+    --canvas-node-muted: #77777b;
+    --canvas-edge: #8b8b93;
+    --canvas-edge-history: #c8c8cf;
+    --canvas-port-bg: #ffffff;
+    --canvas-port-border: #aaaab5;
+    --canvas-control-bg: rgba(255, 255, 255, 0.94);
+    --canvas-control-border: #dedee6;
+    --canvas-control-text: #575761;
+    --canvas-control-shadow: rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] body,
+:root[data-theme='light'] input,
+:root[data-theme='light'] textarea,
+:root[data-theme='light'] select,
+:root[data-theme='light'] button {
+    color-scheme: light;
+}
+
+:root[data-theme='light'] .titlebar-status.status-visible {
+    background: rgba(255, 255, 255, 0.8);
+    border-color: #e6e6eb;
+}
+
+:root[data-theme='light'] .titlebar-status.status-error {
+    color: #b0444b;
+    background: #fff3f3;
+    border-color: #f0cdd0;
+}
+
+:root[data-theme='light'] .context-menu,
+:root[data-theme='light'] .agent-composer-popover,
+:root[data-theme='light'] .generation-composer,
+:root[data-theme='light'] .agent-model-popover,
+:root[data-theme='light'] .agent-task-history-dock,
+:root[data-theme='light'] .task-history-dock {
+    background: #ffffff;
+    border-color: #e0e0e6;
+    box-shadow: 0 18px 44px rgba(24, 18, 58, 0.14);
+    color: var(--text-primary);
+}
+
+:root[data-theme='light'] .sidebar-wrapper,
+:root[data-theme='light'] .sidebar,
+:root[data-theme='light'] .agent-sidebar,
+:root[data-theme='light'] .agent-task-history {
+    background: var(--panel-bg);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+:root[data-theme='light'] .sidebar-header,
+:root[data-theme='light'] .agent-header,
+:root[data-theme='light'] .agent-settings,
+:root[data-theme='light'] .agent-input-area,
+:root[data-theme='light'] .agent-messages,
+:root[data-theme='light'] .agent-task-history-toolbar {
+    background: #ffffff;
+    border-color: var(--border-color);
+}
+
+:root[data-theme='light'] .agent-settings-tabs {
+    background: #f1f5f6;
+    border-color: #e6e6eb;
+    background: #f9f9fb;
+}
+
+:root[data-theme='light'] .agent-settings-tab.active {
+    background: #ffffff;
+    color: var(--accent);
+    box-shadow: 0 2px 8px rgba(24, 18, 58, 0.08);
+}
+
+:root[data-theme='light'] .agent-settings-section-head strong,
+:root[data-theme='light'] .agent-shortcut-copy strong,
+:root[data-theme='light'] .agent-preference-copy strong,
+:root[data-theme='light'] .agent-task-history,
+:root[data-theme='light'] .agent-title {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-shortcut-copy span,
+:root[data-theme='light'] .agent-preference-copy small,
+:root[data-theme='light'] .agent-setting-help,
+:root[data-theme='light'] .agent-library-location-status,
+:root[data-theme='light'] .agent-task-history-toolbar p,
+:root[data-theme='light'] .agent-task-item-topline time {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-shortcut-list,
+:root[data-theme='light'] .agent-shortcut-row,
+:root[data-theme='light'] .agent-shortcut-fixed,
+:root[data-theme='light'] .agent-preference-row,
+:root[data-theme='light'] .agent-creation-setting-block + .agent-creation-setting-block,
+:root[data-theme='light'] .agent-task-item {
+    border-color: #e6e6eb;
+}
+
+:root[data-theme='light'] .agent-shortcut-binding,
+:root[data-theme='light'] .agent-library-location-control select,
+:root[data-theme='light'] .agent-library-location-control button,
+:root[data-theme='light'] .agent-get-api-btn,
+:root[data-theme='light'] .agent-fetch-models-btn,
+:root[data-theme='light'] .agent-add-model-slot,
+:root[data-theme='light'] .agent-prompt-skill-btn,
+:root[data-theme='light'] .mcp-client-settings button,
+:root[data-theme='light'] .diagnostics-actions button {
+    background: #ffffff;
+    border-color: #d8d8df;
+    color: #33333a;
+}
+
+:root[data-theme='light'] .agent-shortcut-binding:hover,
+:root[data-theme='light'] .agent-shortcut-binding.recording,
+:root[data-theme='light'] .agent-library-location-control button:hover:not(:disabled),
+:root[data-theme='light'] .agent-get-api-btn:hover,
+:root[data-theme='light'] .agent-fetch-models-btn:hover,
+:root[data-theme='light'] .agent-add-model-slot:hover,
+:root[data-theme='light'] .agent-prompt-skill-btn:hover,
+:root[data-theme='light'] .mcp-client-settings button:hover,
+:root[data-theme='light'] .diagnostics-actions button:hover {
+    background: #f5f3ff;
+    border-color: #b8aff4;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-setting-input,
+:root[data-theme='light'] .mcp-client-form input,
+:root[data-theme='light'] .mcp-client-form textarea,
+:root[data-theme='light'] .mcp-client-form select {
+    background: #ffffff;
+    border-color: #d8d8df;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-preference-switch i {
+    border-color: #c9c9d0;
+    background: #e9e9ee;
+}
+
+:root[data-theme='light'] .agent-preference-switch i::after {
+    background: #77777b;
+}
+
+:root[data-theme='light'] .agent-preference-switch input:checked + i {
+    border-color: #9c91ed;
+    background: #ddd9ff;
+}
+
+:root[data-theme='light'] .agent-preference-switch input:checked + i::after {
+    background: var(--accent);
+}
+
+:root[data-theme='light'] body.agent-mode .agent-sidebar,
+:root[data-theme='light'] body.agent-mode .agent-header,
+:root[data-theme='light'] body.agent-mode .agent-messages,
+:root[data-theme='light'] body.agent-mode .agent-input-area {
+    background: #ffffff;
+    border-color: #e6e6eb;
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .creation-mode-title,
+:root[data-theme='light'] body.agent-mode .agent-msg-content,
+:root[data-theme='light'] body.agent-mode .agent-welcome-text,
+:root[data-theme='light'] body.agent-mode .agent-title {
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-header-context,
+:root[data-theme='light'] body.agent-mode .agent-welcome-text span,
+:root[data-theme='light'] body.agent-mode .agent-msg-time,
+:root[data-theme='light'] .agent-msg-duration {
+    color: #77777b;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-input-wrapper,
+:root[data-theme='light'] body.agent-mode .agent-model-bar {
+    background: #f9f9fb;
+    border-color: #e0e0e6;
+    box-shadow: 0 8px 24px rgba(24, 18, 58, 0.08);
+}
+
+:root[data-theme='light'] body.agent-mode .agent-input,
+:root[data-theme='light'] body.agent-mode .agent-msg.user .agent-msg-content {
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-msg.user .agent-msg-content {
+    background: #eeeafd;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-send-btn {
+    color: #ffffff;
+    background: var(--accent);
+}
+
+:root[data-theme='light'] body.agent-mode .agent-send-btn:hover {
+    background: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-theme-select {
+    width: 108px;
+    min-width: 108px;
+    padding: 0 8px;
+}
+
+:root[data-theme='light'] .agent-accent-setting {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
+
+:root[data-theme='light'] .agent-accent-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+:root[data-theme='light'] #flowCanvasAccentColor {
+    width: 34px;
+    height: 28px;
+    padding: 2px;
+    border: 1px solid var(--accent-border);
+    border-radius: 6px;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+:root[data-theme='light'] #flowCanvasAccentValue {
+    min-width: 58px;
+    color: var(--text-secondary);
+    font: 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+:root[data-theme='light'] .agent-accent-reset {
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+:root[data-theme='light'] .agent-accent-reset:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+:root[data-theme='light'] #diagnosticsSettings {
+    border-color: #e6e6eb;
+    color: #61717a;
+}
+
+:root[data-theme='light'] .mcp-client-settings {
+    border-color: #e6e6eb;
+}
+
+:root[data-theme='light'] .agent-add-api-btn,
+:root[data-theme='light'] .agent-save-settings-btn,
+:root[data-theme='light'] .agent-composer-popover-footer button.primary,
+:root[data-theme='light'] .agent-skill-form-actions button.primary,
+:root[data-theme='light'] .agent-provider-guide-actions button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+    box-shadow: 0 5px 14px rgba(var(--accent-rgb), 0.2);
+}
+
+:root[data-theme='light'] .agent-add-api-btn:hover,
+:root[data-theme='light'] .agent-save-settings-btn:hover,
+:root[data-theme='light'] .agent-composer-popover-footer button.primary:hover,
+:root[data-theme='light'] .agent-skill-form-actions button.primary:hover,
+:root[data-theme='light'] .agent-provider-guide-actions button.primary:hover {
+    background: var(--accent-strong);
+    border-color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-composer-popover-head,
+:root[data-theme='light'] .agent-conversation-popover,
+:root[data-theme='light'] .agent-files-popover,
+:root[data-theme='light'] .agent-execution-popover,
+:root[data-theme='light'] .agent-skill-popover {
+    background: #ffffff;
+    border-color: #e0e0e6;
+    color: #17171c;
+    box-shadow: 0 18px 44px rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] .agent-composer-menu-item:hover,
+:root[data-theme='light'] .agent-execution-option:hover,
+:root[data-theme='light'] .agent-conversation-item:hover,
+:root[data-theme='light'] .agent-conversation-item.active,
+:root[data-theme='light'] .agent-files-item:hover {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-header-icon-btn:hover,
+:root[data-theme='light'] .agent-conversation-title-btn:hover,
+:root[data-theme='light'] .agent-files-btn:hover,
+:root[data-theme='light'] .agent-header-icon-btn[aria-expanded='true'],
+:root[data-theme='light'] .agent-conversation-title-btn[aria-expanded='true'],
+:root[data-theme='light'] .agent-files-btn[aria-expanded='true'] {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] body.agent-mode .agent-model-bar {
+    background: #ffffff;
+}
+
+:root[data-theme='light'] .agent-task-kind {
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-toggle-btn {
+    background: #ffffff;
+    border-color: rgba(var(--accent-rgb), 0.36);
+    box-shadow: 0 6px 24px rgba(var(--accent-rgb), 0.22);
+}
+
+/* Canvas controls and nested menus use their own surface tokens. Keep these
+   rules at the end so older dark-mode component rules cannot leak through. */
+:root[data-theme='light'] .canvas-tool-rail,
+:root[data-theme='light'] .canvas-node-search,
+:root[data-theme='light'] .canvas-minimap,
+:root[data-theme='light'] .canvas-selection-toolbar,
+:root[data-theme='light'] .context-menu,
+:root[data-theme='light'] .plan-context-menu,
+:root[data-theme='light'] .connection-node-menu,
+:root[data-theme='light'] .op-prompt-preset-menu,
+:root[data-theme='light'] .op-node-quick-menu,
+:root[data-theme='light'] .generation-composer,
+:root[data-theme='light'] .generation-composer-popover,
+:root[data-theme='light'] .generation-composer-select-popover {
+    border-color: #dedee6;
+    background: rgba(255, 255, 255, 0.96);
+    color: #17171c;
+    box-shadow: 0 16px 42px rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] .canvas-tool-rail {
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 10px 0 28px rgba(24, 18, 58, 0.1);
+}
+
+:root[data-theme='light'] .canvas-tool-btn {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .canvas-tool-btn:hover,
+:root[data-theme='light'] .canvas-tool-btn.active {
+    background: #f0edff;
+    color: var(--accent);
+}
+
+:root[data-theme='light'] .canvas-tool-separator {
+    background: #e6e6eb;
+}
+
+:root[data-theme='light'] .canvas-selection-toolbar button,
+:root[data-theme='light'] .canvas-node-search button,
+:root[data-theme='light'] .canvas-node-search input {
+    border-color: #e0e0e6;
+    background: #ffffff;
+    color: #575761;
+}
+
+:root[data-theme='light'] .canvas-selection-toolbar button:hover,
+:root[data-theme='light'] .canvas-selection-toolbar button:focus-visible,
+:root[data-theme='light'] .canvas-node-search button:hover {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .context-menu-item,
+:root[data-theme='light'] .plan-context-menu button,
+:root[data-theme='light'] .connection-node-menu-item,
+:root[data-theme='light'] .op-node-quick-menu button,
+:root[data-theme='light'] .op-prompt-preset-menu button {
+    color: #3f3f47;
+}
+
+:root[data-theme='light'] .context-menu-item:hover,
+:root[data-theme='light'] .plan-context-menu button:hover,
+:root[data-theme='light'] .connection-node-menu-item:hover,
+:root[data-theme='light'] .connection-node-menu-item:focus-visible,
+:root[data-theme='light'] .op-node-quick-menu button:hover,
+:root[data-theme='light'] .op-prompt-preset-menu button:hover {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .context-menu-divider,
+:root[data-theme='light'] .plan-context-menu-divider,
+:root[data-theme='light'] .op-node-quick-menu-divider {
+    background: #e6e6eb;
+}
+
+:root[data-theme='light'] .connection-node-menu-heading,
+:root[data-theme='light'] .op-quick-menu-head,
+:root[data-theme='light'] .op-prompt-preset-head,
+:root[data-theme='light'] .generation-composer-popover-title,
+:root[data-theme='light'] .generation-composer-setting-title {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .connection-node-menu-copy small,
+:root[data-theme='light'] .generation-composer-model-option small,
+:root[data-theme='light'] .generation-composer-route-trigger small,
+:root[data-theme='light'] .op-prompt-preset-status,
+:root[data-theme='light'] .canvas-node-search small {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .op-prompt-preset-select,
+:root[data-theme='light'] .op-prompt-preset-save-row input,
+:root[data-theme='light'] .op-prompt-preset-save-row button,
+:root[data-theme='light'] .generation-composer input,
+:root[data-theme='light'] .generation-composer textarea,
+:root[data-theme='light'] .generation-composer select,
+:root[data-theme='light'] .generation-composer-select-trigger,
+:root[data-theme='light'] .generation-composer-route-trigger,
+:root[data-theme='light'] .generation-composer-model-option,
+:root[data-theme='light'] .generation-composer-style-options button {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .generation-composer-model-option:hover,
+:root[data-theme='light'] .generation-composer-model-option.selected,
+:root[data-theme='light'] .generation-composer-route-trigger:hover,
+:root[data-theme='light'] .generation-composer-route-trigger.selected,
+:root[data-theme='light'] .generation-composer-style-options button:hover,
+:root[data-theme='light'] .generation-composer-style-options button.selected {
+    border-color: #b8aff4;
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .generation-composer-model-options::-webkit-scrollbar-thumb,
+:root[data-theme='light'] .generation-composer-route-panel::-webkit-scrollbar-thumb,
+:root[data-theme='light'] .generation-composer-select-options::-webkit-scrollbar-thumb,
+:root[data-theme='light'] .generation-composer-prompt-library-list::-webkit-scrollbar-thumb,
+:root[data-theme='light'] .op-node-quick-menu *::-webkit-scrollbar-thumb {
+    background: rgba(var(--accent-rgb), 0.35);
+}
+
+:root[data-theme='light'] .generation-composer-reference-tool,
+:root[data-theme='light'] .generation-composer-reference-add,
+:root[data-theme='light'] .generation-composer-reference {
+    border-color: #dedee6;
+    background: #f9f9fb;
+    color: #575761;
+}
+
+:root[data-theme='light'] .generation-composer-reference-tool:hover,
+:root[data-theme='light'] .generation-composer-reference-add:hover,
+:root[data-theme='light'] .generation-composer-reference-add.active,
+:root[data-theme='light'] .generation-composer-reference.cited {
+    border-color: #b8aff4;
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-task-history-head,
+:root[data-theme='light'] .agent-task-history-filters,
+:root[data-theme='light'] .agent-task-history-item,
+:root[data-theme='light'] .asset-library-head,
+:root[data-theme='light'] .asset-library-source-select-wrap {
+    border-color: #e6e6eb;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .asset-library-title,
+:root[data-theme='light'] .asset-library-title-copy strong,
+:root[data-theme='light'] .agent-task-history-head strong {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .asset-library-title-copy small,
+:root[data-theme='light'] .agent-task-history-head p,
+:root[data-theme='light'] .agent-task-history-filters button {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-task-history-filters button.active {
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .sidebar-wrapper,
+:root[data-theme='light'] .sidebar,
+:root[data-theme='light'] .sidebar-content,
+:root[data-theme='light'] .sidebar-section,
+:root[data-theme='light'] .sidebar-bottom-tools,
+:root[data-theme='light'] .accordion-section {
+    background: #ffffff;
+    border-color: #e6e6eb;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .sidebar-header,
+:root[data-theme='light'] .sidebar-label,
+:root[data-theme='light'] .accordion-header,
+:root[data-theme='light'] .sidebar-stats {
+    color: #575761;
+}
+
+:root[data-theme='light'] .sidebar-btn,
+:root[data-theme='light'] .sidebar-action-btn,
+:root[data-theme='light'] .sidebar-collapse-btn {
+    color: #77777b;
+    border-color: transparent;
+}
+
+:root[data-theme='light'] .sidebar-btn:hover,
+:root[data-theme='light'] .sidebar-btn.active,
+:root[data-theme='light'] .sidebar-action-btn:hover,
+:root[data-theme='light'] .sidebar-collapse-btn:hover,
+:root[data-theme='light'] .accordion-header:hover {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .sidebar-collapse-triangle {
+    border-left-color: currentColor;
+}
+
+:root[data-theme='light'] .canvas-asset-library {
+    border-color: #dedee6;
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow: 0 18px 42px rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] .asset-library-source-select-wrap,
+:root[data-theme='light'] .asset-library-source-select-wrap select,
+:root[data-theme='light'] .canvas-asset-library .asset-library-icon-btn {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #575761;
+}
+
+:root[data-theme='light'] .canvas-asset-library .asset-library-icon-btn.active,
+:root[data-theme='light'] .canvas-asset-library .asset-library-icon-btn:hover {
+    border-color: #b8aff4;
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+/* Late component rules below the original theme block need explicit light
+   overrides because Agent and canvas tools intentionally have dark defaults. */
+:root[data-theme='light'] body.agent-mode .agent-sidebar,
+:root[data-theme='light'] body.agent-mode .agent-header,
+:root[data-theme='light'] body.agent-mode .agent-messages,
+:root[data-theme='light'] body.agent-mode .agent-input-area,
+:root[data-theme='light'] body.agent-mode .agent-model-bar {
+    background: #ffffff;
+    border-color: #e6e6eb;
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-welcome-icon,
+:root[data-theme='light'] body.agent-mode .agent-input-wrapper,
+:root[data-theme='light'] body.agent-mode .agent-model-bar,
+:root[data-theme='light'] body.agent-mode .agent-attachment-item {
+    background: #f9f9fb;
+    border-color: #dedee6;
+    color: #575761;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-welcome-text,
+:root[data-theme='light'] body.agent-mode .agent-msg,
+:root[data-theme='light'] body.agent-mode .agent-msg-content,
+:root[data-theme='light'] body.agent-mode .agent-input,
+:root[data-theme='light'] body.agent-mode .agent-composer-mode-btn,
+:root[data-theme='light'] body.agent-mode .agent-composer-tool-btn,
+:root[data-theme='light'] body.agent-mode .agent-plan-btn,
+:root[data-theme='light'] body.agent-mode .agent-clear-btn {
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-welcome-text span,
+:root[data-theme='light'] body.agent-mode .agent-msg-time,
+:root[data-theme='light'] body.agent-mode .agent-msg-duration,
+:root[data-theme='light'] body.agent-mode .agent-input::placeholder,
+:root[data-theme='light'] body.agent-mode .agent-attachment-head,
+:root[data-theme='light'] body.agent-mode .agent-attachment-preview {
+    color: #77777b;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-msg.user .agent-msg-content {
+    background: #eeeafd;
+    color: #17171c;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-settings-btn:hover,
+:root[data-theme='light'] body.agent-mode .agent-plan-btn:hover,
+:root[data-theme='light'] body.agent-mode .agent-clear-btn:hover,
+:root[data-theme='light'] body.agent-mode .agent-composer-mode-btn:hover,
+:root[data-theme='light'] body.agent-mode .agent-composer-tool-btn:hover {
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] body.agent-mode .agent-send-btn,
+:root[data-theme='light'] body.agent-mode .agent-model-bar .agent-send-btn {
+    background: var(--accent);
+    color: #ffffff;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-send-btn:hover,
+:root[data-theme='light'] body.agent-mode .agent-model-bar .agent-send-btn:hover {
+    background: var(--accent-strong);
+    color: #ffffff;
+}
+
+:root[data-theme='light'] body.agent-mode .agent-send-btn:disabled {
+    background: #e6e6eb;
+    color: #9b9ba3;
+}
+
+:root[data-theme='light'] .agent-header-popover,
+:root[data-theme='light'] .agent-composer-popover,
+:root[data-theme='light'] .agent-execution-popover,
+:root[data-theme='light'] .agent-skill-popover {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #17171c;
+    box-shadow: 0 16px 44px rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] .agent-header-popover > header,
+:root[data-theme='light'] .agent-composer-popover-footer,
+:root[data-theme='light'] .agent-attachment-tray {
+    border-color: #e6e6eb;
+}
+
+:root[data-theme='light'] .agent-header-popover > header strong,
+:root[data-theme='light'] .agent-composer-popover-head > strong,
+:root[data-theme='light'] .agent-skill-head-title > strong,
+:root[data-theme='light'] .agent-composer-menu-item,
+:root[data-theme='light'] .agent-composer-list-item,
+:root[data-theme='light'] .agent-conversation-item,
+:root[data-theme='light'] .agent-file-item {
+    color: #3f3f47;
+}
+
+:root[data-theme='light'] .agent-header-popover > header span,
+:root[data-theme='light'] .agent-composer-popover-head > span,
+:root[data-theme='light'] .agent-composer-menu-item small,
+:root[data-theme='light'] .agent-composer-list-item small,
+:root[data-theme='light'] .agent-conversation-item small,
+:root[data-theme='light'] .agent-file-item small,
+:root[data-theme='light'] .agent-composer-empty span {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-conversation-item:hover,
+:root[data-theme='light'] .agent-conversation-item.active,
+:root[data-theme='light'] .agent-file-item:hover,
+:root[data-theme='light'] .agent-composer-menu-item:hover,
+:root[data-theme='light'] .agent-composer-list-item:hover,
+:root[data-theme='light'] .agent-composer-list-item.selected,
+:root[data-theme='light'] .agent-execution-option:hover,
+:root[data-theme='light'] .agent-execution-option.selected {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-new-conversation-btn,
+:root[data-theme='light'] .agent-conversation-actions-popover button,
+:root[data-theme='light'] .agent-skill-head-title > button,
+:root[data-theme='light'] .agent-composer-popover-footer button,
+:root[data-theme='light'] .agent-runtime-actions button,
+:root[data-theme='light'] .agent-runtime-feedback button {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #575761;
+}
+
+:root[data-theme='light'] .agent-new-conversation-btn:hover,
+:root[data-theme='light'] .agent-conversation-actions-popover button:hover,
+:root[data-theme='light'] .agent-skill-head-title > button:hover,
+:root[data-theme='light'] .agent-composer-popover-footer button:hover,
+:root[data-theme='light'] .agent-runtime-actions button:hover,
+:root[data-theme='light'] .agent-runtime-feedback button:hover {
+    border-color: #b8aff4;
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-composer-popover-footer button.primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #ffffff;
+}
+
+:root[data-theme='light'] .agent-composer-tabs,
+:root[data-theme='light'] .agent-skill-tabs {
+    background: #f1f1f5;
+}
+
+:root[data-theme='light'] .agent-composer-tabs button,
+:root[data-theme='light'] .agent-skill-tabs button {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-composer-tabs button.active,
+:root[data-theme='light'] .agent-skill-tabs button.active {
+    background: #ffffff;
+    color: var(--accent-strong);
+    box-shadow: 0 1px 4px rgba(24, 18, 58, 0.08);
+}
+
+:root[data-theme='light'] .agent-skill-search,
+:root[data-theme='light'] .agent-skill-search input,
+:root[data-theme='light'] .agent-conversation-actions-popover input,
+:root[data-theme='light'] .agent-runtime-feedback textarea {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-runtime-card {
+    border-color: #dedee6;
+    background: #f9f9fb;
+    color: #3f3f47;
+}
+
+:root[data-theme='light'] .agent-runtime-actions button:hover,
+:root[data-theme='light'] .agent-runtime-feedback button:hover {
+    background: #f0edff;
+}
+
+:root[data-theme='light'] .asset-classification-menu,
+:root[data-theme='light'] .image-crop-ratio-popover,
+:root[data-theme='light'] .generation-type-menu {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #17171c;
+    box-shadow: 0 16px 42px rgba(24, 18, 58, 0.14);
+}
+
+:root[data-theme='light'] .asset-classification-menu-head,
+:root[data-theme='light'] .asset-classification-menu button,
+:root[data-theme='light'] .generation-type-menu > button,
+:root[data-theme='light'] .image-crop-actions button {
+    color: #575761;
+}
+
+:root[data-theme='light'] .asset-classification-menu-head small,
+:root[data-theme='light'] .image-crop-size,
+:root[data-theme='light'] .generation-type-menu small {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-classification-menu button:hover,
+:root[data-theme='light'] .asset-classification-menu button.active,
+:root[data-theme='light'] .generation-type-menu > button:hover,
+:root[data-theme='light'] .generation-type-menu > button:focus-visible,
+:root[data-theme='light'] .image-crop-actions button:hover {
+    border-color: #b8aff4;
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .image-crop-ratio-popover > strong {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .image-crop-ratio-presets button,
+:root[data-theme='light'] .image-crop-ratio-custom input {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .image-crop-ratio-presets button:hover,
+:root[data-theme='light'] .image-crop-ratio-presets button.selected {
+    border-color: #b8aff4;
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .image-crop-actions .image-crop-confirm,
+:root[data-theme='light'] .image-crop-actions .image-crop-ratio-custom button {
+    background: var(--accent);
+    color: #ffffff;
+}
+
+:root[data-theme='light'] .op-inline-prompt-editor,
+:root[data-theme='light'] .op-model-search input,
+:root[data-theme='light'] .op-dimension-inputs input,
+:root[data-theme='light'] .op-concurrency-control select {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .op-model-option,
+:root[data-theme='light'] .op-choice-options button,
+:root[data-theme='light'] .op-parameter-options button,
+:root[data-theme='light'] .op-count-presets button,
+:root[data-theme='light'] .op-count-stepper button {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #575761;
+}
+
+:root[data-theme='light'] .op-model-option:hover,
+:root[data-theme='light'] .op-model-option.selected,
+:root[data-theme='light'] .op-choice-options button:hover,
+:root[data-theme='light'] .op-choice-options button.selected,
+:root[data-theme='light'] .op-parameter-options button:hover,
+:root[data-theme='light'] .op-parameter-options button.selected,
+:root[data-theme='light'] .op-count-presets button:hover,
+:root[data-theme='light'] .op-count-presets button.selected,
+:root[data-theme='light'] .op-count-stepper button:hover {
+    border-color: #b8aff4;
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-settings-pane,
+:root[data-theme='light'] .agent-setting-group,
+:root[data-theme='light'] .agent-creation-setting-block,
+:root[data-theme='light'] .agent-prompt-skill-panel,
+:root[data-theme='light'] .agent-provider-guide,
+:root[data-theme='light'] .agent-api-form,
+:root[data-theme='light'] .agent-provider-card {
+    border-color: #e0e0e6;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-settings-heading,
+:root[data-theme='light'] .agent-setting-label,
+:root[data-theme='light'] .agent-prompt-skill-title,
+:root[data-theme='light'] .agent-prompt-skill-head,
+:root[data-theme='light'] .agent-api-form-header,
+:root[data-theme='light'] .agent-provider-name {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-setting-help,
+:root[data-theme='light'] .agent-prompt-skill-status,
+:root[data-theme='light'] .agent-provider-meta,
+:root[data-theme='light'] .agent-provider-guide-copy,
+:root[data-theme='light'] .agent-provider-role {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-setting-input,
+:root[data-theme='light'] .agent-setting-textarea,
+:root[data-theme='light'] .agent-provider-card input,
+:root[data-theme='light'] .agent-provider-card select,
+:root[data-theme='light'] .agent-api-form input,
+:root[data-theme='light'] .agent-api-form textarea,
+:root[data-theme='light'] .agent-api-form select {
+    border-color: #d8d8df;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-provider-role.chat,
+:root[data-theme='light'] .agent-provider-role.image,
+:root[data-theme='light'] .agent-provider-role.video {
+    border-color: #dedee6;
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-provider-action,
+:root[data-theme='light'] .agent-api-form-close,
+:root[data-theme='light'] .agent-prompt-skill-btn,
+:root[data-theme='light'] .agent-skill-delete-btn,
+:root[data-theme='light'] .agent-provider-guide-actions button {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .agent-provider-action:hover,
+:root[data-theme='light'] .agent-api-form-close:hover,
+:root[data-theme='light'] .agent-prompt-skill-btn:hover,
+:root[data-theme='light'] .agent-skill-delete-btn:hover,
+:root[data-theme='light'] .agent-provider-guide-actions button:hover {
+    background: #f5f3ff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .agent-provider-guide-overlay,
+:root[data-theme='light'] .video-compression-dialog-overlay,
+:root[data-theme='light'] .image-crop-overlay {
+    background: rgba(23, 23, 28, 0.28);
+}
+
+:root[data-theme='light'] .video-compression-dialog,
+:root[data-theme='light'] .agent-provider-guide-copy,
+:root[data-theme='light'] .agent-provider-guide-actions {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .agent-toggle-btn:hover {
+    border-color: #b8aff4;
+    box-shadow: 0 6px 24px rgba(var(--accent-rgb), 0.28);
+}
+
+:root[data-theme='light'] .agent-sidebar-resize-handle::after {
+    background: #aaaab5;
+}
+
+:root[data-theme='light'] .agent-sidebar-resize-handle:hover::after,
+:root[data-theme='light'] body.agent-sidebar-resizing .agent-sidebar-resize-handle::after {
+    background: var(--accent);
+}
+
+/* The bottom-left view dock and top-right usage badge are separate from the
+   sidebar rail, so they need their own light surfaces. */
+:root[data-theme='light'] .canvas-view-dock,
+:root[data-theme='light'] .board-usage,
+:root[data-theme='light'] .canvas-minimap {
+    border-color: #dedee6;
+    background: rgba(255, 255, 255, 0.96);
+    color: #575761;
+    box-shadow: 0 12px 28px rgba(24, 18, 58, 0.12);
+}
+
+:root[data-theme='light'] .canvas-view-btn,
+:root[data-theme='light'] .canvas-minimap-fit {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .canvas-view-btn:hover,
+:root[data-theme='light'] .canvas-view-btn.active,
+:root[data-theme='light'] .canvas-minimap-fit:hover {
+    background: #f0edff;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .board-usage-label,
+:root[data-theme='light'] .board-usage-memory {
+    color: var(--accent);
+}
+
+:root[data-theme='light'] .board-usage-detail,
+:root[data-theme='light'] .canvas-minimap-zoom {
+    color: #77777b;
+}
+
+/* Asset library: search, type tabs, category chips and result cards. */
+:root[data-theme='light'] .asset-library-search,
+:root[data-theme='light'] .asset-library-filters {
+    border-color: #dedee6;
+    background: #f9f9fb;
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-library-search:focus-within {
+    border-color: #b8aff4;
+    background: #ffffff;
+    color: var(--accent);
+}
+
+:root[data-theme='light'] .asset-library-search input {
+    color: #17171c;
+}
+
+:root[data-theme='light'] .asset-library-search input::placeholder {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-library-search button {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip b {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip:hover,
+:root[data-theme='light'] .asset-library-filters .filter-chip.active {
+    background: #eeeafd;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip.active b {
+    color: var(--accent);
+}
+
+:root[data-theme='light'] .asset-category-heading,
+:root[data-theme='light'] .asset-library-results-head {
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-category-heading small {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-category-chip {
+    border-color: #dedee6;
+    background: #f9f9fb;
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-category-chip .flow-icon,
+:root[data-theme='light'] .asset-category-chip b {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-category-chip:hover,
+:root[data-theme='light'] .asset-category-chip.active {
+    border-color: #b8aff4;
+    background: #eeeafd;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .asset-library-card {
+    border-color: #dedee6;
+    background: #ffffff;
+    color: #17171c;
+}
+
+:root[data-theme='light'] .asset-library-card:hover {
+    border-color: #b8aff4;
+    background: #ffffff;
+}
+
+:root[data-theme='light'] .asset-library-card-preview,
+:root[data-theme='light'] .asset-kind-video,
+:root[data-theme='light'] .asset-kind-audio,
+:root[data-theme='light'] .asset-kind-document,
+:root[data-theme='light'] .asset-kind-other {
+    background: #f1f1f5;
+    color: #77777b;
+}
+
+:root[data-theme='light'] .asset-library-card-fallback,
+:root[data-theme='light'] .asset-library-card-preview > span {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-library-card-name {
+    color: #3f3f47;
+}
+
+:root[data-theme='light'] .asset-library-card-tags span,
+:root[data-theme='light'] .asset-library-card-tags i {
+    background: #f0edff;
+    color: #77777b;
+}
+
+/* Light-mode launcher: keep the floating control white instead of allowing
+   the legacy blue/purple fluid layers to become the visible surface. */
+:root[data-theme='light'] .agent-toggle-btn,
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .agent-toggle-btn,
+:root[data-theme='light'] body.agent-open .agent-toggle-btn {
+    border-color: var(--accent-border);
+    background: #ffffff;
+    color: var(--accent);
+    box-shadow: 0 4px 24px rgba(var(--accent-rgb), 0.2);
+}
+
+:root[data-theme='light'] .toggle-btn-glow,
+:root[data-theme='light'] .toggle-btn-glow::before,
+:root[data-theme='light'] .toggle-btn-glow::after {
+    background: #ffffff;
+    opacity: 0;
+    mix-blend-mode: normal;
+}
+
+:root[data-theme='light'] .agent-toggle-btn::before,
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .agent-toggle-btn::before,
+:root[data-theme='light'] body.agent-open .agent-toggle-btn::before {
+    background: radial-gradient(circle, rgba(var(--accent-rgb), 0.14), transparent 70%);
+    opacity: 0.42;
+}
+
+:root[data-theme='light'] .agent-toggle-btn .toggle-btn-icon,
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .agent-toggle-btn .toggle-btn-icon {
+    fill: var(--accent);
+    filter: none;
+}
+
+:root[data-theme='light'] .agent-toggle-btn:hover {
+    background: #ffffff;
+    border-color: var(--accent-border);
+    box-shadow: 0 6px 24px rgba(var(--accent-rgb), 0.28);
+}
+
+:root[data-theme='light'] body.agent-open .agent-toggle-btn .toggle-btn-collapse-icon {
+    border-color: var(--accent);
+    filter: none;
+}
+
+/* Preserve the launcher animation in light mode; only its palette changes. */
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .toggle-btn-glow,
+:root[data-theme='light'] body.agent-open .toggle-btn-glow,
+:root[data-theme='light'] .agent-toggle-btn.activating .toggle-btn-glow {
+    opacity: 1;
+}
+
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .toggle-btn-glow::before,
+:root[data-theme='light'] body.agent-open .toggle-btn-glow::before,
+:root[data-theme='light'] .agent-toggle-btn.activating .toggle-btn-glow::before {
+    background:
+        radial-gradient(ellipse 80% 60% at 35% 30%, rgba(218, 214, 255, 0.96), transparent 60%),
+        radial-gradient(ellipse 60% 80% at 70% 60%, rgba(180, 171, 247, 0.7), transparent 55%),
+        radial-gradient(ellipse 50% 50% at 55% 40%, rgba(242, 241, 255, 0.92), transparent 50%),
+        radial-gradient(ellipse 70% 40% at 40% 70%, rgba(200, 195, 250, 0.72), transparent 50%),
+        radial-gradient(ellipse 90% 90% at 50% 50%, rgba(255, 255, 255, 0.98), transparent);
+    opacity: 1;
+    mix-blend-mode: multiply;
+}
+
+:root[data-theme='light'] body.creation-mode:not(.agent-open) .toggle-btn-glow::after,
+:root[data-theme='light'] body.agent-open .toggle-btn-glow::after,
+:root[data-theme='light'] .agent-toggle-btn.activating .toggle-btn-glow::after {
+    background:
+        radial-gradient(ellipse 40% 35% at 45% 25%, rgba(255, 255, 255, 0.98), transparent 50%),
+        radial-gradient(ellipse 30% 40% at 65% 50%, rgba(224, 220, 255, 0.75), transparent 45%),
+        radial-gradient(ellipse 50% 30% at 30% 55%, rgba(246, 245, 255, 0.86), transparent 50%),
+        radial-gradient(ellipse 25% 25% at 55% 35%, rgba(255, 255, 255, 0.9), transparent 40%);
+    opacity: 0.9;
+    mix-blend-mode: screen;
+}
+
+:root[data-theme='light'] .asset-library-card-tags i {
+    color: var(--accent);
+}
+
+:root[data-theme='light'] .asset-library-video-badge {
+    border-color: rgba(255, 255, 255, 0.8);
+    background: rgba(23, 23, 28, 0.68);
+}
+
+:root[data-theme='light'] .asset-library-video-badge::after {
+    border-left-color: #ffffff;
+}
+
+/* Asset library markup is intentionally dense and has its own dark palette. */
+:root[data-theme='light'] .asset-library-search,
+:root[data-theme='light'] .asset-library-filters,
+:root[data-theme='light'] .asset-category-chip,
+:root[data-theme='light'] .asset-library-card {
+    border-color: #dedee6;
+}
+
+:root[data-theme='light'] .asset-library-search,
+:root[data-theme='light'] .asset-library-filters {
+    background: #f9f9fb;
+}
+
+:root[data-theme='light'] .asset-library-search input,
+:root[data-theme='light'] .asset-library-filters .filter-chip,
+:root[data-theme='light'] .asset-category-chip,
+:root[data-theme='light'] .asset-library-results-head {
+    color: #575761;
+}
+
+:root[data-theme='light'] .asset-library-search input::placeholder {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip:hover,
+:root[data-theme='light'] .asset-library-filters .filter-chip.active,
+:root[data-theme='light'] .asset-category-chip:hover,
+:root[data-theme='light'] .asset-category-chip.active {
+    background: #eeeafd;
+    color: var(--accent-strong);
+}
+
+:root[data-theme='light'] .asset-library-filters .filter-chip b,
+:root[data-theme='light'] .asset-category-chip b,
+:root[data-theme='light'] .asset-category-heading small {
+    color: #9999a2;
+}
+
+:root[data-theme='light'] .asset-library-card {
+    background: #ffffff;
+}
+
+:root[data-theme='light'] .asset-library-card:hover {
+    border-color: #b8aff4;
+    background: #ffffff;
+}
+
+:root[data-theme='light'] .asset-library-card-preview,
+:root[data-theme='light'] .asset-kind-video,
+:root[data-theme='light'] .asset-kind-audio,
+:root[data-theme='light'] .asset-kind-document,
+:root[data-theme='light'] .asset-kind-other {
+    background: #f1f1f5;
+}
+
+:root[data-theme='light'] .asset-library-card-name {
+    color: #3f3f47;
+}
+
+:root[data-theme='light'] .asset-library-card-tags span,
+:root[data-theme='light'] .asset-library-card-tags i {
+    background: #f0edff;
+    color: #77777b;
+}

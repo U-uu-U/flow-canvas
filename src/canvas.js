@@ -9,6 +9,7 @@ import { NODE_TYPES } from './node-types.js';
 import { nodeIconSvg } from './node-icons.js';
 import { GraphRunner, STATUS } from './graph-runner.js';
 import { generationNodeSignature } from '../shared/generation-node-state.mjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 import {
     MAX_VIEWPORT_SCALE,
     MIN_VIEWPORT_SCALE,
@@ -33,7 +34,6 @@ import {
 } from './generator-placeholder-layout.js';
 import { formatGenerationElapsed, isGenerationRecoveryActive, canRecoverGenerationTask } from './generation-progress.js';
 import {
-    appendGeneratorResult,
     clearGeneratorResults,
     ensureGeneratorResultEntries,
     getGeneratorResultLayout,
@@ -66,6 +66,10 @@ import {
 import { withoutReferenceCitationGuide } from './reference-citations.js';
 import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
 import { assertModelRequest, checkModelRequest } from './model-config-ui.js';
+import { getThemeColor } from './theme.js';
+import { showStatusNotification } from './status-notification.js';
+import { ICONAMOON_GLYPHS } from './iconamoon-glyphs.js';
+import { readUiScaleLimit, normalizeUiScaleLimit, UI_SCALE_LIMIT_CHANGED } from './canvas-ui-scale.js';
 import {
     DEFAULT_IMAGE_PROMPT_PACK_ID,
     composePromptFromTemplate,
@@ -225,7 +229,7 @@ const OP_STATUS_LABELS = {
 };
 const NODE_GLYPH_PATHS = {
     image: 'M3 4H17V16H3Z M5 13L8 10L10.5 12.5L13 9.5L17 14 M6.5 7.5H6.6',
-    video: 'M3 4H17V16H3Z M7 4V16 M13 4V16 M9 8L13 10L9 12Z',
+    video: ICONAMOON_GLYPHS.video,
     audio: 'M4 8H7L11 5V15L7 12H4Z M14 7C16 9 16 11 14 13',
     document: 'M5 3H12L16 7V17H5Z M12 3V7H16 M8 10H13 M8 13H13',
     text: 'M4 5H16 M4 9H14 M4 13H12 M4 17H9',
@@ -471,6 +475,28 @@ export class CanvasManager {
         this.stage.add(this.transientLayer);
 
         this.graphView = new GraphView(this, Konva);
+        this._onThemeChange = () => {
+            this.items.forEach(item => {
+                if (item?.data?.kind === 'op') this.refreshOpNode(item.data.id);
+                else if (item?.data && item.group) {
+                    const displayNode = item.group.findOne?.('.displayNode') || item.group.findOne?.('.fallbackBg');
+                    if (displayNode) this._styleMediaSurface(item.data, displayNode);
+                }
+            });
+            this.graphView?.renderAllPorts();
+            this.graphView?.sync();
+            this.syncBackground();
+            this._scheduleMinimapDraw();
+            this.layer.batchDraw();
+        };
+        document.documentElement.addEventListener('flow-canvas-theme-change', this._onThemeChange);
+        this.uiScaleLimit = readUiScaleLimit();
+        this._onUiScaleLimitChange = event => {
+            this.uiScaleLimit = normalizeUiScaleLimit(event.detail?.limit);
+            this._syncVideoControlLayout();
+            this.layer.batchDraw();
+        };
+        document.documentElement.addEventListener(UI_SCALE_LIMIT_CHANGED, this._onUiScaleLimitChange);
         this.generationPlaceholders = new Map();
         this.pendingGenerationPlacements = new Map();
         this.generationTaskStates = new Map();
@@ -731,7 +757,7 @@ export class CanvasManager {
             this._bgCachedSize = screenSize;
 
             const dotR = Math.max(0.55, Math.min(1.05, scale * 0.72));
-            const dotColor = `rgba(255,255,255,${(opacity * 0.11).toFixed(3)})`;
+            const dotColor = getThemeColor('canvas-grid-dot', `rgba(255,255,255,${(opacity * 0.11).toFixed(3)})`);
             const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${screenSize}' height='${screenSize}'><circle cx='${screenSize / 2}' cy='${screenSize / 2}' r='${dotR}' fill='${dotColor}'/></svg>`;
             this._bgCachedSvg = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 
@@ -973,7 +999,9 @@ export class CanvasManager {
             if (!entry?.group?.isVisible?.()) return;
             const data = entry.data || {};
             const mediaType = data.kind === 'op' ? data.nodeType : this._getItemMediaType(data);
-            const title = data.kind === 'op'
+            const title = this._canEditMediaTitle(data, mediaType)
+                ? this._mediaDisplayName(data, mediaType)
+                : data.kind === 'op'
                 ? (data.title || NODE_TYPES[data.nodeType]?.title || '节点')
                 : (mediaType === 'image'
                     ? this._mediaDisplayName(data, mediaType)
@@ -1209,22 +1237,22 @@ export class CanvasManager {
         const offsetY = (height - mapHeight) / 2;
         this._minimapTransform = { bounds: { ...bounds }, scale: mapScale, offsetX, offsetY };
 
-        context.fillStyle = 'rgba(7, 8, 11, 0.72)';
+        context.fillStyle = getThemeColor('canvas-node-bg-subtle', 'rgba(7, 8, 11, 0.72)');
         context.fillRect(offsetX, offsetY, mapWidth, mapHeight);
-        context.strokeStyle = 'rgba(145, 151, 162, 0.34)';
+        context.strokeStyle = getThemeColor('canvas-node-border', 'rgba(145, 151, 162, 0.34)');
         context.lineWidth = 1;
         context.setLineDash([4, 3]);
         context.strokeRect(offsetX + 0.5, offsetY + 0.5, Math.max(0, mapWidth - 1), Math.max(0, mapHeight - 1));
         context.setLineDash([]);
 
         const colors = {
-            image: '#7d838e',
-            video: '#969a9f',
-            audio: '#6c727b',
-            document: '#8d929c',
-            other: '#707783',
-            plan: '#c0c4cb',
-            pending: '#69707b'
+            image: getThemeColor('canvas-node-muted', '#7d838e'),
+            video: getThemeColor('canvas-node-text', '#969a9f'),
+            audio: getThemeColor('canvas-node-muted', '#6c727b'),
+            document: getThemeColor('canvas-node-muted', '#8d929c'),
+            other: getThemeColor('canvas-node-muted', '#707783'),
+            plan: getThemeColor('accent', '#c0c4cb'),
+            pending: getThemeColor('canvas-node-muted', '#69707b')
         };
         context.save();
         context.beginPath();
@@ -1237,10 +1265,10 @@ export class CanvasManager {
             const itemHeight = Math.max(2, entry.height * mapScale);
             const selected = entry.selected === true;
             context.globalAlpha = selected ? 1 : entry.kind === 'pending' ? 0.5 : 0.86;
-            context.fillStyle = selected ? '#aeb3ba' : (colors[entry.kind] || colors.other);
+            context.fillStyle = selected ? getThemeColor('accent', '#aeb3ba') : (colors[entry.kind] || colors.other);
             context.fillRect(x, y, itemWidth, itemHeight);
             if (selected) {
-                context.strokeStyle = 'rgba(232, 233, 236, 0.72)';
+                context.strokeStyle = getThemeColor('accent', 'rgba(232, 233, 236, 0.72)');
                 context.lineWidth = 1;
                 context.strokeRect(x + 0.5, y + 0.5, Math.max(0, itemWidth - 1), Math.max(0, itemHeight - 1));
             }
@@ -1477,13 +1505,13 @@ export class CanvasManager {
             } else if (action === 'export') {
                 const result = await window.flowCanvas?.file?.saveCopy?.(payload.filePath);
                 if (result?.success) this._showCanvasStatus('素材已另存为');
-                else if (!result?.canceled) this._showCanvasStatus(`另存失败：${result?.error || '未知错误'}`, 3200);
+                else if (!result?.canceled) this._showCanvasStatus(`另存失败：${result?.error || '未知错误'}`, 0, 'error');
             } else if (action === 'preview') {
                 this._openMediaPreview(item);
             }
         } catch (error) {
             console.error('[Canvas] selection toolbar action failed:', action, error);
-            this._showCanvasStatus(`操作失败：${error?.message || error}`, 3200);
+            this._showCanvasStatus(`操作失败：${error?.message || error}`, 0, 'error');
         }
     }
 
@@ -1534,7 +1562,7 @@ export class CanvasManager {
             button.classList.remove('is-busy', 'is-archived');
             delete button.dataset.archivedSourcePath;
             button.querySelector('span').textContent = '入库';
-            this._showCanvasStatus(`入库失败：${error?.message || error}`, 3800);
+            this._showCanvasStatus(`入库失败：${error?.message || error}`, 0, 'error');
             console.error('[Canvas] asset library archive failed:', error);
             return false;
         } finally {
@@ -1930,7 +1958,7 @@ export class CanvasManager {
                 active.root.classList.remove('is-busy');
                 active.root.querySelectorAll('button').forEach(button => { button.disabled = false; });
             }
-            this._showCanvasStatus(`裁切失败：${error?.message || error}`, 4200);
+            this._showCanvasStatus(`裁切失败：${error?.message || error}`, 0, 'error');
         }
     }
 
@@ -2243,7 +2271,7 @@ export class CanvasManager {
             data.composerReferenceConnections = referenceConnections;
             data.composerReferenceItemIds = referenceConnections.map(reference => reference.nodeId);
             data.config.referenceCitationOccurrences = citationOccurrences;
-            this._showCanvasStatus('参考图连接失败，请重新选择图片', 3200);
+            this._showCanvasStatus('参考图连接失败，请重新选择图片', 0, 'error');
             return null;
         }
         if (this._generationComposer?.nodeId === nodeId) {
@@ -2361,7 +2389,6 @@ export class CanvasManager {
         const profile = target.nodeType === 'video'
             ? this._normalizeVideoConfigForProfile(target.config || {})
             : null;
-        if (target.nodeType === 'video') this._enforceVideoReferenceLimits(target, profile);
 
         const selections = { image: [], video: [], audio: [] };
         (this.graphView?.connections || []).forEach(connection => {
@@ -2401,50 +2428,6 @@ export class CanvasManager {
         if (pick) this.emit('mediaReferencePickStateChanged', { active: false, type });
         if (pick && !options.silent) this._showCanvasStatus('参考素材选择已完成');
         return true;
-    }
-
-    updateMediaReferencePick(type, entries = []) {
-        if (!['image', 'video', 'audio'].includes(type)) return false;
-        const maxItems = this._activeMediaReferencePick?.type === type
-            ? this._activeMediaReferencePick.maxItems
-            : Number.MAX_SAFE_INTEGER;
-        const normalizedEntries = (Array.isArray(entries) ? entries : [])
-            .map(entry => this._normalizeMediaReferenceEntry(entry))
-            .filter(entry => entry && entry.mediaType === type)
-            .slice(0, maxItems);
-        this._mediaReferenceSelections[type] = normalizedEntries;
-        if (this._activeMediaReferencePick?.type === type) {
-            this._activeMediaReferencePick.entries = normalizedEntries;
-        }
-        this._renderMediaReferencePickHighlights();
-        return true;
-    }
-
-    clearMediaReferenceSelections() {
-        this._mediaReferenceSelections = { image: [], video: [], audio: [] };
-        if (this._activeMediaReferencePick) this._activeMediaReferencePick.entries = [];
-        this._renderMediaReferencePickHighlights();
-    }
-
-    resolveMediaReferenceEntries(entries = [], type = null) {
-        const normalizedType = ['image', 'video', 'audio'].includes(type) ? type : null;
-        const byPath = new Map();
-        this.items.forEach(item => {
-            const filePath = String(this._copyableFilePath(item?.data) || '').trim();
-            if (filePath) byPath.set(filePath.replaceAll('/', '\\').toLowerCase(), item);
-        });
-        return (Array.isArray(entries) ? entries : []).map(entry => {
-            const requestedId = String(entry?.id || entry?.itemId || '').trim();
-            const requestedPath = String(entry?.filePath || '').trim();
-            const item = (requestedId && this.items.get(requestedId))
-                || (requestedPath && byPath.get(requestedPath.replaceAll('/', '\\').toLowerCase()));
-            const filePath = this._copyableFilePath(item?.data);
-            if (!item?.data?.id || !filePath) return null;
-            return this._normalizeMediaReferenceEntry({
-                id: item.data.id,
-                filePath
-            });
-        }).filter(entry => entry && (!normalizedType || entry.mediaType === normalizedType));
     }
 
     _normalizeMediaReferenceEntry(entry) {
@@ -2609,11 +2592,11 @@ export class CanvasManager {
         const background = new Konva.Rect({
             width: 50,
             height: 22,
-            fill: 'rgba(20, 21, 23, 0.82)',
-            stroke: 'rgba(255, 255, 255, 0.18)',
+            fill: getThemeColor('canvas-control-bg', 'rgba(20, 21, 23, 0.82)'),
+            stroke: getThemeColor('canvas-control-border', 'rgba(255, 255, 255, 0.18)'),
             strokeWidth: 1,
             cornerRadius: 5,
-            shadowColor: 'rgba(0, 0, 0, 0.36)',
+            shadowColor: getThemeColor('canvas-control-shadow', 'rgba(0, 0, 0, 0.36)'),
             shadowBlur: 8,
             shadowOffsetY: 2,
             shadowOpacity: 0.45
@@ -2633,7 +2616,7 @@ export class CanvasManager {
             text: '中断',
             fontSize: 10,
             fontStyle: 'bold',
-            fill: '#d5d6d8',
+            fill: getThemeColor('canvas-control-text', '#d5d6d8'),
             listening: false
         }));
         control.on('mouseenter', () => {
@@ -2643,8 +2626,8 @@ export class CanvasManager {
             group.getLayer()?.batchDraw();
         });
         control.on('mouseleave', () => {
-            background.fill('rgba(20, 21, 23, 0.82)');
-            background.stroke('rgba(255, 255, 255, 0.18)');
+            background.fill(getThemeColor('canvas-control-bg', 'rgba(20, 21, 23, 0.82)'));
+            background.stroke(getThemeColor('canvas-control-border', 'rgba(255, 255, 255, 0.18)'));
             document.body.style.cursor = 'default';
             group.getLayer()?.batchDraw();
         });
@@ -2667,8 +2650,8 @@ export class CanvasManager {
             text: formatGenerationElapsed(startedAt),
             align: 'center', verticalAlign: 'middle',
             fontFamily: 'Segoe UI, sans-serif', fontSize: Math.min(24, Math.max(10, height * 0.16)),
-            fontStyle: 'bold', fill: '#c6c8ce', listening: false,
-            shadowColor: '#18191b', shadowBlur: 4, shadowOpacity: 0.65
+            fontStyle: 'bold', fill: getThemeColor('canvas-node-text', '#c6c8ce'), listening: false,
+            shadowColor: getThemeColor('canvas-control-shadow', '#18191b'), shadowBlur: 4, shadowOpacity: 0.65
         });
         group.add(label);
         return () => {
@@ -2986,6 +2969,7 @@ export class CanvasManager {
 
         // Marquee Selection & Panning Logic
         let x1, y1, x2, y2;
+        let selectionDirection = 'left-to-right';
         let isSelecting = false;
         let isPanning = false;
         let lastPanX = 0, lastPanY = 0;
@@ -3059,7 +3043,18 @@ export class CanvasManager {
             const shapes = this.stage.find('.nodeGroup');
             shapes.forEach(shape => {
                 const shapeBox = shape.getClientRect();
-                if (Konva.Util.haveIntersection(selBox, shapeBox)) {
+                const fullyContained = shapeBox.x >= selBox.x
+                    && shapeBox.y >= selBox.y
+                    && shapeBox.x + shapeBox.width <= selBox.x + selBox.width
+                    && shapeBox.y + shapeBox.height <= selBox.y + selBox.height;
+                const intersects = shapeBox.x <= selBox.x + selBox.width
+                    && shapeBox.x + shapeBox.width >= selBox.x
+                    && shapeBox.y <= selBox.y + selBox.height
+                    && shapeBox.y + shapeBox.height >= selBox.y;
+                const isSelected = selectionDirection === 'right-to-left'
+                    ? intersects
+                    : fullyContained;
+                if (isSelected) {
                     this.selectItem(shape.attrs.id, true);
                 }
             });
@@ -3210,6 +3205,7 @@ export class CanvasManager {
             y1 = pos.y;
             x2 = pos.x;
             y2 = pos.y;
+            selectionDirection = 'left-to-right';
 
             this.selectionRect.visible(true);
             this.selectionRect.position({ x: x1, y: y1 });
@@ -3265,6 +3261,7 @@ export class CanvasManager {
             const pos = this._getRelativePointerPos();
             x2 = pos.x;
             y2 = pos.y;
+            selectionDirection = x2 < x1 ? 'right-to-left' : 'left-to-right';
 
             this.selectionRect.setAttrs({
                 x: Math.min(x1, x2),
@@ -3623,7 +3620,7 @@ export class CanvasManager {
                 }
             }
             const typeHint = dropTypes.length > 0 ? `（${dropTypes.join(', ')}）` : '';
-            this._showCanvasStatus(`网页图片导入失败${lastRemoteError ? `：${lastRemoteError}` : `：拖拽数据中没有可用图片${typeHint}`}`);
+            this._showCanvasStatus(`网页图片导入失败${lastRemoteError ? `：${lastRemoteError}` : `：拖拽数据中没有可用图片${typeHint}`}`, 0, 'error');
         });
     }
 
@@ -3833,9 +3830,9 @@ export class CanvasManager {
                 return;
             }
 
-            this._showCanvasStatus(`复制失败：${result?.error || '未找到系统文件夹'}`, 4200);
+            this._showCanvasStatus(`复制失败：${result?.error || '未找到系统文件夹'}`, 0, 'error');
         } catch (err) {
-            this._showCanvasStatus(`复制失败：${err?.message || err}`, 4200);
+            this._showCanvasStatus(`复制失败：${err?.message || err}`, 0, 'error');
         }
     }
 
@@ -4086,21 +4083,13 @@ export class CanvasManager {
     }
 
     _showCopyStatus(count, res) {
-        const status = document.getElementById('titlebarStatus');
-        if (!status) return;
         if (res?.type === 'error') {
-            status.textContent = '复制失败';
+            this._showCanvasStatus('复制失败', 0, 'error');
         } else if (res?.type === 'file') {
-            status.textContent = count > 1 ? `已复制 ${count} 个文件` : '已复制文件';
+            this._showCanvasStatus(count > 1 ? `已复制 ${count} 个文件` : '已复制文件', 2200, 'success');
         } else {
-            status.textContent = count > 1 ? `已复制 ${count} 个路径` : '已复制路径';
+            this._showCanvasStatus(count > 1 ? `已复制 ${count} 个路径` : '已复制路径', 2200, 'success');
         }
-        status.classList.add('status-visible');
-        clearTimeout(this.copyStatusTimer);
-        this.copyStatusTimer = setTimeout(() => {
-            status.textContent = '';
-            status.classList.remove('status-visible');
-        }, 2200);
     }
 
     _updateSelectionVisuals() {
@@ -4369,6 +4358,7 @@ export class CanvasManager {
             const height = Math.max(1, Number(original.height) || IMAGE_DEFAULT_WIDTH);
             const buildMediaData = (entry, index, id) => ({
                 ...(entry.item || {}),
+                ...(index === 0 && original.displayName ? { displayName: original.displayName } : {}),
                 id,
                 kind: 'media',
                 mediaType: 'image',
@@ -4516,13 +4506,20 @@ export class CanvasManager {
     }
 
     _mediaDisplayName(data = {}, type = this._getItemMediaType(data)) {
-        if (type !== 'image') return this._nodeTypeLabel(type, data);
+        if (!['image', 'video'].includes(type)) return this._nodeTypeLabel(type, data);
         const customName = String(data.displayName || '').trim();
         if (customName) return customName;
-        const fileName = this._fileNameFromPath(data.filePath);
+        const result = data.kind === 'op' ? getGeneratorResultEntries(data)[0] : null;
+        if (result?.item?.displayName) return result.item.displayName;
+        const fileName = this._fileNameFromPath(result?.filePath || data.filePath);
         const extensionIndex = fileName.lastIndexOf('.');
         const stem = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
-        return stem || '未命名图片';
+        return stem || (data.kind === 'op' ? this._nodeTypeLabel(type, data) : `未命名${type === 'video' ? '视频' : '图片'}`);
+    }
+
+    _canEditMediaTitle(data, type = this._getItemMediaType(data)) {
+        return ['image', 'video'].includes(type)
+            && (data.kind !== 'op' || Boolean(this._copyableFilePath(data)));
     }
 
     _truncateExternalTitle(value, maxWidth, fontSize = 13) {
@@ -4554,22 +4551,25 @@ export class CanvasManager {
         group.findOne('.externalNodeTitle')?.destroy();
 
         const nodeType = data.kind === 'op' ? data.nodeType : type;
-        const editableImageTitle = data.kind !== 'op' && type === 'image';
-        const label = editableImageTitle
+        const editableMediaTitle = this._canEditMediaTitle(data, type);
+        const label = editableMediaTitle
             ? this._mediaDisplayName(data, type)
             : this._nodeTypeLabel(type, data);
-        const titleWidth = Math.max(40, Number(data.width) || OP_NODE_WIDTH);
+        const counterWidth = data.kind === 'op' && getGeneratorResultEntries(data).length > 1 ? 80 : 0;
+        const stackControls = group.findOne('.generatorResultLayoutToggle');
+        const availableWidth = stackControls ? stackControls.x() - 8 : (Number(data.width) || OP_NODE_WIDTH) - counterWidth;
+        const titleWidth = Math.max(40, availableWidth);
         const textWidth = Math.max(20, titleWidth - 20);
-        const visibleLabel = editableImageTitle
+        const visibleLabel = editableMediaTitle
             ? this._truncateExternalTitle(label, textWidth)
             : label;
         const title = new Konva.Group({
-            name: editableImageTitle ? 'externalNodeTitle editableMediaTitle' : 'externalNodeTitle',
+            name: editableMediaTitle ? 'externalNodeTitle editableMediaTitle' : 'externalNodeTitle',
             x: 0,
             y: -27,
-            listening: editableImageTitle
+            listening: editableMediaTitle
         });
-        if (editableImageTitle) {
+        if (editableMediaTitle) {
             title.add(new Konva.Rect({
                 name: 'externalNodeTitleHit',
                 width: titleWidth,
@@ -4582,8 +4582,8 @@ export class CanvasManager {
             data: NODE_GLYPH_PATHS[nodeType] || NODE_GLYPH_PATHS.document,
             x: 0,
             y: 3,
-            scaleX: 0.72,
-            scaleY: 0.72,
+            scaleX: nodeType === 'video' ? 0.6 : 0.72,
+            scaleY: nodeType === 'video' ? 0.6 : 0.72,
             stroke: '#989ba1',
             strokeWidth: 1.35,
             lineCap: 'round',
@@ -4607,7 +4607,7 @@ export class CanvasManager {
             listening: false
         }));
 
-        if (editableImageTitle) {
+        if (editableMediaTitle) {
             title.on('mouseenter', () => {
                 document.body.style.cursor = 'text';
             });
@@ -4634,9 +4634,11 @@ export class CanvasManager {
     _styleMediaSurface(data, node) {
         if (!data || !node) return;
         node.cornerRadius?.(8);
-        node.stroke(this.selectedItems.has(data.id) ? '#d5d7db' : 'rgba(255,255,255,0.14)');
+        node.stroke(this.selectedItems.has(data.id)
+            ? getThemeColor('accent', '#d5d7db')
+            : getThemeColor('canvas-node-border', 'rgba(255,255,255,0.14)'));
         node.strokeWidth(this.selectedItems.has(data.id) ? 2.5 : 1);
-        node.shadowColor?.('rgba(0,0,0,0.32)');
+        node.shadowColor?.(getThemeColor('canvas-control-shadow', 'rgba(0,0,0,0.32)'));
         node.shadowBlur?.(10);
         node.shadowOffsetY?.(3);
         node.shadowOpacity?.(0.42);
@@ -4654,8 +4656,8 @@ export class CanvasManager {
             name: 'fallbackBg',
             width,
             height,
-            fill: '#202123',
-            stroke: 'rgba(255,255,255,0.14)',
+            fill: getThemeColor('canvas-node-bg', '#202123'),
+            stroke: getThemeColor('canvas-node-border', 'rgba(255,255,255,0.14)'),
             strokeWidth: 1,
             cornerRadius: 8,
             shadowColor: 'rgba(0,0,0,0.32)',
@@ -4679,7 +4681,7 @@ export class CanvasManager {
                     width: Math.max(1, width - 24),
                     height: 18,
                     text: '上传图片',
-                    fill: '#8e949f',
+                    fill: getThemeColor('canvas-node-muted', '#8e949f'),
                     fontSize: 11,
                     align: 'center',
                     verticalAlign: 'middle',
@@ -4695,7 +4697,7 @@ export class CanvasManager {
                 width: Math.max(1, width - 20),
                 height: 34,
                 text: documentTitle,
-                fill: '#d8dbe3',
+                fill: getThemeColor('canvas-node-text', '#d8dbe3'),
                 fontSize: 11,
                 lineHeight: 1.25,
                 align: 'center',
@@ -4718,7 +4720,7 @@ export class CanvasManager {
             y: 12,
             scaleX: 0.9,
             scaleY: 0.9,
-            stroke: '#aeb4bf',
+            stroke: getThemeColor('canvas-node-muted', '#aeb4bf'),
             strokeWidth: 1.5,
             lineCap: 'round',
             lineJoin: 'round',
@@ -4732,7 +4734,7 @@ export class CanvasManager {
             width: Math.max(1, width - 60),
             height: 18,
             text: fileName,
-            fill: '#d0d3d9',
+            fill: getThemeColor('canvas-node-text', '#d0d3d9'),
             fontSize: 11,
             ellipsis: true,
             wrap: 'none',
@@ -4744,7 +4746,7 @@ export class CanvasManager {
             width: Math.max(1, width - 60),
             height: 14,
             text: extension,
-            fill: '#6f7580',
+            fill: getThemeColor('canvas-node-muted', '#6f7580'),
             fontSize: 8,
             listening: false
         }));
@@ -4764,7 +4766,9 @@ export class CanvasManager {
                 width: Math.max(2, gap - 3),
                 height: barHeight,
                 cornerRadius: 1,
-                fill: index % 5 === 0 ? '#9da4af' : '#666d78',
+                fill: index % 5 === 0
+                    ? getThemeColor('canvas-node-muted', '#9da4af')
+                    : getThemeColor('canvas-node-muted', '#666d78'),
                 listening: false,
                 perfectDrawEnabled: false
             }));
@@ -4906,7 +4910,6 @@ export class CanvasManager {
         const x = (width - size) / 2;
         const y = Math.max(8, (height - reservedBottom - size) / 2);
         const stroke = '#7d8492';
-        const accent = '#a0a8b8';
 
         const group = new Konva.Group({
             name: 'fallbackGlyph',
@@ -4931,8 +4934,7 @@ export class CanvasManager {
                 { data: 'M4.5 5.5H19.5V18.5H4.5Z M7 15.5L10.2 12.3L13.2 15.2L15.3 13.1L18 15.8 M8.2 8.7H8.4' }
             ],
             video: [
-                { data: 'M4.5 6H19.5V18H4.5Z M8 6V18 M16 6V18' },
-                { data: 'M10.5 9.3L15.4 12L10.5 14.7Z', fill: accent, stroke: accent, strokeWidth: 1.2 }
+                { data: ICONAMOON_GLYPHS.video }
             ],
             audio: [
                 { data: 'M5.5 10H8.6L13.5 6.2V17.8L8.6 14H5.5Z M17 9.5C18.2 10.7 18.2 13.3 17 14.5' }
@@ -5001,7 +5003,7 @@ export class CanvasManager {
                             : errorLabel === '图片损坏或不支持'
                                 ? '原文件无法生成兼容预览，请检查文件是否完整，或重接原图'
                                 : '点击错误标记可手动重接';
-                this._showCanvasStatus(`${errorLabel}：${this._fileNameFromPath(data.filePath)}，${guidance}`, 4600);
+                this._showCanvasStatus(`${errorLabel}：${this._fileNameFromPath(data.filePath)}，${guidance}`, 0, 'error');
             }
             if (this._countPlanReferencesToItem(data.id, data.filePath) > 0) {
                 this._setHoveredReferenceItem(data.id, data.filePath);
@@ -5294,7 +5296,9 @@ export class CanvasManager {
         }
         if (data.nodeType === 'video') {
             const profile = this._normalizeVideoConfigForProfile(data.config);
-            this._enforceVideoReferenceLimits(data, profile);
+            if (this._getVideoReferenceOverflow(data, profile).length) {
+                this._showCanvasStatus('参考素材超出当前模型限制，连线已保留；请调整参考素材后再生成', 4200);
+            }
         }
     }
 
@@ -5694,8 +5698,8 @@ export class CanvasManager {
                     data: NODE_GLYPH_PATHS[mediaType] || NODE_GLYPH_PATHS.document,
                     x: 10,
                     y: 10,
-                    scaleX: 1,
-                    scaleY: 1,
+                    scaleX: mediaType === 'video' ? 20 / 24 : 1,
+                    scaleY: mediaType === 'video' ? 20 / 24 : 1,
                     stroke: '#a7abb2',
                     strokeWidth: 1.25,
                     listening: false
@@ -5745,7 +5749,7 @@ export class CanvasManager {
                 text: `+${remaining}`,
                 align: 'center',
                 fontSize: 10,
-                fill: '#e0e2e5',
+                fill: getThemeColor('canvas-node-text', '#e0e2e5'),
                 listening: false
             }));
         }
@@ -5761,7 +5765,7 @@ export class CanvasManager {
         });
         addButton.add(addBackground, new Konva.Line({
             points: [13, 20, 27, 20, 20, 20, 20, 13, 20, 27],
-            stroke: '#aeb2b9',
+            stroke: getThemeColor('canvas-node-muted', '#aeb2b9'),
             strokeWidth: 1.5,
             lineCap: 'round',
             listening: false
@@ -5807,7 +5811,7 @@ export class CanvasManager {
             ? 'rgba(221, 166, 90, 0.72)'
             : status === STATUS.ERROR && !isRecovering
                 ? OP_STATUS_COLORS.error
-            : 'rgba(255, 255, 255, 0.24)';
+            : getThemeColor('canvas-node-border', 'rgba(255, 255, 255, 0.24)');
         const isBranched = data.nodeType === 'image'
             && resultCount > 1
             && getGeneratorResultLayout(data) === 'branched';
@@ -5823,8 +5827,8 @@ export class CanvasManager {
             nextCard.add(new Konva.Rect({
                 width,
                 height,
-                fill: '#17181a',
-                stroke: 'rgba(255, 255, 255, 0.14)',
+                fill: getThemeColor('canvas-node-bg-subtle', '#17181a'),
+                stroke: getThemeColor('canvas-node-border', 'rgba(255, 255, 255, 0.14)'),
                 strokeWidth: 1,
                 cornerRadius: 8
             }));
@@ -5868,8 +5872,8 @@ export class CanvasManager {
                 card.add(new Konva.Rect({
                     width,
                     height,
-                    fill: '#17181a',
-                    stroke: 'rgba(255, 255, 255, 0.16)',
+                    fill: getThemeColor('canvas-node-bg-subtle', '#17181a'),
+                    stroke: getThemeColor('canvas-node-border', 'rgba(255, 255, 255, 0.16)'),
                     strokeWidth: 1,
                     cornerRadius: 8
                 }));
@@ -5897,11 +5901,11 @@ export class CanvasManager {
             name: results[0] ? 'generatorResultBackground' : 'displayNode',
             width,
             height,
-            fill: '#202123',
+            fill: getThemeColor('canvas-node-bg', '#202123'),
             stroke,
             strokeWidth: status === STATUS.ERROR && !isRecovering ? 1.5 : 1,
             cornerRadius: 8,
-            shadowColor: 'rgba(0, 0, 0, 0.36)',
+            shadowColor: getThemeColor('canvas-control-shadow', 'rgba(0, 0, 0, 0.36)'),
             shadowBlur: 14,
             shadowOffsetY: 5,
             shadowOpacity: results[0] ? 0 : 0.5
@@ -5913,12 +5917,13 @@ export class CanvasManager {
         } else if (!(isBusy && data.nodeType === 'video')) {
             const glyph = NODE_GLYPH_PATHS[data.nodeType] || NODE_GLYPH_PATHS.image;
             group.add(new Konva.Path({
+                name: 'generatorPlaceholderGlyph',
                 data: glyph,
                 x: width / 2 - 22,
                 y: height / 2 - 22,
-                scaleX: 2.2,
-                scaleY: 2.2,
-                stroke: '#696c71',
+                scaleX: data.nodeType === 'video' ? 44 / 24 : 2.2,
+                scaleY: data.nodeType === 'video' ? 44 / 24 : 2.2,
+                stroke: getThemeColor('canvas-node-muted', '#696c71'),
                 strokeWidth: 1.8,
                 lineCap: 'round',
                 lineJoin: 'round',
@@ -6012,7 +6017,7 @@ export class CanvasManager {
                 align: 'right',
                 fontFamily: 'Segoe UI, sans-serif',
                 fontSize: 11,
-                fill: '#aeb1b7',
+                fill: getThemeColor('canvas-node-muted', '#aeb1b7'),
                 listening: false
             }));
         }
@@ -6135,38 +6140,10 @@ export class CanvasManager {
             await this.options.retryGenerationTask?.(taskId, { restoreOnOriginalNode: true });
             return true;
         } catch (error) {
-            this._showCanvasStatus(`重新连接失败：${error?.message || String(error)}`, 3600);
+            this._showCanvasStatus(`重新连接失败：${error?.message || String(error)}`, 0, 'error');
             this.refreshOpNode(nodeId);
             return false;
         }
-    }
-
-    async completeGenerationTaskOnNode({ nodeId, kind, result } = {}) {
-        const entry = this.items.get(nodeId);
-        if (!entry?.data || entry.data.kind !== 'op' || entry.data.nodeType !== kind) return false;
-        const filePaths = (Array.isArray(result?.filePaths) && result.filePaths.length
-            ? result.filePaths
-            : [result?.filePath || result?.item?.filePath]).filter(Boolean);
-        if (filePaths.length === 0) return false;
-
-        for (const [index, filePath] of filePaths.entries()) {
-            await this._landResult(entry.data, {
-                [kind]: 'local-res://' + encodeURIComponent(filePath),
-                _resultFilePath: filePath,
-                _resultItem: result?.images?.[index] || result?.item || null,
-                _resultUrl: kind === 'video' ? result?.video?.url || result?.url || null : null
-            });
-        }
-        entry.data.runStatus = STATUS.DONE;
-        entry.data.runError = '';
-        this.refreshOpNode(nodeId);
-        this.emit('change');
-        const persisted = await this.options.persistCompletedGenerationNode?.(entry.data);
-        if (persisted === false) {
-            throw new Error('生成结果已下载，但无法保存到原生成节点');
-        }
-        this._showCanvasStatus('已重新连接并恢复到原节点', 2600);
-        return true;
     }
 
     _addGeneratorResultLayoutToggle(group, data, width) {
@@ -6377,7 +6354,7 @@ export class CanvasManager {
             this._refreshCanvasBoundary();
             this.graphView?.sync();
             if (created.length) this.emit('change');
-            this._showCanvasStatus(`拆开失败：${error?.message || error}`, 4200);
+            this._showCanvasStatus(`拆开失败：${error?.message || error}`, 0, 'error');
             return [];
         } finally {
             this._splittingGeneratorResultIds.delete(nodeId);
@@ -6665,11 +6642,11 @@ export class CanvasManager {
             name: 'displayNode',
             width,
             height,
-            fill: '#202123',
-            stroke: status === 'error' ? OP_STATUS_COLORS.error : 'rgba(255,255,255,0.13)',
+            fill: getThemeColor('canvas-node-bg', '#202123'),
+            stroke: status === 'error' ? OP_STATUS_COLORS.error : getThemeColor('canvas-node-border', 'rgba(255,255,255,0.13)'),
             strokeWidth: status === 'error' ? 1.5 : 1,
             cornerRadius: 8,
-            shadowColor: 'rgba(0,0,0,0.32)',
+            shadowColor: getThemeColor('canvas-control-shadow', 'rgba(0,0,0,0.32)'),
             shadowBlur: 12,
             shadowOffsetY: 4,
             shadowOpacity: 0.45
@@ -6733,7 +6710,9 @@ export class CanvasManager {
                     fontFamily: 'Segoe UI, sans-serif',
                     fontSize: 13,
                     lineHeight: 1.5,
-                    fill: data.runError ? '#e7a1a1' : (prompt ? '#d9dade' : '#74777d'),
+                    fill: data.runError ? '#d36a72' : (prompt
+                        ? getThemeColor('canvas-node-text', '#d9dade')
+                        : getThemeColor('canvas-node-muted', '#74777d')),
                     ellipsis: true,
                     wrap: 'word',
                     listening: false
@@ -6903,9 +6882,9 @@ export class CanvasManager {
             x: 16,
             y: 16,
             radius: 16,
-            fill: status === 'error' ? '#d9b2b2' : '#eeeeef',
+            fill: status === 'error' ? '#f4c7ca' : getThemeColor('canvas-control-bg', '#eeeeef'),
             opacity: status === 'running' ? 0.66 : 1,
-            shadowColor: 'rgba(0,0,0,0.3)',
+            shadowColor: getThemeColor('canvas-control-shadow', 'rgba(0,0,0,0.3)'),
             shadowBlur: 6,
             shadowOffsetY: 2,
             shadowOpacity: 0.4
@@ -6919,13 +6898,13 @@ export class CanvasManager {
                 outerRadius: 7.5,
                 angle: 250,
                 rotation: -90,
-                fill: '#4c4e52',
+                fill: getThemeColor('accent', '#4c4e52'),
                 listening: false
             }));
         } else {
             runButton.add(new Konva.Line({
                 points: [10, 17, 16, 11, 22, 17, 16, 11, 16, 22],
-                stroke: '#202123',
+                stroke: getThemeColor('canvas-control-text', '#202123'),
                 strokeWidth: 1.8,
                 lineCap: 'round',
                 lineJoin: 'round',
@@ -6938,7 +6917,7 @@ export class CanvasManager {
             group.getLayer()?.batchDraw();
         });
         runButton.on('mouseleave', () => {
-            runButtonBg.fill(status === 'error' ? '#d9b2b2' : '#eeeeef');
+            runButtonBg.fill(status === 'error' ? '#f4c7ca' : getThemeColor('canvas-control-bg', '#eeeeef'));
             document.body.style.cursor = 'default';
             group.getLayer()?.batchDraw();
         });
@@ -6957,8 +6936,8 @@ export class CanvasManager {
         const background = new Konva.Rect({
             width,
             height: 28,
-            fill: '#2a2b2e',
-            stroke: 'rgba(255,255,255,0.08)',
+            fill: getThemeColor('canvas-node-bg-subtle', '#2a2b2e'),
+            stroke: getThemeColor('canvas-node-border', 'rgba(255,255,255,0.08)'),
             strokeWidth: 1,
             cornerRadius: 6
         });
@@ -6969,20 +6948,20 @@ export class CanvasManager {
             text: String(text || ''),
             align,
             fontSize: 11,
-            fill: '#b7b9bd',
+            fill: getThemeColor('canvas-node-muted', '#b7b9bd'),
             ellipsis: true,
             wrap: 'none',
             listening: false
         }));
         button.on('mouseenter', () => {
-            background.fill('#343539');
-            background.stroke('rgba(255,255,255,0.15)');
+            background.fill(getThemeColor('hover-bg', '#343539'));
+            background.stroke(getThemeColor('canvas-node-border', 'rgba(255,255,255,0.15)'));
             document.body.style.cursor = 'pointer';
             group.getLayer()?.batchDraw();
         });
         button.on('mouseleave', () => {
-            background.fill('#2a2b2e');
-            background.stroke('rgba(255,255,255,0.08)');
+            background.fill(getThemeColor('canvas-node-bg-subtle', '#2a2b2e'));
+            background.stroke(getThemeColor('canvas-node-border', 'rgba(255,255,255,0.08)'));
             document.body.style.cursor = 'default';
             group.getLayer()?.batchDraw();
         });
@@ -7002,8 +6981,8 @@ export class CanvasManager {
         const background = new Konva.Rect({
             width,
             height: 24,
-            fill: '#292a2d',
-            stroke: 'rgba(255,255,255,0.07)',
+            fill: getThemeColor('canvas-node-bg-subtle', '#292a2d'),
+            stroke: getThemeColor('canvas-node-border', 'rgba(255,255,255,0.07)'),
             strokeWidth: 1,
             cornerRadius: 5
         });
@@ -7014,18 +6993,18 @@ export class CanvasManager {
             text: label,
             align: 'center',
             fontSize: 10,
-            fill: '#a8abb1',
+            fill: getThemeColor('canvas-node-muted', '#a8abb1'),
             listening: false
         }));
         button.on('mouseenter', () => {
-            background.fill('#35363a');
-            background.stroke('rgba(255,255,255,0.14)');
+            background.fill(getThemeColor('hover-bg', '#35363a'));
+            background.stroke(getThemeColor('canvas-node-border', 'rgba(255,255,255,0.14)'));
             document.body.style.cursor = 'pointer';
             group.getLayer()?.batchDraw();
         });
         button.on('mouseleave', () => {
-            background.fill('#292a2d');
-            background.stroke('rgba(255,255,255,0.07)');
+            background.fill(getThemeColor('canvas-node-bg-subtle', '#292a2d'));
+            background.stroke(getThemeColor('canvas-node-border', 'rgba(255,255,255,0.07)'));
             document.body.style.cursor = 'default';
             group.getLayer()?.batchDraw();
         });
@@ -7409,8 +7388,8 @@ export class CanvasManager {
         };
     }
 
-    _enforceVideoReferenceLimits(data, profile = null) {
-        if (data?.nodeType !== 'video') return 0;
+    _getVideoReferenceOverflow(data, profile = null) {
+        if (data?.nodeType !== 'video') return [];
         const limits = this._getVideoReferenceLimitsForConfig(data.config || {}, profile);
         const counts = { image: 0, video: 0, audio: 0 };
         const overflow = [];
@@ -7422,11 +7401,7 @@ export class CanvasManager {
                 overflow.push(connection.id);
             }
         });
-        overflow.forEach(connectionId => this.graphView?.disconnect(connectionId));
-        if (overflow.length) {
-            this._showCanvasStatus(`已按当前视频模型限制移除 ${overflow.length} 个超额参考素材`, 3200);
-        }
-        return overflow.length;
+        return overflow;
     }
 
     _showOpModelMenu(nodeId, event = null) {
@@ -7473,7 +7448,8 @@ export class CanvasManager {
                 const model = document.createElement('strong');
                 model.textContent = provider.model || '未命名模型';
                 const source = document.createElement('small');
-                source.textContent = provider.name || '未命名 API';
+                source.textContent = provider.description || provider.name || '未命名 API';
+                if (provider.description) source.className = 'generation-composer-model-description';
                 const marker = document.createElement('span');
                 marker.textContent = isSelected ? '当前' : '›';
                 button.append(model, source, marker);
@@ -7946,7 +7922,7 @@ export class CanvasManager {
             this._showCanvasStatus('画面提取完成，已写入文本节点', 3000);
         } catch (error) {
             console.error('[Canvas] visual prompt extraction failed:', error);
-            this._showCanvasStatus(`画面提取失败：${error?.message || error}`, 5000);
+            this._showCanvasStatus(`画面提取失败：${error?.message || error}`, 0, 'error');
         } finally {
             this._visualExtractingNodeIds.delete(nodeId);
             if (this.items.has(nodeId)) this.refreshOpNode(nodeId);
@@ -8390,7 +8366,7 @@ export class CanvasManager {
 
     openMediaTitleEditor(nodeId) {
         const entry = this.items.get(nodeId);
-        if (!entry?.data || entry.data.kind === 'op' || this._getItemMediaType(entry.data) !== 'image') return;
+        if (!entry?.data || !this._canEditMediaTitle(entry.data)) return;
         if (this._activeMediaTitleEditor?.nodeId === nodeId) {
             this._activeMediaTitleEditor.element.focus();
             this._activeMediaTitleEditor.element.select();
@@ -8403,14 +8379,14 @@ export class CanvasManager {
         const originalCustomName = Object.prototype.hasOwnProperty.call(data, 'displayName')
             ? data.displayName
             : undefined;
-        const originalValue = this._mediaDisplayName(data, 'image');
+        const originalValue = this._mediaDisplayName(data);
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'media-title-inline-editor';
         input.value = originalValue;
         input.maxLength = 160;
         input.spellcheck = false;
-        input.setAttribute('aria-label', '图片名称');
+        input.setAttribute('aria-label', this._getItemMediaType(data) === 'video' ? '视频名称' : '图片名称');
         this.opInlineLayer.appendChild(input);
         group.draggable(false);
         this._activeMediaTitleEditor = {
@@ -8488,7 +8464,7 @@ export class CanvasManager {
         active.element?.remove();
         active.group?.draggable(true);
         if (this.items.has(active.nodeId)) {
-            this._syncExternalNodeTitle(active.group, active.data, 'image');
+            this._syncExternalNodeTitle(active.group, active.data, this._getItemMediaType(active.data));
             active.group.getLayer()?.batchDraw();
         }
         if (commit && changed) this.emit('change');
@@ -8815,12 +8791,17 @@ export class CanvasManager {
         const referenceLimits = data.nodeType === 'video'
             ? this._getVideoReferenceLimitsForConfig(data.config || {}, profile)
             : null;
+        const overflowIds = new Set(this._getVideoReferenceOverflow(data, profile));
         const citationState = this._generationComposerCitationState(data, references);
         references.forEach(({ connection, source }, index) => {
             const tile = document.createElement('div');
             tile.className = 'generation-composer-reference';
             tile.title = this._fileNameFromPath(source.filePath) || `参考素材 ${index + 1}`;
             const mediaType = this._getItemMediaType(source);
+            if (overflowIds.has(connection.id)) {
+                tile.classList.add('is-over-limit');
+                tile.title += ' · 超出当前模型限制，请移除或切换模型';
+            }
             // 与 _generationComposerCitationState 共用同一判定，保证磁贴显示的
             // 编号与点击后插入的胶囊编号一致（见 _isCitableImageReference）。
             if (this._isCitableImageReference(source)) {
@@ -9278,7 +9259,7 @@ export class CanvasManager {
         const render = () => {
             const query = search.value.trim().toLowerCase();
             const matches = rows.filter(row => row.some(provider => !query
-                || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
+                || `${provider.routeLabel || ''} ${provider.model || ''} ${provider.modelLabel || ''} ${provider.description || ''} ${provider.name || ''}`.toLowerCase().includes(query)));
             list.replaceChildren();
             if (!matches.length) {
                 const empty = document.createElement('div');
@@ -9304,7 +9285,7 @@ export class CanvasManager {
                     trigger.className = 'generation-composer-route-trigger';
                     trigger.classList.toggle('selected', !!current);
                     trigger.innerHTML = '<span><strong>Seedance 2.5 · 固定 30 秒</strong><small></small></span><svg class="flow-icon" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-arrow-up"></use></svg>';
-                    trigger.querySelector('small').textContent = current?.routeLabel || row[0].name || '视频';
+                    trigger.querySelector('small').textContent = (current || row[0]).description || current?.routeLabel || row[0].name || '视频';
                     const panel = document.createElement('div');
                     panel.className = 'generation-composer-route-panel';
                     panel.setAttribute('popover', 'manual');
@@ -9320,21 +9301,26 @@ export class CanvasManager {
                         if (open && group.isConnected) {
                             const bounds = trigger.getBoundingClientRect();
                             const menuBounds = popover.getBoundingClientRect();
-                            panel.style.width = `${Math.min(bounds.width, window.innerWidth - 20)}px`;
-                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - bounds.width - 10))}px`;
-                            panel.style.top = `${menuBounds.bottom + 5}px`;
+                            const margin = 10;
+                            const gap = 6;
+                            const width = Math.min(bounds.width, window.innerWidth - margin * 2);
+                            const rightSpace = window.innerWidth - menuBounds.right - gap - margin;
+                            const leftSpace = menuBounds.left - gap - margin;
+                            const side = rightSpace >= width || rightSpace >= leftSpace ? 'right' : 'left';
+                            const available = side === 'right' ? rightSpace : leftSpace;
+                            panel.style.width = `${Math.min(width, Math.max(240, available))}px`;
+                            panel.dataset.side = side;
+                            panel.style.top = `${bounds.top}px`;
                             panel.showPopover();
-                            const height = panel.offsetHeight;
-                            const top = menuBounds.bottom + 5 + height <= window.innerHeight - 10
-                                ? menuBounds.bottom + 5 : Math.max(10, menuBounds.top - height - 5);
-                            panel.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - panel.offsetWidth - 10))}px`;
-                            panel.style.top = `${top}px`;
+                            const left = side === 'right' ? menuBounds.right + gap : menuBounds.left - gap - panel.offsetWidth;
+                            panel.style.left = `${Math.max(margin, Math.min(left, window.innerWidth - panel.offsetWidth - margin))}px`;
+                            panel.style.top = `${Math.max(margin, Math.min(bounds.top, window.innerHeight - panel.offsetHeight - margin))}px`;
                         } else if (panel.matches(':popover-open')) panel.hidePopover();
                     };
                     const deferClose = () => {
                         clearTimeout(closeTimer);
                         closeTimer = setTimeout(() => {
-                            if (!popover.matches(':hover') && !panel.matches(':hover')) expand(false);
+                            if (!group.matches(':hover') && !panel.matches(':hover')) expand(false);
                         }, 120);
                     };
                     group.addEventListener('mouseenter', () => expand(true));
@@ -9354,7 +9340,13 @@ export class CanvasManager {
                     });
                     trigger.addEventListener('click', () => expand(true));
                     group.addEventListener('keydown', event => {
-                        if (event.key === 'Escape') {
+                        if (event.key === 'ArrowRight' && event.target === trigger) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            expand(true);
+                            container.querySelector('button')?.focus();
+                        } else if (event.key === 'Escape' || event.key === 'ArrowLeft') {
+                            event.preventDefault();
                             event.stopPropagation();
                             trigger.focus();
                             expand(false);
@@ -9378,9 +9370,12 @@ export class CanvasManager {
                     const model = document.createElement('strong');
                     model.textContent = (split
                         ? provider.routeLabel + (provider.routeLabel === '线路一' ? '（推荐）' : '')
-                        : provider.model) || '未命名模型';
+                        : (provider.modelLabel && provider.modelLabel !== '未收录模型' ? provider.modelLabel : provider.model)) || '未命名模型';
                     const source = document.createElement('small');
-                    source.textContent = (split ? provider.model : provider.name) || '未命名 API';
+                    source.textContent = split
+                        ? [provider.model, provider.description].filter(Boolean).join(' · ')
+                        : provider.description || provider.name || '未命名 API';
+                    if (provider.description) source.className = 'generation-composer-model-description';
                     copy.append(model, source);
                     const marker = document.createElement('span');
                     marker.textContent = selected ? '当前' : '›';
@@ -10245,6 +10240,12 @@ export class CanvasManager {
             active.element.querySelector('[data-model]')?.focus();
             return;
         }
+        if (this._getVideoReferenceOverflow(data).length) {
+            message.textContent = '参考素材超出当前模型限制，请调整标记的素材或切换模型；原连线已保留';
+            message.dataset.state = 'error';
+            this._renderGenerationComposerReferences(nodeId);
+            return;
+        }
         if (data.composerDraft && !this._materializeMediaComposerDraft(nodeId)) return;
 
         // CONFIG 前置校验：模型能力表判定「一定不行」的参数在提交前拦下，
@@ -10364,8 +10365,18 @@ export class CanvasManager {
             right: Math.min(window.innerWidth, containerRect.right),
             bottom: Math.min(window.innerHeight, containerRect.bottom)
         };
-        const availableWidth = Math.max(280, bounds.right - bounds.left - 24);
-        active.element.style.width = `${Math.min(680, window.innerWidth - 24, availableWidth)}px`;
+        const availableWidth = Math.max(1, bounds.right - bounds.left - 24);
+        const composer = active.element;
+        // Measure the unwrapped toolbar before constraining it to the visible canvas.
+        composer.classList.add('is-measuring');
+        const footer = composer.querySelector('.generation-composer-footer');
+        const style = getComputedStyle(composer);
+        const frameWidth = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']
+            .reduce((width, key) => width + (parseFloat(style[key]) || 0), 0);
+        const toolbarWidth = Math.ceil((footer?.offsetWidth || 0) + frameWidth + 2);
+        composer.classList.remove('is-measuring');
+        composer.style.width = `${Math.min(Math.max(680, toolbarWidth), availableWidth)}px`;
+        composer.classList.toggle('is-compact', availableWidth < toolbarWidth);
         const scale = this.stage.scaleX() || 1;
         const left = containerRect.left + this.stage.x() + entry.group.x() * scale;
         const top = containerRect.top + this.stage.y() + entry.group.y() * scale;
@@ -10664,6 +10675,7 @@ export class CanvasManager {
         const height = Math.max(1, Number(sourceItem.height) || Number(resultItem.height) || IMAGE_DEFAULT_WIDTH);
         const mediaData = {
             ...resultItem,
+            ...(sourceItem.displayName ? { displayName: sourceItem.displayName } : {}),
             id: sourceId,
             kind: 'media',
             mediaType,
@@ -10707,38 +10719,8 @@ export class CanvasManager {
             return this._convertImageGeneratorToMedia(sourceItem, output, filePath);
         }
         if (sourceItem?.kind === 'op' && ['image', 'video'].includes(sourceItem.nodeType)) {
-            if (!filePath && !resultUrl) return null;
-            if (output?._generation && typeof output._generation === 'object') {
-                sourceItem.generation = JSON.parse(JSON.stringify(output._generation));
-            }
-            const resultItem = output?._resultItem || null;
-            const candidateIndex = output?._candidateIndex ?? resultItem?.candidateIndex ?? null;
-            const results = appendGeneratorResult(sourceItem, {
-                filePath,
-                url: resultUrl,
-                item: candidateIndex == null
-                    ? resultItem
-                    : { ...(resultItem || {}), candidateIndex }
-            });
-
-            if (results.length === 1) {
-                if (output?._forceSquarePreview === true) {
-                    const size = getGeneratorPlaceholderSize('image', { ratio: '1:1' });
-                    sourceItem.width = size.width;
-                    sourceItem.height = size.height;
-                } else {
-                    const mediaWidth = Number(resultItem?.naturalWidth || resultItem?.pixelWidth || resultItem?.width);
-                    const mediaHeight = Number(resultItem?.naturalHeight || resultItem?.pixelHeight || resultItem?.height);
-                    if (mediaWidth > 0 && mediaHeight > 0) {
-                        const size = getGeneratorPlaceholderSize(sourceItem.nodeType, { ratio: 'adaptive' }, {
-                            width: mediaWidth,
-                            height: mediaHeight
-                        });
-                        sourceItem.width = size.width;
-                        sourceItem.height = size.height;
-                    }
-                }
-            }
+            if (!applyGeneratorStackResult(sourceItem, { ...output,
+                _resultFilePath: filePath, _resultUrl: resultUrl })) return null;
             this.refreshOpNode(sourceItem.id);
             this.emit('change');
             return sourceItem;
@@ -11007,13 +10989,19 @@ export class CanvasManager {
     }
 
     async runFromNode(nodeId, options = {}) {
+        const data = this.items.get(nodeId)?.data;
+        if (data?.nodeType === 'video' && this._getVideoReferenceOverflow(data).length) {
+            const reason = '参考素材超出当前模型限制，请调整参考素材或切换模型；原连线已保留';
+            this._showCanvasStatus(reason, 0, 'error');
+            return { ok: false, reason };
+        }
         const runner = this._ensureRunner();
         this._showCanvasStatus('开始执行…');
         const result = await runner.runFrom(nodeId, options);
         if (!result.ok) {
-            this._showCanvasStatus(result.canceled ? '生成任务已中断' : (result.reason || '执行失败'), 3200);
+            this._showCanvasStatus(result.canceled ? '生成任务已中断' : (result.reason || '执行失败'), 3200, result.canceled ? 'info' : 'error');
         } else {
-            this._showCanvasStatus(`执行完成，共 ${result.ran?.length || 0} 个节点`, 2400);
+            this._showCanvasStatus(`执行完成，共 ${result.ran?.length || 0} 个节点`, 2400, 'success');
             this.emit('change');
         }
         return result;
@@ -13108,10 +13096,8 @@ export class CanvasManager {
 
     _referenceMatchesItem(reference, itemId, filePath) {
         if (!reference) return false;
-        return Boolean(
-            (itemId && reference.itemId === itemId)
-            || (filePath && reference.filePath === filePath)
-        );
+        if (reference.itemId) return Boolean(itemId && reference.itemId === itemId);
+        return Boolean(filePath && normalizePathForCompare(reference.filePath) === normalizePathForCompare(filePath));
     }
 
     _isHoveredReferenceItem(itemId, filePath) {
@@ -13968,7 +13954,7 @@ export class CanvasManager {
             this._showCanvasStatus(result?.item ? '已生成并连接结果图' : '已生成图片');
         } catch (error) {
             console.error('[Canvas] plan row image generation failed:', error);
-            this._showCanvasStatus(`生图失败：${error.message || error}`);
+            this._showCanvasStatus(`生图失败：${error.message || error}`, 0, 'error');
         } finally {
             this._isGeneratingPlanRow = false;
         }
@@ -14095,7 +14081,7 @@ export class CanvasManager {
         if (!plan) return;
         const markdown = formatPlanMarkdown(plan);
         const res = await window.flowCanvas?.clipboard?.writeText?.(markdown);
-        this._showCanvasStatus(res?.success ? '已复制规划表 Markdown' : '复制失败');
+        this._showCanvasStatus(res?.success ? '已复制规划表 Markdown' : '复制失败', 2200, res?.success ? 'success' : 'error');
     }
 
     removePlanById(id) {
@@ -14126,18 +14112,8 @@ export class CanvasManager {
         return selectedEntries.map(item => item.filePath);
     }
 
-    _showCanvasStatus(text, timeoutMs = 1800) {
-        const status = document.getElementById('titlebarStatus');
-        if (!status) return;
-        status.textContent = text;
-        status.classList.add('status-visible');
-        clearTimeout(this.planStatusTimer);
-        this.planStatusTimer = setTimeout(() => {
-            if (status.textContent === text) {
-                status.textContent = '';
-                status.classList.remove('status-visible');
-            }
-        }, timeoutMs);
+    _showCanvasStatus(text, timeoutMs = 1800, kind = 'info') {
+        showStatusNotification(text, { kind, duration: timeoutMs });
     }
 
     _capturePlanInlineFocus(planId) {
@@ -14789,43 +14765,37 @@ export class CanvasManager {
         }
     }
 
-    _createVideoPlayPauseGlyph(playing = false) {
+    _createVideoControlGlyph(name, states) {
         const glyph = new Konva.Group({
-            name: 'videoControlGlyph videoPlayPauseGlyph',
+            name: `videoControlGlyph ${name}`,
             x: VIDEO_CONTROL_BUTTON_WIDTH / 2,
             y: VIDEO_CONTROL_HEIGHT / 2,
-            offsetX: VIDEO_CONTROL_BUTTON_WIDTH / 2,
-            offsetY: VIDEO_CONTROL_HEIGHT / 2,
+            offsetX: 12,
+            offsetY: 12,
             listening: false
         });
-        const play = new Konva.Line({
-            name: 'videoPlayGlyph',
-            points: [11.5, 9.5, 11.5, 18.5, 18.5, 14],
-            closed: true,
-            fill: '#c9cdd3',
+        states.forEach(({ icon, name: stateName, visible }) => glyph.add(new Konva.Path({
+            name: stateName,
+            data: ICONAMOON_GLYPHS[icon],
+            stroke: '#c9cdd3',
+            strokeWidth: 2,
+            lineCap: 'round',
+            lineJoin: 'round',
             shadowColor: '#000000',
-            shadowBlur: 3,
-            shadowOpacity: 0.72,
+            shadowBlur: 2,
+            shadowOpacity: 0.65,
             shadowOffsetY: 1,
-            visible: !playing
-        });
-        const pauseLeft = new Konva.Rect({
-            name: 'videoPauseGlyph',
-            x: 10.5,
-            y: 9.5,
-            width: 2.6,
-            height: 9,
-            cornerRadius: 1,
-            fill: '#c9cdd3',
-            shadowColor: '#000000',
-            shadowBlur: 3,
-            shadowOpacity: 0.72,
-            shadowOffsetY: 1,
-            visible: playing
-        });
-        const pauseRight = pauseLeft.clone({ x: 15.3 });
-        glyph.add(play, pauseLeft, pauseRight);
+            listening: false,
+            visible
+        })));
         return glyph;
+    }
+
+    _createVideoPlayPauseGlyph(playing = false) {
+        return this._createVideoControlGlyph('videoPlayPauseGlyph', [
+            { icon: 'play', name: 'videoPlayGlyph', visible: !playing },
+            { icon: 'pause', name: 'videoPauseGlyph', visible: playing }
+        ]);
     }
 
     _setVideoPlayPauseGlyph(glyph, playing) {
@@ -14834,49 +14804,10 @@ export class CanvasManager {
     }
 
     _createVideoVolumeGlyph(muted = true) {
-        const glyph = new Konva.Group({
-            name: 'videoControlGlyph videoVolumeGlyph',
-            x: VIDEO_CONTROL_BUTTON_WIDTH / 2,
-            y: VIDEO_CONTROL_HEIGHT / 2,
-            offsetX: VIDEO_CONTROL_BUTTON_WIDTH / 2,
-            offsetY: VIDEO_CONTROL_HEIGHT / 2,
-            listening: false
-        });
-        const speaker = new Konva.Line({
-            points: [9.5, 12, 12, 12, 15, 9.5, 15, 18.5, 12, 16, 9.5, 16],
-            closed: true,
-            fill: '#b9bec6',
-            shadowColor: '#000000',
-            shadowBlur: 3,
-            shadowOpacity: 0.72,
-            shadowOffsetY: 1
-        });
-        const wave = new Konva.Path({
-            name: 'videoVolumeWave',
-            data: 'M 17 11.5 C 19 13 19 15 17 16.5 M 19 9.5 C 22.5 12 22.5 16 19 18.5',
-            stroke: '#b9bec6',
-            strokeWidth: 1.4,
-            lineCap: 'round',
-            shadowColor: '#000000',
-            shadowBlur: 3,
-            shadowOpacity: 0.72,
-            shadowOffsetY: 1,
-            visible: !muted
-        });
-        const slash = new Konva.Line({
-            name: 'videoVolumeSlash',
-            points: [9.5, 9.5, 20.5, 18.5],
-            stroke: '#b9bec6',
-            strokeWidth: 1.45,
-            lineCap: 'round',
-            shadowColor: '#000000',
-            shadowBlur: 3,
-            shadowOpacity: 0.72,
-            shadowOffsetY: 1,
-            visible: muted
-        });
-        glyph.add(speaker, wave, slash);
-        return glyph;
+        return this._createVideoControlGlyph('videoVolumeGlyph', [
+            { icon: 'volume', name: 'videoVolumeWave', visible: !muted },
+            { icon: 'muted', name: 'videoVolumeSlash', visible: muted }
+        ]);
     }
 
     _setVideoVolumeGlyph(glyph, muted) {
@@ -14886,7 +14817,7 @@ export class CanvasManager {
 
     _layoutVideoControlGroup(controls, width, height) {
         if (!controls) return;
-        const layout = getVideoControlLayout(this.stage?.scaleX?.(), width, height);
+        const layout = getVideoControlLayout(this.stage?.scaleX?.(), width, height, this.uiScaleLimit);
         controls.visible(layout.visible);
         const progressBg = controls.findOne('.videoProgressBg');
         const progressFg = controls.findOne('.videoProgressFg');
@@ -14964,7 +14895,6 @@ export class CanvasManager {
             item.group.findOne('.videoCoverControls')
         ].filter(Boolean);
         controls.forEach(control => {
-            control.stop();
             control.listening(visible);
             control.to({
                 opacity: visible ? 1 : 0,
@@ -15527,7 +15457,7 @@ export class CanvasManager {
     removeItemById(id) {
         const item = this.items.get(id);
         if (item) {
-            if (item.data.filePath) this._removeGeneratorResultsForFilePath(item.data.filePath, id);
+            // Deleting a node must not invalidate other nodes sharing its source file.
             this._removePersistentTextEditor(id);
             if (this._activeImageCrop?.itemId === id) this._closeImageCrop({ silent: true });
             if (this._hoveredMediaItemId === id) this._setHoveredMediaItem(null);
@@ -15611,11 +15541,16 @@ export class CanvasManager {
 
     _removeItemFromPlanReferences(itemId, filePath) {
         let changed = false;
+        const normalizedPath = normalizePathForCompare(filePath);
+        const hasOtherOwner = normalizedPath && [...this.items.values()].some(item =>
+            item.data.id !== itemId && normalizePathForCompare(item.data.filePath) === normalizedPath
+        );
         this.planService?.listPlans?.().forEach(plan => {
             (plan.rows || []).forEach(row => {
                 const before = row.references?.length || 0;
-                row.references = (row.references || []).filter(reference =>
-                    reference.itemId !== itemId && reference.filePath !== filePath
+                row.references = (row.references || []).filter(reference => reference.itemId
+                    ? reference.itemId !== itemId
+                    : hasOtherOwner || !normalizedPath || normalizePathForCompare(reference.filePath) !== normalizedPath
                 );
                 if ((row.references?.length || 0) !== before) {
                     this._syncRowAssetCell(row);

@@ -4,7 +4,8 @@ import path from 'node:path';
 import { topoOrder, getPorts } from '../src/graph-model.js';
 import { expandGenerationPrompts } from '../src/node-types.js';
 import { bindReferenceCitations, withoutReferenceCitationGuide } from '../src/reference-citations.js';
-import { getGeneratorResultEntries, appendGeneratorResult } from '../src/generator-result-stack.js';
+import { getGeneratorResultEntries } from '../src/generator-result-stack.js';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 import { resolveImageDimensions, resolveGenerationDisplaySize, inferClosestAspectRatio } from '../src/image-node-settings.js';
 import { inferProviderCapability, isMidjourneyImageModel } from '../src/provider-capabilities.js';
 import { imageGenerationRequestParams, normalizeVideoGenerationResolution } from '../src/generation-request-params.js';
@@ -17,6 +18,21 @@ import { mediaKind } from './agent-media.cjs';
 const copy = value => JSON.parse(JSON.stringify(value));
 const IMAGE_RATIOS = ['adaptive', '1:1', '16:9', '9:16', '4:3', '3:4'];
 const isMidjourney = provider => isMidjourneyImageModel(provider.model);
+const attachmentKey = attachment => `${attachment.mediaType}:${String(attachment.filePath || attachment.url || '').trim().replace(/\\/g, '/').toLowerCase()}`;
+
+function nodeAttachment(node) {
+    const primary = getGeneratorResultEntries(node)[0];
+    const filePath = primary?.filePath || node.filePath || '';
+    const url = primary?.url || node.url || '';
+    return { filePath, url,
+        mediaType: primary?.item?.mediaType || node.mediaType
+            || (filePath || url ? mediaKind((filePath || url).split(/[?#]/, 1)[0]) : node.nodeType) };
+}
+
+function matchesAttachment(attachment, node) {
+    return [attachment.sourceNodeId, attachment.itemId].includes(node.id)
+        || attachmentKey(attachment) === attachmentKey(nodeAttachment(node));
+}
 
 function optionValues(option, fallback) {
     if (['tier', 'enum'].includes(option?.type)) return [...(option.allowAuto ? ['adaptive'] : []), ...(option.values || [])];
@@ -154,9 +170,18 @@ export class AgentGeneration {
         const ids = input?.nodeIds;
         if (!Array.isArray(ids) || !ids.length || ids.length > 20 || ids.some(id => typeof id !== 'string')) throw error('INVALID_ARGUMENTS', '每批次请选择 1 到 20 个生成节点');
         const nodes = new Map(project.items.map(node => [node.id, node]));
+        const excluded = new Set(run.source?.excludedAttachmentKeys || []);
+        const attachments = (run.attachments || []).filter(attachment => !excluded.has(attachmentKey(attachment)));
+        const removedInputs = project.connections.filter(connection => {
+            if (connection.kind === 'history' || connection.to.nodeId !== run.source?.nodeId) return false;
+            const node = nodes.get(connection.from.nodeId);
+            return node && excluded.has(attachmentKey(nodeAttachment(node)));
+        });
+        // Plan on a filtered view only. Fingerprints still guard the original board graph.
+        const connections = project.connections.filter(connection => !removedInputs.includes(connection));
         const order = [], targets = new Set(ids);
         for (const id of ids) {
-            const sorted = topoOrder(id, project.items, project.connections);
+            const sorted = topoOrder(id, project.items, connections);
             if (sorted.cyclic || sorted.missing.length || !sorted.order.length) throw error('INVALID_GRAPH', '节点依赖存在环或缺失，请先修复连线');
             for (const nodeId of sorted.order) if (!order.includes(nodeId)) order.push(nodeId);
         }
@@ -165,7 +190,7 @@ export class AgentGeneration {
         const nodeFingerprints = Object.fromEntries(order.map(id => [id, fingerprint(nodes.get(id), project.connections)]));
         for (const id of order) {
             const node = nodes.get(id);
-            const inputs = project.connections.filter(c => c.kind !== 'history' && c.to.nodeId === id).map(c => nodes.get(c.from.nodeId));
+            const inputs = connections.filter(c => c.kind !== 'history' && c.to.nodeId === id).map(c => nodes.get(c.from.nodeId));
             const upstreamText = inputs.map(n => texts.get(n.id)).filter(Boolean).flat();
             if (node.kind === 'op' && node.nodeType === 'text') {
                 if (node.config?.useAi || node.config?.useAI) throw error('TEXT_AI_NOT_PLANNED', '请先让 Agent 填写文本节点内容，再生成媒体；此批次不隐式调用文字生成节点');
@@ -181,6 +206,17 @@ export class AgentGeneration {
             if (!targets.has(id) && this._pathFor(node)) continue;
             let config = copy(node.config || {});
             if (node.id === run.source?.nodeId) Object.assign(config, run.source.parameters || {});
+            if (node.id === run.source?.nodeId && excluded.size) {
+                const removedIds = new Set(removedInputs.map(connection => connection.from.nodeId));
+                const removedConnections = new Set(removedInputs.map(connection => connection.id));
+                if ((config.referenceCitationIds || []).some(id => removedConnections.has(id))
+                    || (config.referenceCitationOccurrences || []).some(occurrence =>
+                        removedIds.has(occurrence.sourceNodeId) || removedIds.has(occurrence.itemId)
+                        || removedConnections.has(occurrence.connectionId)
+                        || excluded.has(attachmentKey({ ...occurrence, mediaType: 'image' })))) {
+                    throw error('EXCLUDED_REFERENCE', '提示词仍引用已移除的附件，请先移除对应引用再生成');
+                }
+            }
             // The orchestrator has already compiled the image intent into the node prompt.
             const count = Number(config.count ?? 1);
             if (!Number.isInteger(count) || count < 1 || count > 8) throw error('COUNT_LIMIT', '单节点每批次需要 1 到 8 次生成');
@@ -199,7 +235,14 @@ export class AgentGeneration {
             }
             const references = inputs.filter(n => !texts.has(n.id)).map(n => ({ nodeId: n.id, filePath: steps.some(step => step.nodeId === n.id) ? '' : this._pathFor(n),
                 kind: n.kind === 'op' ? n.nodeType : n.mediaType || mediaKind(n.filePath || ''), width: n.width, height: n.height }));
-            config = bindAgentReferences(config, references, project.connections.filter(c => c.kind !== 'history' && c.to.nodeId === id)).config;
+            if (node.id === run.source?.nodeId && attachments.length) {
+                const position = reference => {
+                    const index = attachments.findIndex(attachment => matchesAttachment(attachment, nodes.get(reference.nodeId)));
+                    return index < 0 ? attachments.length : index;
+                };
+                references.sort((left, right) => position(left) - position(right));
+            }
+            config = bindAgentReferences(config, references, connections.filter(c => c.kind !== 'history' && c.to.nodeId === id)).config;
             if (upstreamText.length) config.generationUpstreamPrompts = upstreamText;
             const prompts = expandGenerationPrompts({ prompt: upstreamText }, { ...config, count });
             if (!prompts.length) throw error('PROMPT_REQUIRED', '生成节点缺少提示词');
@@ -330,8 +373,9 @@ export class AgentGeneration {
             generateAudio: !!config.generateAudio, cameraFixed: !!config.cameraFixed, watermark: !!config.watermark, webSearch: !!config.webSearch };
         if (step.kind === 'image') Object.assign(body, imageGenerationRequestParams({ ...config,
             size: body.size, midjourneyRepeat: 1 }, provider.model, outputId));
-        if (submitting && step.kind === 'video' && adapters.isSeedance25Model(provider.model)) adapters.buildSeedance25RequestBody({ model: provider.model, prompt: step.prompt,
-            duration: config.duration, resolution: config.resolution, aspectRatio: ratio, referenceImages: body.sourceReferences.map(r => r.filePath) });
+        if (submitting && step.kind === 'video' && adapters.isSeedanceVideoModel(provider.model)) adapters.buildSeedance25RequestBody({ model: provider.model, prompt: step.prompt,
+            duration: config.duration, resolution: config.resolution, aspectRatio: ratio, referenceImages: body.sourceReferences.map(r => r.filePath),
+            referenceVideos: body.videoReferences.map(r => r.filePath), referenceAudios: body.audioReferences.map(r => r.filePath) });
         if (signal?.aborted) throw error('CANCELED', '已停止');
         const abort = () => this.bridge.cancelGenerationFromRenderer(step.id);
         signal?.addEventListener('abort', abort, { once: true });
@@ -360,10 +404,9 @@ export class AgentGeneration {
             this._validate(step, current);
             const output = current.items.find(n => n.id === outputId);
             if (!output) throw error('OUTPUT_REMOVED', '生成占位节点已删除；结果文件已保留');
-            output.runStatus = 'done';
             output.filePath = filePaths[0];
             output.mediaType = result.mediaType || step.kind;
-            output.generation = { kind: output.mediaType, prompt: step.prompt, originalPrompt: step.originalPrompt,
+            const generation = { kind: output.mediaType, prompt: step.prompt, originalPrompt: step.originalPrompt,
                 nodeType: step.kind, requestPrompt: step.prompt, promptDraftConfig, referenceBindings: bound.bindings,
                 model: step.model, providerId: provider.id, sourceProviderId: provider.sourceProviderId,
                 config: { ...promptDraftConfig }, references: [
@@ -371,7 +414,13 @@ export class AgentGeneration {
                     ...outputReferences.filter(r => r.kind !== 'image').map(r => ({ itemId: r.nodeId, filePath: r.filePath }))
                 ],
                 generatedAt: Date.now(), taskId: result.taskId || step.remoteTaskId, agentRunId: run.id };
-            for (const filePath of filePaths) appendGeneratorResult(output, { filePath, item: { filePath, mediaType: output.mediaType, generation: output.generation } });
+            for (const filePath of filePaths) {
+                const item = result.images?.find(item => item.filePath === filePath);
+                applyGeneratorStackResult(output, {
+                    _resultFilePath: filePath,
+                    _resultItem: { ...item, filePath, mediaType: output.mediaType, generation }
+                }, { generation, completed: true });
+            }
         });
         // Later dependent steps consume the generated child, not a second request for the parent.
         this._wireNext(run, step, filePaths);

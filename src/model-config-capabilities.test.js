@@ -286,7 +286,7 @@ test('每条 CONFIG 条目都有可编译的正则与唯一 id', () => {
             assert.ok(matched.some(item => item.entry.id === entry.id), `${entry.id} 无法被探针 ${probe} 命中`);
         }
     }
-    assert.equal(config.models.length, 12);
+    assert.equal(config.models.length, 15);
 });
 
 test('live-probed image defaults remain accepted, including legacy incomplete allowlists', () => {

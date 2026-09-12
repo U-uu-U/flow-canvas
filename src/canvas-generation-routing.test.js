@@ -4,6 +4,8 @@ import Module from 'node:module';
 import { generationNodeSignature } from '../shared/generation-node-state.mjs';
 import { appendGeneratorResult, rotateGeneratorResults, setGeneratorResultLayout } from './generator-result-stack.js';
 import { generatorResultOutput } from './graph-model.js';
+import { PlanService } from './plan-service.js';
+import planCore from '../shared/plan-service-core.cjs';
 
 const originalLoad = Module._load;
 const originalDOMMatrix = Object.getOwnPropertyDescriptor(globalThis, 'DOMMatrix');
@@ -22,6 +24,146 @@ try {
 
 const clone = value => structuredClone(value);
 const firstArgs = mock => mock.mock.calls[0].arguments;
+
+test('image and video titles use readable filenames, respect manual names and follow the visible stack result', () => {
+    const manager = Object.create(CanvasManager.prototype);
+    for (const mediaType of ['image', 'video']) {
+        const filePath = `C:/output/雨夜街道_${mediaType === 'image' ? '图片' : '视频'}_001.${mediaType === 'image' ? 'png' : 'mp4'}`;
+        const item = { id: 'media', kind: 'media', mediaType, filePath };
+        assert.equal(manager._mediaDisplayName(item), filePath.split('/').pop().replace(/\.[^.]+$/, ''));
+        assert.equal(manager._canEditMediaTitle(item), true);
+        assert.equal(manager._mediaDisplayName({ ...item, displayName: 'Manual title' }), 'Manual title');
+        const generator = { id: 'generator', kind: 'op', nodeType: mediaType, filePath: '/stale.png' };
+        appendGeneratorResult(generator, { filePath });
+        appendGeneratorResult(generator, { filePath: '/second_result.webp' });
+        assert.equal(manager._mediaDisplayName(generator), manager._mediaDisplayName(item));
+        rotateGeneratorResults(generator);
+        assert.equal(manager._mediaDisplayName(generator), 'second_result');
+        assert.equal(manager._canEditMediaTitle(generator), true);
+        assert.equal(manager._canEditMediaTitle({ kind: 'op', nodeType: mediaType }), false);
+    }
+});
+
+test('new filenames preserve explicit source/output roles in renderer and main-process planning', () => {
+    const manager = Object.create(CanvasManager.prototype);
+    for (const filePath of ['/雨夜街道_图片_001.png', '/雨夜街道_视频_001.mp4']) {
+        for (const kind of ['source', 'output']) {
+            const reference = { filePath, kind };
+            assert.equal(manager._getPlanReferenceKind(reference), kind);
+            assert.equal(PlanService.prototype.normalizeReferenceKind(reference), kind);
+            assert.equal(planCore.PlanService.prototype.normalizeReferenceKind(reference), kind);
+        }
+    }
+});
+
+test('legacy image-result migration preserves the primary custom name without copying it onto sibling results', () => {
+    const manager = Object.assign(Object.create(CanvasManager.prototype), { graphView: null });
+    const item = { id: 'legacy', kind: 'op', nodeType: 'image', displayName: 'User title', config: {} };
+    appendGeneratorResult(item, { filePath: '/first.png' });
+    appendGeneratorResult(item, { filePath: '/second.png' });
+    const items = [item];
+    manager._migrateCompletedImageGeneratorItems(items);
+    assert.equal(items[0].displayName, 'User title');
+    assert.equal(items[0].filePath, '/first.png');
+    assert.equal(items[1].displayName, undefined);
+    assert.equal(items[1].filePath, '/second.png');
+});
+
+function deletionHarness(t, items) {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    globalThis.window = { flowCanvas: { platform: 'win32' } };
+    t.after(() => {
+        if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+        else delete globalThis.window;
+    });
+    const manager = Object.assign(Object.create(CanvasManager.prototype), {
+        items: new Map(), selectedItems: new Set(), storeData: { items },
+        graphView: { removeNode: t.mock.fn() },
+        _removePersistentTextEditor: t.mock.fn(), _removeItemFromPlanReferences: t.mock.fn(),
+        _unloadContent: t.mock.fn(), _refreshCanvasBoundary: t.mock.fn(), refreshOpNode: t.mock.fn(),
+        emit: t.mock.fn(), _showCanvasStatus: t.mock.fn(),
+        clearSelection() { this.selectedItems.clear(); },
+        selectItem(id) { this.selectedItems.add(id); },
+        _createOpNode(data) { this.items.set(data.id, { data, group: {
+            x: () => data.x || 0, y: () => data.y || 0, destroy: t.mock.fn()
+        } }); }
+    });
+    items.forEach(data => manager._createOpNode(data));
+    return manager;
+}
+
+for (const kind of ['video', 'image']) {
+    test(`deleting a duplicated ${kind} node preserves the original shared-file result and config`, t => {
+        const source = { id: 'original', kind: 'op', nodeType: kind, config: { prompt: 'keep me' }, runStatus: 'done' };
+        appendGeneratorResult(source, { filePath: `/shared.${kind === 'video' ? 'mp4' : 'png'}` });
+        const before = clone(source);
+        const manager = deletionHarness(t, [source]);
+        const [copy] = manager.duplicateItems(['original']);
+        assert.notEqual(copy.id, source.id);
+        assert.notStrictEqual(copy.config, source.config);
+        manager.removeItemById(copy.id);
+        assert.deepEqual(source, before);
+        assert.equal(manager.items.has(source.id), true);
+        assert.equal(manager.items.has(copy.id), false);
+        assert.equal(manager.refreshOpNode.mock.callCount(), 0);
+    });
+}
+
+test('disk-file removal still invalidates all nodes using the removed file', t => {
+    const items = ['original', 'copy'].map(id => {
+        const data = { id, kind: 'op', nodeType: 'video', runStatus: 'done', filePath: '/shared.mp4' };
+        appendGeneratorResult(data, { filePath: '/shared.mp4' });
+        return data;
+    });
+    const manager = deletionHarness(t, items);
+    manager.removeFile('/shared.mp4');
+    assert.equal(manager.items.size, 0);
+});
+
+test('removing a duplicate preserves plan references to the original and legacy shared-file references', t => {
+    const items = ['original', 'copy'].map(id => ({ id, filePath: '/shared.mp4' }));
+    const manager = deletionHarness(t, items);
+    const row = { references: [
+        { itemId: 'original', filePath: '/shared.mp4' },
+        { itemId: 'copy', filePath: '/shared.mp4' },
+        { filePath: '/shared.mp4' }
+    ] };
+    manager.planService = { listPlans: () => [{ rows: [row] }] };
+    manager._syncRowAssetCell = t.mock.fn();
+    CanvasManager.prototype._removeItemFromPlanReferences.call(manager, 'copy', '/shared.mp4');
+    assert.deepEqual(row.references, [{ itemId: 'original', filePath: '/shared.mp4' }, { filePath: '/shared.mp4' }]);
+});
+
+test('selecting a restrictive video model reports overflow without disconnecting references', t => {
+    const manager = Object.assign(Object.create(CanvasManager.prototype), {
+        options: {}, graphView: { disconnect: t.mock.fn() }, _showCanvasStatus: t.mock.fn(),
+        _normalizeVideoConfigForProfile: () => ({ referenceLimits: { image: 1, video: 0, audio: 0 } }),
+        _opReferenceEntries: () => [1, 2, 3].map(index => ({ connection: { id: `edge-${index}` }, source: { mediaType: 'image' } })),
+        _getItemMediaType: source => source.mediaType
+    });
+    const node = { kind: 'op', nodeType: 'video', config: {} };
+    manager._applyImageGenerationProviderSelection(node, { id: 'restricted', model: 'restricted' });
+    assert.equal(manager.graphView.disconnect.mock.callCount(), 0);
+    assert.deepEqual(manager._getVideoReferenceOverflow(node, { referenceLimits: { image: 1 } }), ['edge-2', 'edge-3']);
+});
+
+test('over-limit video references block both composer and direct execution before clearing results', async t => {
+    const node = { id: 'video', kind: 'op', nodeType: 'video', config: { prompt: 'keep prompt', model: 'restricted' },
+        resultFilePaths: ['/previous.mp4'] };
+    const message = { textContent: '', dataset: {} };
+    const manager = Object.assign(Object.create(CanvasManager.prototype), {
+        items: new Map([[node.id, { data: node }]]),
+        _generationComposer: { nodeId: node.id, element: { querySelector: () => message } },
+        _generationComposerCitationState: () => ({ occurrences: [] }), _hasUpstreamPrompt: () => false,
+        _getVideoReferenceOverflow: () => ['extra-edge'],
+        _renderGenerationComposerReferences: t.mock.fn(), _ensureRunner: t.mock.fn(), _showCanvasStatus: t.mock.fn()
+    });
+    await manager._runGeneratorFromComposer(node.id);
+    assert.equal(message.dataset.state, 'error');
+    assert.equal((await manager.runFromNode(node.id)).ok, false);
+    assert.equal(manager._ensureRunner.mock.callCount(), 0);
+    assert.deepEqual(node.resultFilePaths, ['/previous.mp4']);
+});
 
 function deferred() {
     let resolve;

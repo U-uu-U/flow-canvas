@@ -34,7 +34,8 @@ import { reconcileApiConfig } from './api-config-recovery.js';
 import { CANCELED_IMAGE_REFERENCES } from './node-types.js';
 import { imageGenerationRequestParams, normalizeVideoGenerationResolution } from './generation-request-params.js';
 import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
-import { getVideoModelProfile } from '../shared/video-model-profiles.mjs';
+import { showStatusNotification } from './status-notification.js';
+import { getVideoModelProfile, describeVideoModelProfile } from '../shared/video-model-profiles.mjs';
 import { modelConfigStore } from './model-config.js';
 import {
     mergeImageProfile,
@@ -76,21 +77,6 @@ function normalizeRavenHashEndpoint(endpoint) {
         return `${value}/v1`;
     }
     return value;
-}
-
-function formatVideoModelPrice(price) {
-    if (price?.kind !== 'sale' || !price.source || price.currency !== 'CNY' || price.unit !== 'request') return '';
-    const amount = Number(price.amount);
-    if (!Number.isFinite(amount) || amount < 0) return '';
-    return `¥${Number.isInteger(amount) ? amount : amount.toFixed(2)}/次`;
-}
-
-function formatVideoModelProfile(profile, includeLabel = true) {
-    return [
-        includeLabel ? profile?.label : '',
-        profile?.routeLabel,
-        formatVideoModelPrice(profile?.price)
-    ].filter(Boolean).join(' · ');
 }
 
 const DEFAULT_IMAGE_SIZES = [
@@ -753,7 +739,38 @@ export class AgentSidebar {
     }
 
     _normalizePendingAgentSource(source = null) {
-        return normalizeAgentGenerationSource(source);
+        const normalized = normalizeAgentGenerationSource(source);
+        if (!normalized) return null;
+        const excludedAttachmentKeys = [...new Set((Array.isArray(source.excludedAttachmentKeys)
+            ? source.excludedAttachmentKeys : []).filter(key => typeof key === 'string' && key))];
+        return excludedAttachmentKeys.length ? { ...normalized, excludedAttachmentKeys } : normalized;
+    }
+
+    _pendingAgentAttachmentKey(attachment) {
+        return `${attachment.mediaType}:${(attachment.filePath || attachment.url).replace(/\\/g, '/').toLowerCase()}`;
+    }
+
+    _refreshPendingAgentNodeContext(details) {
+        const source = this._normalizePendingAgentSource(details);
+        const sameNode = source && source.nodeId === this.pendingAgentSource?.nodeId;
+        const excluded = new Set(sameNode ? this.pendingAgentSource.excludedAttachmentKeys || [] : []);
+        const latest = this._normalizePendingAgentAttachments(details.attachments)
+            .filter(attachment => !excluded.has(this._pendingAgentAttachmentKey(attachment)));
+        const remaining = new Map(latest.map(attachment => [this._pendingAgentAttachmentKey(attachment), attachment]));
+        const attachments = [];
+        // Keep retained references in their visible order; append newly connected media last.
+        for (const previous of sameNode ? this.pendingAgentAttachments : []) {
+            const key = this._pendingAgentAttachmentKey(previous);
+            if (remaining.has(key)) attachments.push(remaining.get(key));
+            remaining.delete(key);
+        }
+        attachments.push(...remaining.values());
+        this.pendingAgentAttachments = attachments;
+        this.pendingAgentSource = source && excluded.size
+            ? { ...source, excludedAttachmentKeys: [...excluded] } : source;
+        this._savePendingAgentAttachments();
+        this._renderPendingAgentAttachments();
+        return { attachments, source: this.pendingAgentSource };
     }
 
     _savePendingAgentAttachments(
@@ -853,8 +870,12 @@ export class AgentSidebar {
 
     _removePendingAgentAttachment(index) {
         if (!Number.isInteger(index) || index < 0 || index >= this.pendingAgentAttachments.length) return;
-        this.pendingAgentAttachments.splice(index, 1);
-        if (this.pendingAgentAttachments.length === 0) this.pendingAgentSource = null;
+        const [removed] = this.pendingAgentAttachments.splice(index, 1);
+        if (this.pendingAgentSource) {
+            this.pendingAgentSource = { ...this.pendingAgentSource, excludedAttachmentKeys: [...new Set([
+                ...(this.pendingAgentSource.excludedAttachmentKeys || []), this._pendingAgentAttachmentKey(removed)
+            ])] };
+        }
         this._savePendingAgentAttachments();
         this._renderPendingAgentAttachments();
         this.inputEl?.focus();
@@ -895,10 +916,7 @@ export class AgentSidebar {
 
     prepareAgentFromNode(details = {}) {
         const previousSourceId = this.pendingAgentSource?.nodeId || null;
-        this.pendingAgentAttachments = this._normalizePendingAgentAttachments(details.attachments);
-        this.pendingAgentSource = this._normalizePendingAgentSource(details);
-        this._savePendingAgentAttachments();
-        this._renderPendingAgentAttachments();
+        this._refreshPendingAgentNodeContext(details);
         this.setMode('agent');
         if (this.inputEl && (!this.inputEl.value.trim() || previousSourceId !== this.pendingAgentSource?.nodeId)) {
             this.inputEl.value = this.pendingAgentSource?.effectivePrompt || '';
@@ -1127,10 +1145,12 @@ export class AgentSidebar {
             name.textContent = provider.model || provider.name || '未命名模型';
             const meta = document.createElement('small');
             const videoProfile = kind === 'video' ? this._getVideoModelProfile(provider) : null;
+            if (videoProfile?.label && videoProfile.label !== '未收录模型') name.textContent = videoProfile.label;
             if (videoProfile?.routeLabel) name.textContent = `${videoProfile.routeLabel} · ${provider.model}`;
             meta.textContent = kind === 'video'
-                ? [provider.name || '未命名 API', formatVideoModelProfile(videoProfile)].filter(Boolean).join(' · ')
+                ? describeVideoModelProfile(videoProfile) || provider.name || '未命名 API'
                 : (provider.name || '未命名 API');
+            if (kind === 'video') meta.className = 'generation-composer-model-description';
             copy.append(name, meta);
             const check = document.createElement('span');
             check.className = 'agent-composer-list-check';
@@ -1631,35 +1651,32 @@ export class AgentSidebar {
             return { ok: false, reason };
         }
         const context = latest || details;
-        const attachments = this._normalizePendingAgentAttachments(
-            context?.attachments?.length ? context.attachments : this.pendingAgentAttachments
-        );
-        const source = this._normalizePendingAgentSource(context || this.pendingAgentSource);
+        const source = this._normalizePendingAgentSource(context);
         if (!source || source.nodeType !== 'image') {
             const reason = '当前 Agent 上下文没有可执行的图片生成节点。';
             this._appendAgentError(reason);
             return { ok: false, reason };
         }
+        const refreshed = this._refreshPendingAgentNodeContext(context);
+        const { attachments } = refreshed;
+        const runtimeContext = { ...context, ...(Array.isArray(context.attachments) ? { attachments } : {}) };
         if (window.flowCanvas?.agent?.start) {
-            this.pendingAgentAttachments = attachments;
-            this.pendingAgentSource = source;
-            this._savePendingAgentAttachments();
-            this._renderPendingAgentAttachments();
             return this._startAgentRuntime({
                 text: String(instruction || '').trim() || source.effectivePrompt || source.prompt || '生成图片',
                 attachments,
-                source: { ...context, ...source, details: context },
+                source: { ...runtimeContext, ...refreshed.source, details: runtimeContext },
                 clearInput: fromSidebar
             });
+        }
+        if (refreshed.source?.excludedAttachmentKeys?.length) {
+            const reason = '当前后台版本不支持排除节点附件，请完全退出并重新启动 Flow Canvas 后再生成。';
+            this._appendAgentError(reason);
+            return { ok: false, reason };
         }
         if (this.isAgentSending) {
             return { ok: false, reason: 'Agent 正在整理上一条请求' };
         }
 
-        this.pendingAgentAttachments = attachments;
-        this.pendingAgentSource = source;
-        this._savePendingAgentAttachments();
-        this._renderPendingAgentAttachments();
         this.setMode('agent');
 
         const provider = this._getTextProvider();
@@ -2417,6 +2434,12 @@ export class AgentSidebar {
             this._renderGenerationTasks();
         });
         this.taskHistoryList?.addEventListener('click', (event) => {
+            const outputButton = event.target.closest('[data-task-output]');
+            if (outputButton) {
+                void this._activateGenerationTaskOutput(outputButton.dataset.taskOutput,
+                    outputButton.dataset.outputAction, Number(outputButton.dataset.outputIndex));
+                return;
+            }
             const stopRecovery = event.target.closest('[data-stop-recovery]');
             if (stopRecovery) {
                 void this._cancelGenerationTask(stopRecovery.dataset.stopRecovery);
@@ -2971,6 +2994,42 @@ export class AgentSidebar {
         ].filter(Boolean).join(' · ') || '模型默认参数';
     }
 
+    _generationTaskOutputPaths(task) {
+        return [...new Set([task.filePath, ...(Array.isArray(task.filePaths) ? task.filePaths : [])]
+            .filter(path => typeof path === 'string' && path.trim()))];
+    }
+
+    _canLocateGenerationTask(task) {
+        const projectId = this.options.getActiveProjectId
+            ? this.options.getActiveProjectId() : this.activeRuntimeProjectId;
+        return (task.projectId ?? null) === (projectId ?? null);
+    }
+
+    async _activateGenerationTaskOutput(taskId, action, index = 0) {
+        const task = this.generationTasks.find(item => item.id === taskId);
+        if (task?.status !== 'success') return false;
+        const filePath = this._generationTaskOutputPaths(task)[index];
+        if (!filePath) return false;
+        if (action === 'locate' && this._canLocateGenerationTask(task)) {
+            document.dispatchEvent(new CustomEvent('generation-task-locate', {
+                detail: { projectId: task.projectId ?? null, nodeId: task.params?.nodeId || task.nodeId || null, filePath }
+            }));
+            return true;
+        }
+        if (action === 'open') {
+            try {
+                if (!window.flowCanvas?.shell?.openFile) throw new Error('本地文件打开接口不可用');
+                const result = await window.flowCanvas.shell.openFile(filePath);
+                if (typeof result === 'string' && result) throw new Error(result);
+                if (result?.success === false) throw new Error(result.error || '系统未能打开文件');
+                return true;
+            } catch (error) {
+                showStatusNotification(`打开文件失败：${error?.message || error}`, { kind: 'error' });
+            }
+        }
+        return false;
+    }
+
     _renderGenerationTasks() {
         this.options.onGenerationTasksChanged?.(this.generationTasks);
         const visibleTasks = this.taskHistoryFilter === 'all'
@@ -3013,6 +3072,8 @@ export class AgentSidebar {
             disconnected: '待重传',
             canceled: '已中断'
         };
+        const expandedRecoveryIds = new Set([...(this.taskHistoryList.querySelectorAll?.('[data-task-recovery-id][open]') || [])]
+            .map(details => details.dataset.taskRecoveryId));
         this.taskHistoryList.innerHTML = visibleTasks.map(task => {
             const status = statusLabels[task.status] ? task.status : 'failed';
             let syncStageLabel = status === 'running' && task.params?.syncStage === 'ready'
@@ -3046,6 +3107,13 @@ export class AgentSidebar {
             const errorCopy = status === 'disconnected'
                 ? task.error || '与生成服务断开，任务 ID 和参数已保留。'
                 : task.error || (recovering ? task.params?.recoveryError : null);
+            const outputPaths = status === 'success' ? this._generationTaskOutputPaths(task) : [];
+            const canLocate = this._canLocateGenerationTask(task);
+            const recoveryControls = `<div class="agent-task-recovery">
+                <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" ${recovering ? 'disabled' : ''}>${recovering ? '正在恢复' : (promptModerationFailed ? '继续恢复' : '拉取产物')}</button>
+                ${recovering ? `<button type="button" data-stop-recovery="${this._escapeTaskText(task.id)}">停止</button>` : ''}
+            </div>`;
+            const collapseRecovery = status === 'success' && !recovering;
             return `
                 <article class="agent-task-item status-${status}">
                     <div class="agent-task-item-topline">
@@ -3075,14 +3143,25 @@ export class AgentSidebar {
                         ${sourceCount ? `<span>${sourceCount} 个参考素材</span>` : ''}
                     </div>
                     ${task.filePath ? `<p class="agent-task-file" title="${this._escapeTaskText(task.filePath)}">${this._escapeTaskText(task.filePath)}</p>` : ''}
+                    ${outputPaths.length ? `<div class="agent-task-recovery agent-task-output-actions">${outputPaths.map((filePath, index) => `
+                        <button type="button" data-task-output="${this._escapeTaskText(task.id)}" data-output-index="${index}" data-output-action="locate"
+                            title="${this._escapeTaskText(canLocate ? `定位画布：${filePath}` : '切换至任务所属画布后定位')}" ${canLocate ? '' : 'disabled'}>
+                            <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-fit"></use></svg>定位画布${outputPaths.length > 1 ? ` ${index + 1}` : ''}
+                        </button>
+                        <button type="button" data-task-output="${this._escapeTaskText(task.id)}" data-output-index="${index}" data-output-action="open" title="${this._escapeTaskText(filePath)}">
+                            <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-expand"></use></svg>打开文件${outputPaths.length > 1 ? ` ${index + 1}` : ''}
+                        </button>`).join('')}</div>` : ''}
                     ${errorCopy ? `<p class="agent-task-error" title="${this._escapeTaskText(errorCopy)}">${this._escapeTaskText(errorCopy)}</p>` : ''}
-                    <div class="agent-task-recovery">
+                    <details class="agent-task-request" data-task-recovery-id="${this._escapeTaskText(task.id)}" ${expandedRecoveryIds.has(task.id) ? 'open' : ''}>
+                        <summary>高级恢复</summary>
+                        <div class="agent-task-recovery">
                         <code title="${this._escapeTaskText(task.taskId || '')}">${this._escapeTaskText(task.taskId || '未记录上游任务 ID')}</code>
                         ${task.taskId ? `<button type="button" data-copy-remote-task="${this._escapeTaskText(task.id)}" title="复制任务 ID" aria-label="复制任务 ID"><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-copy"></use></svg></button>` : ''}
                         <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" data-edit-task-id="true" title="补填任务 ID" aria-label="补填任务 ID" ${recovering ? 'disabled' : ''}><svg class="flow-icon flow-icon-xs"><use href="./icons/flow-icons.svg#icon-connections"></use></svg></button>
-                        <button type="button" data-recover-task="${this._escapeTaskText(task.id)}" ${recovering ? 'disabled' : ''}>${recovering ? '正在恢复' : (promptModerationFailed ? '继续恢复' : '拉取产物')}</button>
-                        ${recovering ? `<button type="button" data-stop-recovery="${this._escapeTaskText(task.id)}">停止</button>` : ''}
-                    </div>
+                        </div>
+                        ${collapseRecovery ? recoveryControls : ''}
+                    </details>
+                    ${collapseRecovery ? '' : recoveryControls}
                     ${canRetry ? `
                         <div class="agent-task-retry-row">
                             <span>没有任务 ID，重新提交会创建新任务</span>
@@ -3877,6 +3956,8 @@ export class AgentSidebar {
                 routeLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.routeLabel || '' : '',
                 routeGroup: kind === 'video' ? this._getVideoModelProfile(provider)?.routeGroup || '' : '',
                 routeModelLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.routeModelLabel || '' : '',
+                modelLabel: kind === 'video' ? this._getVideoModelProfile(provider)?.label || '' : '',
+                description: kind === 'video' ? describeVideoModelProfile(this._getVideoModelProfile(provider)) : '',
                 model: provider.model || ''
             }));
     }

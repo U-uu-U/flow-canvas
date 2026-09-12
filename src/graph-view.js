@@ -7,18 +7,25 @@ import * as G from './graph-model.js';
 import { NODE_TYPES } from './node-types.js';
 import { nodeIconSvg } from './node-icons.js';
 import { getGeneratorPlaceholderSize } from './generator-placeholder-layout.js';
+import { getThemeColor } from './theme.js';
+import { getUiCompensationScale, getUiScreenScale, normalizeUiScaleLimit, readUiScaleLimit, UI_SCALE_LIMIT_CHANGED } from './canvas-ui-scale.js';
 
 const PORT_RADIUS = 9;
 const PORT_GAP = 24;
 const PORT_HIT = 14;
-const EDGE_COLOR = '#46474a';
-const EDGE_HISTORY_COLOR = '#3d3e41';
 const EDGE_WIDTH = 3.2;
 const EDGE_HISTORY_WIDTH = 2.2;
 
-export function viewportFixedScale(stageScale, baseScale = 1) {
-    const normalizedScale = Math.max(0.01, Number(stageScale) || 1);
-    return (Number(baseScale) || 1) / normalizedScale;
+function edgeColor(history = false) {
+    return getThemeColor(history ? 'canvas-edge-history' : 'canvas-edge', history ? '#3d3e41' : '#46474a');
+}
+
+function portThemeColor(name, fallback) {
+    return getThemeColor(name, fallback);
+}
+
+export function viewportFixedScale(stageScale, baseScale = 1, limit) {
+    return (Number(baseScale) || 1) * getUiCompensationScale(stageScale, limit);
 }
 
 const NODE_MENU_COPY = {
@@ -93,6 +100,7 @@ export class GraphView {
         this._pendingScope = null;     // 本帧待刷新的节点范围
         this._fullScopePending = false;// 本帧是否需要全量刷新
         this._visiblePortsTimer = null;
+        this.uiScaleLimit = readUiScaleLimit();
 
         this.edgeLayer = new Konva.Layer({ listening: true });
         canvas.stage.add(this.edgeLayer);
@@ -113,6 +121,11 @@ export class GraphView {
         this._onDocUp = (e) => { if (this.pending) this._endDrag(e); };
         document.addEventListener('mousemove', this._onDocMove);
         document.addEventListener('mouseup', this._onDocUp);
+        this._onUiScaleLimitChange = event => {
+            this.uiScaleLimit = normalizeUiScaleLimit(event.detail?.limit);
+            this.syncViewportControlScale();
+        };
+        document.documentElement.addEventListener(UI_SCALE_LIMIT_CHANGED, this._onUiScaleLimitChange);
     }
 
     /** 放弃当前正在拖拽的连线（不建立连接），清理残留的 pending 状态 */
@@ -128,6 +141,7 @@ export class GraphView {
         this.closeConnectionNodeMenu();
         document.removeEventListener('mousemove', this._onDocMove);
         document.removeEventListener('mouseup', this._onDocUp);
+        document.documentElement.removeEventListener(UI_SCALE_LIMIT_CHANGED, this._onUiScaleLimitChange);
     }
 
     /** 节点在画布坐标系下的尺寸 */
@@ -246,8 +260,8 @@ export class GraphView {
                     y: pos.y,
                     name: 'graphPort',
                     opacity: this._portOpacity(nodeId, port.name, side),
-                    scaleX: viewportFixedScale(this.canvas.stage.scaleX()),
-                    scaleY: viewportFixedScale(this.canvas.stage.scaleY())
+                    scaleX: viewportFixedScale(this.canvas.stage.scaleX(), 1, this.uiScaleLimit),
+                    scaleY: viewportFixedScale(this.canvas.stage.scaleY(), 1, this.uiScaleLimit)
                 });
                 const hit = new this.Konva.Circle({
                     radius: PORT_HIT,
@@ -256,21 +270,21 @@ export class GraphView {
                 });
                 const body = new this.Konva.Circle({
                     radius: PORT_RADIUS,
-                    fill: '#1a1b1d',
-                    stroke: '#686b71',
+                    fill: portThemeColor('canvas-port-bg', '#1a1b1d'),
+                    stroke: portThemeColor('canvas-port-border', '#686b71'),
                     strokeWidth: 1.2,
                     listening: false
                 });
                 const horizontal = new this.Konva.Line({
                     points: [-3.5, 0, 3.5, 0],
-                    stroke: '#a3a6ac',
+                    stroke: portThemeColor('canvas-node-muted', '#a3a6ac'),
                     strokeWidth: 1.45,
                     lineCap: 'round',
                     listening: false
                 });
                 const vertical = new this.Konva.Line({
                     points: [0, -3.5, 0, 3.5],
-                    stroke: '#a3a6ac',
+                    stroke: portThemeColor('canvas-node-muted', '#a3a6ac'),
                     strokeWidth: 1.45,
                     lineCap: 'round',
                     listening: false
@@ -280,17 +294,17 @@ export class GraphView {
                     shape.opacity(1);
                     body.radius(PORT_RADIUS + 1.5);
                     body.stroke(portColor(port.dataType));
-                    horizontal.stroke('#f1f2f3');
-                    vertical.stroke('#f1f2f3');
+                    horizontal.stroke(portThemeColor('canvas-node-text', '#f1f2f3'));
+                    vertical.stroke(portThemeColor('canvas-node-text', '#f1f2f3'));
                     document.body.style.cursor = 'crosshair';
                     this.portLayer.batchDraw();
                 });
                 shape.on('mouseleave', () => {
                     shape.opacity(this._portOpacity(nodeId, port.name, side));
                     body.radius(PORT_RADIUS);
-                    body.stroke('#686b71');
-                    horizontal.stroke('#a3a6ac');
-                    vertical.stroke('#a3a6ac');
+                    body.stroke(portThemeColor('canvas-port-border', '#686b71'));
+                    horizontal.stroke(portThemeColor('canvas-node-muted', '#a3a6ac'));
+                    vertical.stroke(portThemeColor('canvas-node-muted', '#a3a6ac'));
                     document.body.style.cursor = 'default';
                     this.portLayer.batchDraw();
                 });
@@ -310,11 +324,22 @@ export class GraphView {
     }
 
     syncViewportControlScale(stageScale = this.canvas.stage.scaleX()) {
-        const scale = viewportFixedScale(stageScale);
+        const scale = viewportFixedScale(stageScale, 1, this.uiScaleLimit);
         this.portShapes.forEach(entries => {
             entries.forEach(entry => entry.shape.scale({ x: scale, y: scale }));
         });
+        this.edgeShapes.forEach(line => this._syncEdgeWidth(line, stageScale));
+        this._syncEdgeWidth(this.pending?.line, stageScale);
+        this._syncEdgeWidth(this.connectionNodeMenuState?.line, stageScale);
+        this.edgeLayer.batchDraw();
         this.portLayer.batchDraw();
+    }
+
+    _syncEdgeWidth(line, stageScale = this.canvas.stage.scaleX()) {
+        if (!line) return;
+        const baseWidth = Number(line.getAttr('uiBaseStrokeWidth')) || EDGE_WIDTH;
+        const width = baseWidth + (line.getAttr('uiHovered') ? 1.2 : 0);
+        line.strokeWidth(width * getUiScreenScale(stageScale, this.uiScaleLimit));
     }
 
     clearPorts(nodeId) {
@@ -352,14 +377,15 @@ export class GraphView {
         this.cancelPending();
         const line = new this.Konva.Line({
             points: [],
-            stroke: EDGE_COLOR,
-            strokeWidth: EDGE_WIDTH,
+            stroke: edgeColor(),
+            strokeWidth: EDGE_WIDTH * getUiScreenScale(this.canvas.stage.scaleX(), this.uiScaleLimit),
+            uiBaseStrokeWidth: EDGE_WIDTH,
             opacity: 0.92,
             lineCap: 'round',
             lineJoin: 'round',
             bezier: true,
             strokeScaleEnabled: false,
-            shadowColor: '#000000',
+            shadowColor: getThemeColor('canvas-control-shadow', '#000000'),
             shadowBlur: 2,
             shadowOpacity: 0.24,
             listening: false
@@ -676,14 +702,15 @@ export class GraphView {
         const isHistory = conn.kind === 'history';
         const line = new this.Konva.Line({
             points: curvePoints(a, b),
-            stroke: isHistory ? EDGE_HISTORY_COLOR : EDGE_COLOR,
-            strokeWidth: isHistory ? EDGE_HISTORY_WIDTH : EDGE_WIDTH,
+            stroke: edgeColor(isHistory),
+            strokeWidth: (isHistory ? EDGE_HISTORY_WIDTH : EDGE_WIDTH) * getUiScreenScale(this.canvas.stage.scaleX(), this.uiScaleLimit),
+            uiBaseStrokeWidth: isHistory ? EDGE_HISTORY_WIDTH : EDGE_WIDTH,
             opacity: isHistory ? 0.48 : 0.9,
             bezier: true,
             lineCap: 'round',
             lineJoin: 'round',
             strokeScaleEnabled: false,
-            shadowColor: '#000000',
+            shadowColor: getThemeColor('canvas-control-shadow', '#000000'),
             shadowBlur: 2,
             shadowOpacity: isHistory ? 0.12 : 0.24,
             hitStrokeWidth: 16,
@@ -691,18 +718,19 @@ export class GraphView {
             id: conn.id,
             visible: this.connectionsVisible
         });
-        const baseWidth = isHistory ? EDGE_HISTORY_WIDTH : EDGE_WIDTH;
         const baseOpacity = isHistory ? 0.48 : 0.9;
         line.on('mouseenter', () => {
-            line.strokeWidth(baseWidth + 1.2);
+            line.setAttr('uiHovered', true);
+            this._syncEdgeWidth(line);
             line.stroke(portColor(dataType));
             line.opacity(1);
             document.body.style.cursor = 'pointer';
             this.edgeLayer.batchDraw();
         });
         line.on('mouseleave', () => {
-            line.strokeWidth(baseWidth);
-            line.stroke(isHistory ? EDGE_HISTORY_COLOR : EDGE_COLOR);
+            line.setAttr('uiHovered', false);
+            this._syncEdgeWidth(line);
+            line.stroke(edgeColor(isHistory));
             line.opacity(baseOpacity);
             document.body.style.cursor = 'default';
             this.edgeLayer.batchDraw();
@@ -728,7 +756,7 @@ export class GraphView {
      */
     sync(scope = null) {
         const scoped = scope ? (scope instanceof Set ? scope : new Set(scope)) : null;
-        const controlScale = viewportFixedScale(this.canvas.stage.scaleX());
+        const controlScale = viewportFixedScale(this.canvas.stage.scaleX(), 1, this.uiScaleLimit);
 
         this.portShapes.forEach((entries, nodeId) => {
             if (scoped && !scoped.has(nodeId)) return;

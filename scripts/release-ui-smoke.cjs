@@ -7,19 +7,25 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
 (async () => {
     const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'flow-release-ui-'));
     let app;
+    let page;
     try {
         await fs.mkdir(path.join(profile, 'data'));
         await fs.writeFile(path.join(profile, 'data/board.json'), JSON.stringify({ version: 1, items: [], folderGroups: [], mcp: { enabled: false } }));
         const env = { ...process.env, FLOW_MCP_SMOKE_PROFILE: profile };
         delete env.ELECTRON_RUN_AS_NODE;
         app = await electron.launch({ executablePath: require('electron'), args: [path.join(__dirname, 'mcp-client-smoke-entry.cjs')], env });
-        const page = await app.firstWindow();
+        for (let attempt = 0; attempt < 150; attempt++) {
+            page = app.windows().find(window => /dist[\\/]index\.html/.test(window.url()));
+            if (page) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        assert.ok(page, 'The main renderer window must open');
         await page.waitForFunction(() => window.flowCanvas?.store && document.querySelector('#agentToggleBtn'));
         if (process.env.FLOW_UI_TEST_PLATFORM) await page.evaluate(platform => {
             document.body.classList.remove('platform-win32', 'platform-darwin');
             document.body.classList.add(`platform-${platform}`);
         }, process.env.FLOW_UI_TEST_PLATFORM);
-        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => window.isVisible()).setSize(1300, 900));
+        await (await app.browserWindow(page)).evaluate(window => window.setSize(1300, 900));
         const settings = page.locator('#agentSettingsBtn');
         assert.equal(await page.locator('.titlebar #agentSettingsBtn').count(), 0);
         assert.equal(await page.locator('#creationModePicker').count(), 0);
@@ -61,7 +67,7 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         const output = path.join(__dirname, '../output/playwright');
         await fs.mkdir(output, { recursive: true });
         await page.screenshot({ path: path.join(output, 'release-ui-desktop.png') });
-        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => window.isVisible()).setSize(820, 680));
+        await (await app.browserWindow(page)).evaluate(window => window.setSize(820, 680));
         await page.waitForTimeout(300);
         assert.ok(Number(await handle.getAttribute('aria-valuenow')) <= Number(await handle.getAttribute('aria-valuemax')));
         const panel = await page.locator('#agentSidebar').boundingBox();
@@ -70,13 +76,12 @@ const { _electron: electron } = require(process.env.PLAYWRIGHT_MODULE || 'playwr
         await page.screenshot({ path: path.join(output, 'release-ui-compact.png') });
         await page.reload();
         await page.waitForFunction(() => window.flowCanvas?.store && document.querySelector('#agentToggleBtn'));
-        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find(window => window.isVisible()).setSize(1300, 900));
+        await (await app.browserWindow(page)).evaluate(window => window.setSize(1300, 900));
         await page.locator('#agentToggleBtn').click();
         await page.waitForFunction(() => document.body.classList.contains('agent-open'));
         assert.equal(Number(await handle.getAttribute('aria-valuenow')), width);
         console.log('Release UI smoke passed: settings rail/toggle, no old picker, send icon, drag, keyboard, persistence, compact viewport.');
     } catch (error) {
-        const page = app && await app.firstWindow().catch(() => null);
         if (page) {
             const output = path.join(__dirname, '../output/playwright');
             await fs.mkdir(output, { recursive: true });

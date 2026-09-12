@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { appendGeneratorResult, getGeneratorResultEntries } from '../src/generator-result-stack.js';
+import { getGeneratorResultEntries } from '../src/generator-result-stack.js';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 
 function signature(node) {
     return JSON.stringify([node?.config, node?.filePath, node?.generation?.taskId, node?.resultFilePaths]);
@@ -47,14 +48,15 @@ export function installGenerationRecoveryBoard(bridge, board) {
                 model: request.providerConfig.model, providerId: request.providerConfig.id,
                 config: { ...node.config }, taskId: result.taskId || request.taskId,
                 references: (request.sourcePaths || []).map(filePath => ({ filePath })), generatedAt: Date.now() };
-            for (const filePath of filePaths.filter(Boolean)) appendGeneratorResult(node, {
-                filePath, item: { filePath, mediaType: result.mediaType || request.kind, generation }
-            });
+            for (const filePath of filePaths) {
+                const item = result.images?.find(item => item.filePath === filePath);
+                applyGeneratorStackResult(node, {
+                    _resultFilePath: filePath,
+                    _resultItem: { ...item, filePath, mediaType: result.mediaType || request.kind, generation }
+                }, { generation, completed: true });
+            }
             node.filePath = filePaths[0];
             node.mediaType = result.mediaType || request.kind;
-            node.generation = generation;
-            node.runStatus = 'done';
-            node.runError = '';
             node.metadata = { ...node.metadata, recoveryKey: key };
             nodeId = node.id;
         });
