@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow Canvas</title>
+    <style>
+        :root { color-scheme: light; background: #f5f6fa; }
+        * { box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+        body {
+            display: grid;
+            place-items: center;
+            background: #f5f6fa;
+            font-family: "Segoe UI", "PingFang SC", sans-serif;
+        }
+        .splash {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #f5f6fa;
+        }
+        .splash img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .splash::after {
+            position: absolute;
+            inset: 0;
+            content: "";
+            background: linear-gradient(90deg, rgba(245, 246, 250, 0.08), rgba(245, 246, 250, 0.02));
+            pointer-events: none;
+        }
+        .loading {
+            position: absolute;
+            right: 28px;
+            bottom: 24px;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: rgba(24, 26, 34, 0.7);
+            font-size: 12px;
+            letter-spacing: 0.02em;
+        }
+        .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.32), 0 0 12px rgba(255, 255, 255, 0.9);
+            animation: breathe 1.4s ease-in-out infinite;
+        }
+        @keyframes breathe {
+            0%, 100% { opacity: 0.45; transform: scale(0.8); }
+            50% { opacity: 1; transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <main class="splash" aria-label="Flow Canvas 正在启动">
+        <img src="./assets/splash.jpg" alt="">
+        <div class="loading"><span class="dot"></span><span>正在启动</span></div>
+    </main>
+</body>
+</html>

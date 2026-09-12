@@ -22,7 +22,7 @@ function harness(start) {
         pendingAgentAttachments: [], pendingAgentSource: null,
         runtimeStarting: new Set(), runtimeCards: new Map(), runtimeStartErrors: new Map(),
         globalConfig: { agentExecutionMode: 'ask' },
-        sendBtn: { disabled: false }, inputEl: { value: 'hello', style: {} },
+        sendBtn: { disabled: false }, inputEl: { value: 'hello', style: {}, focus() {} },
         _connectAgentRuntime() {}, _renderAgentMessages() {}, _renderAgentRuntimeCards() {},
         _renderAgentConversationHeader() {}, _renderAgentFiles() {}, _renderPendingAgentAttachments() {},
         _appendAgentError() {}, setMode() {},
@@ -234,4 +234,101 @@ test('rehydrating results-only snapshots saves files and keeps the final reply u
     assert.equal(conversation.files[0].filePath, '/output.png');
     assert.equal(conversation.messages.filter(message => message.role === 'assistant').length, 1);
     sidebar.runtimeClient.dispose();
+});
+
+const imageAttachment = name => ({ mediaType: 'image', filePath: `C:/refs/${name}.png`, name });
+const imageContext = attachments => ({ nodeId: 'image-node', nodeType: 'image',
+    originalPrompt: 'original', effectivePrompt: 'latest prompt', parameters: { quality: 'high' }, attachments });
+
+for (const fromSidebar of [false, true]) {
+    test(`${fromSidebar ? 'sidebar' : 'node button'} send keeps exclusions and stable order in every runtime attachment payload`, async t => {
+        let request;
+        const { sidebar } = harness(async body => {
+            request = body;
+            return { id: 'attachment-run', projectId: body.projectId, conversationId: body.conversationId,
+                status: 'completed', lastSeq: 1, events: [] };
+        });
+        t.after(() => sidebar.runtimeClient.dispose());
+        sidebar.getImageIntentPipelineMode = () => 'agent';
+        const [a, b, c, d] = ['a', 'b', 'c', 'd'].map(imageAttachment);
+        sidebar._refreshPendingAgentNodeContext(imageContext([a, b, c]));
+        sidebar._removePendingAgentAttachment(0);
+        sidebar.options.getAgentNodeContext = () => imageContext([d, c, a, { ...b, width: 2048 }]);
+        if (fromSidebar) await sidebar._sendAgentMessage();
+        else await sidebar.generateImageFromNode(imageContext([a, b, c]));
+        for (const attachments of [request.attachments, request.source.attachments, request.source.details.attachments]) {
+            assert.deepEqual(attachments.map(item => item.name), ['b', 'c', 'd']);
+            assert.equal(attachments[0].width, 2048);
+        }
+        assert.equal(request.source.effectivePrompt, 'latest prompt');
+        assert.deepEqual(request.source.excludedAttachmentKeys, ['image:c:/refs/a.png']);
+        assert.deepEqual(sidebar.pendingAgentAttachments, []);
+        assert.equal(sidebar.pendingAgentSource, null);
+    });
+}
+
+test('removing all node attachments retains the source and persists exclusions per conversation', async t => {
+    let request;
+    const { sidebar } = harness(async body => { request = body; throw new Error('fixture rejection'); });
+    t.after(() => sidebar.runtimeClient.dispose());
+    const context = imageContext(['a', 'b'].map(imageAttachment));
+    sidebar._refreshPendingAgentNodeContext(context);
+    sidebar._removePendingAgentAttachment(0);
+    sidebar._removePendingAgentAttachment(0);
+    assert.equal(sidebar.pendingAgentSource.nodeId, context.nodeId);
+    sidebar.activeConversationId = 'chat-2';
+    sidebar._restorePendingAgentAttachments();
+    assert.equal(sidebar.pendingAgentSource, null);
+    sidebar._refreshPendingAgentNodeContext(context);
+    assert.equal(sidebar.pendingAgentAttachments.length, 2);
+    sidebar.activeConversationId = 'chat-1';
+    sidebar._restorePendingAgentAttachments();
+    sidebar.options.getAgentNodeContext = () => context;
+    await sidebar.generateImageFromNode(context);
+    assert.deepEqual(request.attachments, []);
+    assert.deepEqual(request.source.details.attachments, []);
+    assert.deepEqual(request.source.excludedAttachmentKeys, ['image:c:/refs/a.png', 'image:c:/refs/b.png']);
+    assert.equal(sidebar.pendingAgentSource.excludedAttachmentKeys.length, 2);
+    sidebar._clearPendingAgentAttachments();
+    sidebar._refreshPendingAgentNodeContext(context);
+    assert.equal(sidebar.pendingAgentAttachments.length, 2);
+});
+
+test('upstream disconnection drops stale media and exclusions do not leak to a different node', t => {
+    const { sidebar } = harness(async () => {});
+    t.after(() => sidebar.runtimeClient.dispose());
+    const [a, b] = ['a', 'b'].map(imageAttachment);
+    sidebar._refreshPendingAgentNodeContext(imageContext([a, b]));
+    sidebar._removePendingAgentAttachment(0);
+    sidebar._refreshPendingAgentNodeContext(imageContext([]));
+    assert.deepEqual(sidebar.pendingAgentAttachments, []);
+    sidebar._refreshPendingAgentNodeContext(imageContext([b, a]));
+    assert.deepEqual(sidebar.pendingAgentAttachments.map(item => item.name), ['b']);
+    sidebar._refreshPendingAgentNodeContext({ ...imageContext([a]), nodeId: 'other-node' });
+    assert.deepEqual(sidebar.pendingAgentAttachments.map(item => item.name), ['a']);
+    assert.equal(sidebar.pendingAgentSource.excludedAttachmentKeys, undefined);
+});
+
+test('legacy node generation rejects exclusions before any paid request and retains the pending input', async t => {
+    const { sidebar } = harness(async () => {});
+    t.after(() => sidebar.runtimeClient.dispose());
+    const context = imageContext(['a', 'b'].map(imageAttachment));
+    const requests = [];
+    delete window.flowCanvas.agent;
+    window.flowCanvas.ai.generateText = async body => {
+        requests.push(body);
+        return { success: true, text: '{"prompt":"fixture compiled prompt"}' };
+    };
+    sidebar._appendAgentMessageElement = () => {};
+    sidebar._appendAgentTyping = () => null;
+    sidebar.options.getAgentNodeContext = () => context;
+    sidebar.options.executeImageNodeFromAgent = async body => { requests.push(body); return { ok: true }; };
+    sidebar._refreshPendingAgentNodeContext(context);
+    sidebar._removePendingAgentAttachment(0);
+    const result = await sidebar.generateImageFromNode(context);
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /重新启动/);
+    assert.equal(requests.length, 0);
+    assert.deepEqual(sidebar.pendingAgentAttachments.map(item => item.name), ['b']);
+    assert.deepEqual(sidebar.pendingAgentSource.excludedAttachmentKeys, ['image:c:/refs/a.png']);
 });

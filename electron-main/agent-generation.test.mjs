@@ -7,6 +7,10 @@ import sharp from 'sharp';
 import { AgentGeneration } from './agent-generation.mjs';
 import { AgentMedia } from './agent-media.cjs';
 import { getGenerationReuseConfig } from '../src/generation-record.js';
+import { DEFAULT_MODEL_CONFIG } from '../src/model-config-default.js';
+import { imageGenerationRequestParams } from '../src/generation-request-params.js';
+import { createAgentServices } from './agent-services.cjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 
 const copy = value => structuredClone(value);
 const op = (id, nodeType = 'image', config = {}) => ({
@@ -16,7 +20,7 @@ const op = (id, nodeType = 'image', config = {}) => ({
 const edge = (from, to, kind) => ({ id: `${from}-${to}`, from: { nodeId: from, port: 'out' }, to: { nodeId: to, port: 'in' }, ...(kind ? { kind } : {}) });
 const provider = (id, kind, model) => ({ id, capability: kind, model, models: [model], apiKey: 'mock-key', endpoint: 'https://example.invalid/v1' });
 
-async function setup(t, { items = [op('image')], connections = [], providers } = {}) {
+async function setup(t, { items = [op('image')], connections = [], providers, modelConfig = DEFAULT_MODEL_CONFIG } = {}) {
     const directory = await fs.mkdtemp(path.join(tmpdir(), 'agent-generation-test-'));
     t.after(() => fs.rm(directory, { recursive: true, force: true }));
     const projects = {
@@ -58,9 +62,11 @@ async function setup(t, { items = [op('image')], connections = [], providers } =
         resumeImageFromRenderer: body => generate('image', body, 'resume-image'),
         cancelGenerationFromRenderer: id => requests.push({ kind: 'cancel', id })
     };
-    const generation = new AgentGeneration({ board, bridge, loadConfig: () => copy(config), fallbackDir: directory });
-    function plan(nodeIds = ['image'], source) {
-        const run = { id: 'run-1', projectId: 'original', source, steps: [] };
+    const capabilities = { current: copy(modelConfig) };
+    const generation = new AgentGeneration({ board, bridge, loadConfig: () => copy(config),
+        loadModelConfig: () => copy(capabilities.current), fallbackDir: directory });
+    function plan(nodeIds = ['image'], source, attachments = []) {
+        const run = { id: 'run-1', projectId: 'original', source, attachments, steps: [] };
         const prepared = generation.prepare(run, { nodeIds, summary: 'Approved batch' });
         run.plan = { ...prepared, approved: true };
         run.steps = prepared.steps;
@@ -72,10 +78,116 @@ async function setup(t, { items = [op('image')], connections = [], providers } =
             Object.assign(step, patch);
         }, ...options });
     }
-    return { directory, projects, board, bridge, config, generation, requests, mutations, checkpoints, file, plan, execute };
+    return { directory, projects, board, bridge, config, capabilities, generation, requests, mutations, checkpoints, file, plan, execute };
 }
 
 describe('AgentGeneration planning', () => {
+    test('excluded files and URL-only upstream generators are pruned before topology and never submitted', async t => {
+        const h = await setup(t);
+        const kept = await h.file('kept.png');
+        const removed = path.join(h.directory, 'removed.png');
+        const removedUrl = 'https://cdn.example/removed.mp4';
+        h.projects.original.items.push(
+            { id: 'kept', kind: 'media', mediaType: 'image', filePath: kept },
+            { id: 'removed', kind: 'media', mediaType: 'image', filePath: removed },
+            { ...op('removed-upstream'), url: removedUrl.toUpperCase() },
+            op('hidden-text', 'text', { useAi: true })
+        );
+        h.projects.original.connections = [edge('removed', 'image'), edge('removed-upstream', 'image'),
+            edge('hidden-text', 'removed-upstream'), edge('kept', 'image')];
+        const before = copy(h.projects);
+        const source = { nodeId: 'image', excludedAttachmentKeys: [
+            `image:${removed.replace(/\\/g, '/').toLowerCase()}`, `video:${removedUrl}`
+        ] };
+        const run = h.plan(['image'], source, [
+            { sourceNodeId: 'removed', filePath: removed, mediaType: 'image' },
+            { sourceNodeId: 'kept', filePath: kept, mediaType: 'image' }
+        ]);
+        assert.deepEqual(h.projects, before);
+        assert.deepEqual(run.steps.map(step => step.nodeId), ['image']);
+        assert.deepEqual(run.steps[0].references.map(reference => reference.filePath), [kept]);
+        assert.deepEqual(Object.keys(run.steps[0].nodeFingerprints).sort(), ['image', 'kept']);
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests.length, 1);
+        assert.deepEqual(h.requests[0].body.sourceReferences, [{ filePath: kept }]);
+        assert.equal(h.requests[0].body.referenceBindings[0].sourceNodeId, 'kept');
+        assert.deepEqual(h.projects.original.connections.slice(0, before.original.connections.length), before.original.connections);
+        assert.deepEqual(h.projects.original.items.slice(0, before.original.items.length), before.original.items);
+        assert.deepEqual(h.projects.other, before.other);
+    });
+
+    test('visible attachment order uses sourceNodeId, itemId and normalized paths only on the source node', async t => {
+        const h = await setup(t, { items: [op('source'), op('other')] });
+        const files = {};
+        for (const id of ['a', 'b', 'c', 'd']) {
+            files[id] = await h.file(`${id}.png`);
+            h.projects.original.items.push({ id, kind: 'media', mediaType: 'image', filePath: files[id] });
+        }
+        h.projects.original.connections = [edge('c', 'source'), edge('a', 'source'), edge('b', 'source'), edge('d', 'source'),
+            edge('a', 'other'), edge('c', 'other'), edge('b', 'other')];
+        Object.assign(h.projects.original.items[0].config, {
+            prompt: 'A B', referenceCitationIds: ['a-source', 'b-source'], referenceCitationLabels: ['图一', '图二'],
+            referenceCitationOccurrences: [
+                { connectionId: 'a-source', sourceNodeId: 'a', offset: 0 },
+                { connectionId: 'b-source', sourceNodeId: 'b', offset: 2 }
+            ]
+        });
+        const before = copy(h.projects);
+        const run = h.plan(['source', 'other'], {
+            nodeId: 'source', excludedAttachmentKeys: [`image:${files.c.replace(/\\/g, '/').toLowerCase()}`]
+        }, [
+            { itemId: 'b', filePath: files.b, mediaType: 'image' },
+            { filePath: files.d.replace(/\\/g, '/').toUpperCase(), mediaType: 'image' },
+            { sourceNodeId: 'a', filePath: files.a, mediaType: 'image' }
+        ]);
+        assert.deepEqual(h.projects, before);
+        assert.deepEqual(run.steps[0].references.map(reference => reference.nodeId), ['b', 'd', 'a']);
+        assert.deepEqual(run.steps[1].references.map(reference => reference.nodeId), ['a', 'c', 'b']);
+        assert.deepEqual(run.steps[0].config.referenceCitationLabels, ['图三', '图一']);
+        for (const step of run.steps) await h.execute(step, run);
+        assert.deepEqual(h.requests[0].body.sourceReferences.map(ref => ref.filePath), [files.b, files.d, files.a]);
+        assert.match(h.requests[0].body.prompt, /\n图三A 图一B$/);
+        assert.deepEqual(h.requests[1].body.sourceReferences.map(ref => ref.filePath), [files.a, files.c, files.b]);
+        assert.deepEqual(h.projects.original.connections.slice(0, before.original.connections.length), before.original.connections);
+    });
+
+    test('excluded primary generator results do not pull their ancestors into the plan', async t => {
+        const h = await setup(t);
+        const removed = await h.file('removed-result.png');
+        h.projects.original.items.push({ ...op('completed-upstream'), resultEntries: [{ filePath: removed }] }, op('ancestor'));
+        h.projects.original.connections = [edge('ancestor', 'completed-upstream'), edge('completed-upstream', 'image')];
+        const run = h.plan(['image'], { nodeId: 'image', excludedAttachmentKeys: [`image:${removed.replace(/\\/g, '/').toLowerCase()}`] });
+        assert.deepEqual(run.steps.map(step => step.nodeId), ['image']);
+        assert.deepEqual(run.steps[0].references, []);
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests.length, 1);
+        assert.deepEqual(h.requests[0].body.sourceReferences, []);
+    });
+
+    test('citations to excluded images fail explicitly rather than rebinding to retained uploads', async t => {
+        const h = await setup(t);
+        const kept = await h.file('kept.png'), removed = await h.file('removed.png');
+        h.projects.original.items.push({ id: 'kept', kind: 'media', mediaType: 'image', filePath: kept },
+            { id: 'removed', kind: 'media', mediaType: 'image', filePath: removed });
+        h.projects.original.connections = [edge('removed', 'image'), edge('kept', 'image')];
+        const source = { nodeId: 'image', excludedAttachmentKeys: [`image:${removed.replace(/\\/g, '/').toLowerCase()}`] };
+        const attachments = [{ sourceNodeId: 'kept', filePath: kept, mediaType: 'image' }];
+        for (const citation of [
+            { referenceCitationIds: ['removed-image'], referenceCitationLabels: ['图一'] },
+            ...[{ sourceNodeId: 'removed' }, { itemId: 'removed' }, { connectionId: 'removed-image' },
+                { filePath: removed.replace(/\\/g, '/').toUpperCase() }].map(identity => ({
+                referenceCitationOccurrences: [{ id: 'removed-citation', offset: 0, ...identity }]
+            }))
+        ]) {
+            h.projects.original.items[0].config = { prompt: 'use ', ...citation };
+            const before = copy(h.projects);
+            assert.throws(() => h.plan(['image'], source, attachments), { code: 'EXCLUDED_REFERENCE' });
+            assert.deepEqual(h.projects, before);
+        }
+        assert.equal(h.requests.length, 0);
+        assert.deepEqual(h.mutations, []);
+    });
+
     test('topological generation order deduplicates shared ancestors and ignores history edges', async t => {
         const h = await setup(t, { items: [op('a'), op('b'), op('c')],
             connections: [edge('a', 'b'), edge('a', 'c'), edge('c', 'a', 'history')] });
@@ -196,8 +308,8 @@ describe('AgentGeneration planning', () => {
 
     test('video reference limits reject excess images and unsupported media types', async t => {
         const h = await setup(t, { items: [op('video', 'video')] });
-        const filePath = await h.file('reference.png');
         for (let i = 0; i < 10; i++) {
+            const filePath = await h.file(`reference-${i}.png`);
             h.projects.original.items.push({ id: `ref-${i}`, kind: 'media', mediaType: 'image', filePath });
             h.projects.original.connections.push(edge(`ref-${i}`, 'video'));
         }
@@ -205,6 +317,10 @@ describe('AgentGeneration planning', () => {
         h.projects.original.connections.pop();
         assert.equal(h.plan(['video']).steps[0].references.length, 9);
         h.projects.original.items[1].mediaType = 'audio';
+        assert.equal(h.plan(['video']).steps[0].references.length, 9, 'undeclared audio support is not a prohibition');
+        for (const model of h.capabilities.current.models.filter(model => model.kind === 'video')) {
+            model.capabilities.referenceAudios = { supported: false };
+        }
         assert.throws(() => h.plan(['video']), { code: 'REFERENCE_LIMIT' });
     });
 
@@ -219,15 +335,266 @@ describe('AgentGeneration planning', () => {
         assert.equal(h.plan(['video']).plan.estimatedCost, null);
     });
 
-    test('unconnected video templates are not executable Agent models', async t => {
-        for (const model of ['seedance-1.5', 'wan', 'kling', 'vidu']) {
-            const h = await setup(t, { providers: [provider('videos', 'video', model)], items: [op('video', 'video')] });
-            assert.throws(() => h.plan(['video']), { code: 'MODEL_CAPABILITY_UNKNOWN' });
+    test('unlisted custom models follow the renderer warning-only policy', async t => {
+        const h = await setup(t, { providers: [provider('videos', 'video', 'custom-video')],
+            items: [op('video', 'video', { duration: 7, resolution: 'custom', webSearch: true })] });
+        assert.equal(h.plan(['video']).steps[0].config.duration, 7);
+        assert.equal(h.generation.listModels()[0].modelConfig.matched, false);
+    });
+});
+
+describe('AgentGeneration effective CONFIG', () => {
+    const entry = (h, id) => h.capabilities.current.models.find(model => model.id === id);
+    const mjProviders = [provider('images', 'image', 'mj_imagine')];
+    const videoProviders = [provider('videos', 'video', 'seedance_v2.5')];
+
+    test('MJ lists only CONFIG tiers and never plans a 4K-to-sd downgrade', async t => {
+        const h = await setup(t, { providers: mjProviders, items: [op('image', 'image', { resolutionTier: '4K' })] });
+        assert.deepEqual(h.generation.listModels()[0].resolutions, ['1K', '2K']);
+        assert.throws(() => h.plan(), { code: 'INVALID_RESOLUTION' });
+        h.projects.original.items[0].config = { prompt: 'MJ', resolutionTier: '1K', size: '3840x2160' };
+        assert.throws(() => h.plan(), { code: 'INVALID_RESOLUTION' });
+        assert.equal(h.requests.length, 0);
+        assert.equal(h.mutations.length, 0);
+    });
+
+    test('MJ uses the shared snapshot and sends matching sd/hd for supported tiers', async t => {
+        for (const [resolutionTier, definition] of [['1K', 'sd'], ['2K', 'hd']]) {
+            const h = await setup(t, { providers: mjProviders, items: [op('image', 'image', {
+                resolutionTier, midjourneyVersion: '8.2', midjourneySpeed: 'turbo', midjourneyStylize: 200, webSearch: true
+            })] });
+            const run = h.plan();
+            await h.execute(run.steps[0], run);
+            const body = h.requests[0].body;
+            assert.equal(body.midjourney.definition, definition);
+            assert.equal(body.webSearch, true);
+            assert.deepEqual(body.midjourney, copy(imageGenerationRequestParams({ ...run.steps[0].config, midjourneyRepeat: 1 }, 'mj_imagine').midjourney));
         }
+    });
+
+    test('dynamic image tiers affect catalog, prepare, and already-approved steps', async t => {
+        const h = await setup(t, { providers: mjProviders, items: [op('image', 'image', { resolutionTier: '2K' })] });
+        const run = h.plan();
+        entry(h, 'midjourney.mj-imagine').options.resolutionTier = { type: 'tier', values: ['1K'], default: '1K' };
+        assert.deepEqual(h.generation.listModels()[0].resolutions, ['1K']);
+        assert.throws(() => h.plan(), { code: 'INVALID_RESOLUTION' });
+        await assert.rejects(h.execute(run.steps[0], run), { code: 'INVALID_RESOLUTION' });
+        assert.equal(h.requests.length, 0);
+    });
+
+    test('CONFIG duration changes reject stale plans before any board write or paid request', async t => {
+        const h = await setup(t, { providers: videoProviders, items: [op('video', 'video', { duration: 20 })] });
+        const run = h.plan(['video']);
+        const configEntry = h.capabilities.current.models.find(model => model.match.model.includes('^seedance_v2\\.5$'));
+        configEntry.options.duration = { type: 'range', min: 4, max: 10, integer: true, default: 6 };
+        assert.deepEqual(h.generation.listModels()[0].durations, [4, 5, 6, 7, 8, 9, 10]);
+        assert.throws(() => h.plan(['video']), { code: 'INVALID_DURATION' });
+        await assert.rejects(h.execute(run.steps[0], run), { code: 'INVALID_DURATION' });
+        assert.equal(h.requests.length, 0);
+        assert.equal(h.mutations.length, 0);
+    });
+
+    test('CONFIG is reread after asynchronous board preparation and immediately before submission', async t => {
+        const h = await setup(t, { providers: videoProviders, items: [op('video', 'video', { duration: 20 })] });
+        const run = h.plan(['video']);
+        let reads = 0;
+        h.generation.refreshModelConfig = async () => {
+            reads++;
+            const config = copy(h.capabilities.current);
+            if (reads > 1) config.models.filter(model => model.kind === 'video').forEach(model => {
+                model.options.duration = { type: 'fixed', value: 6 };
+            });
+            return config;
+        };
+        await assert.rejects(h.execute(run.steps[0], run), { code: 'INVALID_DURATION' });
+        assert.equal(reads, 2);
+        assert.equal(h.requests.length, 0);
+        assert.ok(h.checkpoints.every(value => value.status !== 'submitting'));
+    });
+
+    test('truthy Harness feature values cannot bypass validation of normalized wire booleans', async t => {
+        const h = await setup(t, { items: [op('video', 'video', { webSearch: 'true' })] });
+        assert.throws(() => h.plan(['video']), { code: 'UNSUPPORTED_PARAMETER' });
+        h.projects.original.items[0].config.webSearch = false;
+        const run = h.plan(['video']);
+        run.steps[0].config.webSearch = 1;
+        await assert.rejects(h.execute(run.steps[0], run), { code: 'UNSUPPORTED_PARAMETER' });
+        assert.equal(h.requests.length, 0);
+    });
+
+    test('new CONFIG values override static profiles without inventing feature restrictions', async t => {
+        const h = await setup(t, { providers: [provider('videos', 'video', 'minimax-h3')],
+            items: [op('video', 'video', { duration: 6, resolution: '1080p', ratio: '21:9', webSearch: true })] });
+        for (const model of h.capabilities.current.models.filter(model => model.kind === 'video')) {
+            model.options = { duration: { type: 'fixed', value: 6 }, resolutionTier: { type: 'enum', values: ['1080p'] },
+                ratio: { type: 'enum', values: ['21:9'] } };
+            model.capabilities = {};
+        }
+        const run = h.plan(['video']);
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests[0].body.duration, 6);
+        assert.equal(h.requests[0].body.webSearch, true);
+    });
+
+    test('H3 normalization is shared for plans and existing stored steps', async t => {
+        for (const [input, output] of [['720p', '768p'], ['2K', '2k']]) {
+            const h = await setup(t, { providers: [provider('videos', 'video', 'minimax-h3')],
+                items: [op('video', 'video', { resolution: input })] });
+            const run = h.plan(['video']);
+            assert.equal(run.steps[0].config.resolution, output);
+            run.steps[0].config.resolution = input;
+            await h.execute(run.steps[0], run);
+            assert.equal(h.requests[0].body.resolution, output);
+        }
+    });
+
+    test('ambiguous routes use the same all-candidates validation policy as the renderer', async t => {
+        const h = await setup(t, { providers: [provider('videos', 'video', 'custom-video')],
+            items: [op('video', 'video', { duration: 8 })], modelConfig: {
+                schemaVersion: 1, revision: 91, models: [4, 8].map(duration => ({ id: `route-${duration}`, kind: 'video',
+                    match: { model: ['^custom-video$'] }, options: { duration: { type: 'fixed', value: duration } } }))
+            } });
+        assert.deepEqual(h.generation.listModels()[0].durations, [4, 8]);
+        assert.equal(h.generation.listModels()[0].modelConfig.ambiguous, true);
+        assert.equal(h.plan(['video']).steps[0].config.duration, 8);
+        h.projects.original.items[0].config.duration = 9;
+        assert.throws(() => h.plan(['video']), { code: 'INVALID_DURATION' });
+    });
+
+    test('prompt, MJ options, reference byte limits and features use CONFIG validation', async t => {
+        const h = await setup(t, { providers: mjProviders });
+        const model = entry(h, 'midjourney.mj-imagine');
+        model.prompt.maxLength = 3;
+        assert.throws(() => h.plan(), { code: 'PROMPT_TOO_LONG' });
+        h.projects.original.items[0].config.prompt = 'MJ';
+        h.projects.original.items[0].config.midjourneyStylize = 1001;
+        assert.throws(() => h.plan(), { code: 'VALUE_OUT_OF_RANGE' });
+        delete h.projects.original.items[0].config.midjourneyStylize;
+        model.capabilities.webSearch = { supported: false };
+        h.projects.original.items[0].config.webSearch = true;
+        assert.throws(() => h.plan(), { code: 'UNSUPPORTED_PARAMETER' });
+        delete h.projects.original.items[0].config.webSearch;
+        const filePath = await h.file('ref.png', '123456');
+        h.projects.original.items.push({ id: 'ref', kind: 'media', mediaType: 'image', filePath });
+        h.projects.original.connections.push(edge('ref', 'image'));
+        model.capabilities.referenceImages = { supported: true, maxBytesPerImage: 5 };
+        assert.throws(() => h.plan(), error => error.issues?.[0].code === 'REFERENCE_TOO_LARGE');
+    });
+
+    test('duplicate image paths are counted once, as in the actual upload snapshot', async t => {
+        const h = await setup(t);
+        entry(h, 'ravenhash-image.gpt-image-2').capabilities.referenceImages = { supported: true, max: 1 };
+        const filePath = await h.file('ref.png');
+        for (const id of ['a', 'b']) {
+            h.projects.original.items.push({ id, kind: 'media', mediaType: 'image', filePath });
+            h.projects.original.connections.push(edge(id, 'image'));
+        }
+        const run = h.plan();
+        await h.execute(run.steps[0], run);
+        assert.equal(h.requests[0].body.sourceReferences.length, 1);
+    });
+
+    test('CONFIG reads do not serialize independent paid requests or overwrite concurrency', async t => {
+        const h = await setup(t, { items: [op('a', 'image', { concurrency: 3 }), op('b', 'image', { concurrency: 3 })] });
+        const run = h.plan(['a', 'b']);
+        h.generation.refreshModelConfig = async () => copy(h.capabilities.current);
+        let announceFirst, announceSecond, release;
+        const firstStarted = new Promise(resolve => { announceFirst = resolve; });
+        const secondStarted = new Promise(resolve => { announceSecond = resolve; });
+        const gate = new Promise(resolve => { release = resolve; });
+        const original = h.bridge.generateImageFromRenderer;
+        let active = 0;
+        h.bridge.generateImageFromRenderer = async body => {
+            active++;
+            assert.equal(body.concurrency, 3);
+            if (active === 1) {
+                announceFirst();
+                await gate;
+            } else announceSecond();
+            return original(body);
+        };
+        const first = h.execute(run.steps[0], run);
+        await firstStarted;
+        const second = h.execute(run.steps[1], run);
+        await secondStarted;
+        await second;
+        release();
+        await first;
+        assert.equal(h.requests.length, 2);
+    });
+
+    test('built-in Agent and external Harness list/prepare/execute read the same live snapshot', async t => {
+        const h = await setup(t, { providers: mjProviders });
+        let state = { activeGroupId: 'original', items: copy(h.projects.original.items), connections: [], plans: [],
+            folderGroups: [{ id: 'original', savedItems: copy(h.projects.original.items), connections: [], plans: [], defaultSaveFolder: h.directory }] };
+        const window = { isDestroyed: () => false, webContents: { send() {},
+            executeJavaScript: async () => ({ config: copy(h.capabilities.current), status: { origin: 'cache' } }) } };
+        const services = await createAgentServices({ store: { load: () => copy(state), save: value => { state = copy(value); return true; } },
+            apiConfigStore: { load: () => ({ config: h.config }) }, bridge: h.bridge, dataDir: h.directory,
+            getSaveDir: () => h.directory, getMainWindow: () => window,
+            net: { fetch: () => { throw new Error('Network calls are forbidden in this test'); } } });
+        t.after(() => services.close());
+        const context = { id: 'internal', projectId: 'original', attachments: [] };
+        assert.deepEqual(await services.runtime.executeTool(context, 'flow_canvas.model.list', {}),
+            await h.bridge.agentExecutor('flow_canvas.model.list'));
+        const run = { id: 'integration', projectId: 'original', steps: [] };
+        run.steps = (await services.runtime.prepareGraph(run, { nodeIds: ['image'] })).steps;
+        entry(h, 'midjourney.mj-imagine').options.resolutionTier = { type: 'tier', values: ['2K'], default: '2K' };
+        assert.deepEqual((await h.bridge.agentExecutor('flow_canvas.model.list'))[0].resolutions, ['2K']);
+        await assert.rejects(services.runtime.executeStep(run.steps[0], run, { checkpoint() {} }), { code: 'INVALID_RESOLUTION' });
+        assert.equal(h.requests.length, 0);
     });
 });
 
 describe('AgentGeneration execution', () => {
+    for (const kind of ['image', 'video']) {
+        test(`${kind} Agent landing shares stack state while retaining provenance and completed-output reuse`, async t => {
+            const h = await setup(t, { items: [op('source', kind)] });
+            const run = h.plan(['source']);
+            const filePaths = [await h.file(`one.${kind === 'image' ? 'png' : 'mp4'}`), await h.file(`two.${kind === 'image' ? 'png' : 'mp4'}`)];
+            const images = filePaths.map((filePath, index) => ({ filePath, candidateIndex: index ? 4 : 2,
+                naturalWidth: index ? 900 : 1800, naturalHeight: index ? 1800 : 900 }));
+            let pending, submissions = 0;
+            h.bridge[kind === 'image' ? 'generateImageFromRenderer' : 'generateVideoFromRenderer'] = async () => {
+                submissions++;
+                const node = h.projects.original.items.find(item => item.id === `result-${run.steps[0].id}`);
+                node.runError = 'earlier failure';
+                pending = copy(node);
+                return { filePaths, images, mediaType: kind, taskId: 'completed-task' };
+            };
+            const result = await h.execute(run.steps[0], run);
+            const actual = h.projects.original.items.find(item => item.id === result.nodeIds[0]);
+            for (const item of images) applyGeneratorStackResult(pending, {
+                _resultFilePath: item.filePath, _resultItem: { ...item, mediaType: kind, generation: actual.generation }
+            }, { generation: actual.generation, completed: true });
+            Object.assign(pending, { filePath: filePaths[0], mediaType: kind });
+            assert.deepEqual(actual, pending);
+            assert.deepEqual([actual.width, actual.height], kind === 'image' ? [264, 132] : [320, 160]);
+            assert.deepEqual(actual.resultItems.map(item => item.candidateIndex), [2, 4]);
+            assert.equal(actual.generation.agentRunId, run.id);
+            assert.equal(actual.generation.taskId, 'completed-task');
+            assert.equal(actual.runError, '');
+            assert.equal((await h.execute(run.steps[0], run)).reused, true);
+            assert.equal(submissions, 1);
+            assert.deepEqual(h.projects.original.items.find(item => item.id === result.nodeIds[0]), actual);
+        });
+    }
+
+    test('terminal bridge errors retain UPSTREAM_TASK_FAILED and their original details', async t => {
+        for (const [nodeType, resume] of [['image', false], ['video', false], ['image', true], ['video', true]]) {
+            const h = await setup(t, { items: [op('target', nodeType)] });
+            const run = h.plan(['target']);
+            const failure = Object.assign(new Error('Remote task failed permanently'), {
+                code: 'UPSTREAM_TASK_FAILED', taskId: 'remote-failed', details: { terminal: true }
+            });
+            if (resume) run.steps[0].remoteTaskId = failure.taskId;
+            const method = `${resume ? 'resume' : 'generate'}${nodeType === 'image' ? 'Image' : 'Video'}FromRenderer`;
+            h.bridge[method] = async () => { throw failure; };
+            await assert.rejects(h.execute(run.steps[0], run, { resume }), actual => actual === failure
+                && actual.code === 'UPSTREAM_TASK_FAILED' && actual.details.terminal === true);
+        }
+    });
+
     test('capsules use upload order and keep raw drafts through Agent generation and reuse', async t => {
         const h = await setup(t);
         const first = await h.file('first.png'), second = await h.file('second.png');

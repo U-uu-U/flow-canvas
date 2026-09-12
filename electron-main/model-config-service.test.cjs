@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
     fetchModelConfig,
+    createEffectiveModelConfigReader,
     isAllowedModelConfigUrl,
     validateModelConfig
 } = require('./model-config-service.cjs');
@@ -111,4 +112,71 @@ test('schema 文件本身是合法 JSON 且包含 models 定义', () => {
     assert.equal(schema.type, 'object');
     assert.ok(schema.properties.models);
     assert.ok(schema.definitions.model);
+});
+
+test('effective reader follows the renderer cache, remote apply, URL switch and builtin reset', async t => {
+    const { createModelConfigStore, readModelConfig, MODEL_CONFIG_CACHE_KEY, MODEL_CONFIG_URL_KEY } = await import('../src/model-config.js');
+    const { DEFAULT_MODEL_CONFIG } = await import('../src/model-config-default.js');
+    const storage = new Map([
+        [MODEL_CONFIG_URL_KEY, 'https://old.example/config'],
+        [MODEL_CONFIG_CACHE_KEY, JSON.stringify({ config: validConfig, url: 'https://old.example/config', fetchedAt: 123 })]
+    ]);
+    let response = { ok: true, raw: { ...validConfig, revision: 8 }, fetchedAt: 234 };
+    const store = createModelConfigStore({ storage: {
+        getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)
+    }, windowRef: null, loadRemote: async () => response });
+    store.start({ refreshOnStart: false });
+    t.after(() => store.stop());
+    const window = { isDestroyed: () => false, webContents: { executeJavaScript: async code =>
+        require('node:vm').runInNewContext(code, {
+            __flowCanvasGetModelConfigSnapshot: () => ({ config: store.getConfig(), status: store.getStatus() })
+        }) } };
+    const read = createEffectiveModelConfigReader({ getMainWindow: () => window });
+    assert.equal((await read()).revision, 7);
+    await store.refresh({ force: true });
+    assert.equal((await read()).revision, 8);
+    assert.equal(JSON.parse(storage.get(MODEL_CONFIG_CACHE_KEY)).config.revision, 8);
+    store.setUrl('https://new.example/config');
+    assert.deepEqual(await read(), store.getConfig(), 'URL selection alone must not activate a different config');
+    response = { ok: false, error: 'offline' };
+    await store.refresh({ force: true });
+    assert.equal((await read()).revision, 8);
+    store.setUrl('');
+    assert.equal((await read()).revision, 8, 'disabling updates retains the actually applied cache');
+    store.reset();
+    assert.deepEqual(await read(), readModelConfig(DEFAULT_MODEL_CONFIG));
+    assert.equal(storage.has(MODEL_CONFIG_CACHE_KEY), false);
+    const isolated = await read();
+    isolated.models[0].options = {};
+    assert.deepEqual(await read(), store.getConfig(), 'Agent cannot mutate renderer CONFIG');
+});
+
+test('fetching a verified CONFIG does not activate it ahead of the renderer', async () => {
+    const window = { isDestroyed: () => false, webContents: { executeJavaScript: async () => ({ config: validConfig }) } };
+    const read = createEffectiveModelConfigReader({ getMainWindow: () => window });
+    const response = await fetchModelConfig({ url: 'https://example.invalid/config',
+        fetchImpl: async () => fakeResponse({ ...validConfig, revision: 999 }) });
+    assert.equal(response.config.revision, 999);
+    assert.equal((await read()).revision, 7);
+});
+
+test('unavailable or invalid live stores never silently revert Agent to builtin CONFIG', async () => {
+    let snapshot = null;
+    let window = { isDestroyed: () => false, webContents: { executeJavaScript: async () => snapshot } };
+    const read = createEffectiveModelConfigReader({ getMainWindow: () => window });
+    await assert.rejects(read(), { code: 'MODEL_CONFIG_UNAVAILABLE' });
+    snapshot = { config: validConfig };
+    assert.equal((await read()).revision, 7);
+    snapshot = { config: { schemaVersion: 1, models: [] } };
+    await assert.rejects(read(), { code: 'MODEL_CONFIG_UNAVAILABLE' });
+    window = null;
+    await assert.rejects(read(), { code: 'MODEL_CONFIG_UNAVAILABLE' });
+});
+
+test('a renderer replaced during snapshot acquisition cannot supply a stale CONFIG', async () => {
+    let current = { isDestroyed: () => false, webContents: { executeJavaScript: async () => {
+        current = { isDestroyed: () => false };
+        return { config: validConfig };
+    } } };
+    await assert.rejects(createEffectiveModelConfigReader({ getMainWindow: () => current })(), { code: 'MODEL_CONFIG_UNAVAILABLE' });
 });

@@ -231,6 +231,110 @@ test('missing subscription uses polling and disposal stops late results', async 
     assert.equal(client.runs.size, 0);
 });
 
+for (const action of ['confirm', 'resume']) {
+    const run = snapshot({ status: action === 'confirm' ? 'awaiting_confirmation' : 'failed',
+        plan: { version: 'saved-plan' } });
+    test(`${action} waits for board flush and holds its action lock until execution finishes`, async () => {
+        const calls = [];
+        let finishFlush;
+        const client = new AgentRuntimeClient({
+            [action]: async args => { calls.push(args); },
+            get: async () => run
+        }, { beforeExecute: () => new Promise(resolve => { finishFlush = resolve; }) });
+        client.accept(run);
+        const pending = client.act(run.id, action);
+        assert.equal(client.actions.has(run.id), true);
+        assert.equal(client.confirmedVersions.has(run.id), false);
+        await client.act(run.id, action);
+        assert.equal(calls.length, 0);
+        finishFlush();
+        await pending;
+        assert.deepEqual(calls, [action === 'confirm' ? { runId: run.id, planVersion: run.plan.version } : { runId: run.id }]);
+        assert.equal(client.actions.size, 0);
+        assert.equal(client.confirmedVersions.has(run.id), action === 'confirm');
+        client.dispose();
+    });
+
+    for (const failure of ['false', 'throw', 'reject']) {
+        test(`${action} flush ${failure} blocks execution, releases the action and permits another attempt`, async () => {
+            const calls = [];
+            const saveError = new Error('Board save failed');
+            let shouldFail = true;
+            const client = new AgentRuntimeClient({
+                [action]: async args => { calls.push(args); },
+                get: async () => run
+            }, { beforeExecute: () => {
+                if (!shouldFail) return true;
+                if (failure === 'false') return Promise.resolve(false);
+                if (failure === 'throw') throw saveError;
+                return Promise.reject(saveError);
+            } });
+            client.accept(run);
+            await assert.rejects(client.act(run.id, action), failure === 'false' ? /保存失败/ : saveError);
+            assert.equal(calls.length, 0);
+            assert.equal(client.actions.size, 0);
+            assert.equal(client.confirmedVersions.has(run.id), false);
+            shouldFail = false;
+            await client.act(run.id, action);
+            assert.equal(calls.length, 1);
+            assert.equal(client.actions.size, 0);
+            client.dispose();
+        });
+    }
+}
+
+test('cancel, revise and retry do not depend on the board flush hook', async () => {
+    const calls = [];
+    const run = snapshot({ status: 'awaiting_confirmation', plan: { version: 'pending-plan' } });
+    const client = new AgentRuntimeClient({
+        cancel: async () => { calls.push('cancel'); },
+        revise: async () => { calls.push('revise'); },
+        retry: async () => { calls.push('retry'); },
+        get: async () => client.runs.get(run.id)
+    }, { beforeExecute: () => { assert.fail('Only execution requires a flush'); } });
+    client.accept(run);
+    await client.act(run.id, 'cancel');
+    await client.act(run.id, 'revise', 'Change the plan');
+    client.accept({ ...run, status: 'failed', lastSeq: 1 });
+    await client.act(run.id, 'retry');
+    assert.deepEqual(calls, ['cancel', 'revise', 'retry']);
+    client.dispose();
+});
+
+test('disposing during a flush prevents the delayed execution and clears the action', async () => {
+    let finishFlush;
+    const client = new AgentRuntimeClient({
+        confirm: () => { assert.fail('Disposed client must not execute'); }
+    }, { beforeExecute: () => new Promise(resolve => { finishFlush = resolve; }) });
+    client.accept(snapshot({ status: 'awaiting_confirmation', plan: { version: 1 } }));
+    const pending = client.act('run-1', 'confirm');
+    client.dispose();
+    finishFlush(true);
+    await pending;
+    assert.equal(client.actions.size, 0);
+    assert.equal(client.confirmedVersions.size, 0);
+});
+
+test('unresolved remote tasks offer recovery without a new generation retry', () => {
+    for (const status of ['failed', 'partial_failed']) {
+        for (const step of [
+            { status: 'submitted', remoteTaskId: 'existing' },
+            { status: 'failed', remoteTaskId: 'existing' },
+            { status: 'failed', remoteTaskId: 'existing', confirmedFailure: false },
+            { status: 'unknown' }
+        ]) {
+            assert.deepEqual(runtimeActions(snapshot({ status, steps: [step] })), ['resume']);
+        }
+        for (const step of [
+            { status: 'failed' },
+            { status: 'failed', remoteTaskId: 'existing', confirmedFailure: true },
+            { status: 'completed', remoteTaskId: 'finished' }
+        ]) {
+            assert.deepEqual(runtimeActions(snapshot({ status, steps: [step] })), ['resume', 'retry']);
+        }
+    }
+});
+
 test('retry failed items is a separate request and never automatically confirms its new plan', async () => {
     const calls = [];
     const pending = snapshot({ status: 'awaiting_confirmation', lastSeq: 8,

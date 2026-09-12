@@ -117,12 +117,20 @@ export const DEFAULT_MODEL_CONFIG = {
         },
         "referenceVideos": {
             "label": "参考视频",
-            "param": "reference_videos",
+            "param": [
+                "reference_videos",
+                "video_urls",
+                "videos"
+            ],
             "type": "references"
         },
         "referenceAudios": {
             "label": "参考音频",
-            "param": "reference_audios",
+            "param": [
+                "reference_audios",
+                "audio_urls",
+                "audios"
+            ],
             "type": "references"
         },
         "webSearch": {
@@ -985,6 +993,285 @@ export const DEFAULT_MODEL_CONFIG = {
                 "concurrency": 1
             },
             "notes": "4-30秒整数；当前常用720p；最多10张参考图；比例支持adaptive/16:9/9:16/1:1/4:3/3:4"
+        },
+        {
+            "id": "ravenhash-video.hm-seedance-933",
+            "label": "HM-Seedance V2.0 933",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "主播 HM 933",
+            "priority": 120,
+            "match": {
+                "model": [
+                    "^seedance_v2\\.0-933$"
+                ]
+            },
+            "parameters": {
+                "accepts": [
+                    "model",
+                    "prompt",
+                    "seconds",
+                    "ratio",
+                    "resolution",
+                    "image_urls",
+                    "video_urls",
+                    "audio_urls"
+                ],
+                "required": [
+                    "model",
+                    "prompt"
+                ]
+            },
+            "options": {
+                "duration": {
+                    "type": "range",
+                    "min": 4,
+                    "max": 15,
+                    "integer": true,
+                    "unit": "second",
+                    "default": 15
+                },
+                "ratio": {
+                    "type": "enum",
+                    "values": [
+                        "adaptive",
+                        "16:9",
+                        "9:16",
+                        "1:1",
+                        "4:3",
+                        "3:4"
+                    ],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": {
+                    "type": "enum",
+                    "values": [
+                        "720p"
+                    ],
+                    "default": "720p"
+                }
+            },
+            "capabilities": {
+                "referenceImages": {
+                    "supported": true,
+                    "max": 9
+                },
+                "referenceVideos": {
+                    "supported": true,
+                    "max": 3
+                },
+                "referenceAudios": {
+                    "supported": true,
+                    "max": 3
+                },
+                "face": {
+                    "supported": false,
+                    "reason": "上游标注卡脸，人脸参考受限"
+                },
+                "webSearch": {
+                    "supported": false
+                },
+                "cameraFixed": {
+                    "supported": false
+                },
+                "generatedAudio": {
+                    "supported": false
+                },
+                "watermark": {
+                    "supported": false
+                }
+            },
+            "prompt": {
+                "required": true
+            },
+            "notes": "2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-15秒、9图/3视频/3音频；固定按次计费；RavenHash售价CNY6.5/次"
+        },
+        {
+            "id": "ravenhash-video.hm-seedance-101010",
+            "label": "HM-Seedance V2.5 101010",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "主播 HM 101010",
+            "priority": 120,
+            "match": {
+                "model": [
+                    "^seedance_v2\\.5-101010$"
+                ]
+            },
+            "parameters": {
+                "accepts": [
+                    "model",
+                    "prompt",
+                    "seconds",
+                    "ratio",
+                    "resolution",
+                    "image_urls",
+                    "video_urls",
+                    "audio_urls"
+                ],
+                "required": [
+                    "model",
+                    "prompt"
+                ]
+            },
+            "options": {
+                "duration": {
+                    "type": "range",
+                    "min": 4,
+                    "max": 30,
+                    "integer": true,
+                    "unit": "second",
+                    "default": 30
+                },
+                "ratio": {
+                    "type": "enum",
+                    "values": [
+                        "adaptive",
+                        "16:9",
+                        "9:16",
+                        "1:1",
+                        "4:3",
+                        "3:4"
+                    ],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": {
+                    "type": "enum",
+                    "values": [
+                        "720p"
+                    ],
+                    "default": "720p"
+                }
+            },
+            "capabilities": {
+                "referenceImages": {
+                    "supported": true,
+                    "max": 10
+                },
+                "referenceVideos": {
+                    "supported": true,
+                    "max": 10
+                },
+                "referenceAudios": {
+                    "supported": true,
+                    "max": 10
+                },
+                "face": {
+                    "supported": false,
+                    "reason": "上游标注卡脸，人脸参考受限"
+                },
+                "webSearch": {
+                    "supported": false
+                },
+                "cameraFixed": {
+                    "supported": false
+                },
+                "generatedAudio": {
+                    "supported": false
+                },
+                "watermark": {
+                    "supported": false
+                }
+            },
+            "prompt": {
+                "required": true
+            },
+            "notes": "2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-30秒、10图/10视频/10音频；固定按次计费；RavenHash售价CNY7/次"
+        },
+        {
+            "id": "ravenhash-video.hm-seedance-301010",
+            "label": "HM-Seedance V2.5 301010",
+            "kind": "video",
+            "channel": "RavenHash视频",
+            "route": "主播 HM 301010",
+            "priority": 120,
+            "match": {
+                "model": [
+                    "^seedance_v2\\.5-301010$"
+                ]
+            },
+            "parameters": {
+                "accepts": [
+                    "model",
+                    "prompt",
+                    "seconds",
+                    "ratio",
+                    "resolution",
+                    "image_urls",
+                    "video_urls",
+                    "audio_urls"
+                ],
+                "required": [
+                    "model",
+                    "prompt"
+                ]
+            },
+            "options": {
+                "duration": {
+                    "type": "range",
+                    "min": 4,
+                    "max": 30,
+                    "integer": true,
+                    "unit": "second",
+                    "default": 30
+                },
+                "ratio": {
+                    "type": "enum",
+                    "values": [
+                        "adaptive",
+                        "16:9",
+                        "9:16",
+                        "1:1",
+                        "4:3",
+                        "3:4"
+                    ],
+                    "default": "adaptive",
+                    "allowAuto": true
+                },
+                "resolutionTier": {
+                    "type": "enum",
+                    "values": [
+                        "720p"
+                    ],
+                    "default": "720p"
+                }
+            },
+            "capabilities": {
+                "referenceImages": {
+                    "supported": true,
+                    "max": 30
+                },
+                "referenceVideos": {
+                    "supported": true,
+                    "max": 10
+                },
+                "referenceAudios": {
+                    "supported": true,
+                    "max": 10
+                },
+                "face": {
+                    "supported": false,
+                    "reason": "上游标注卡脸，人脸参考受限"
+                },
+                "webSearch": {
+                    "supported": false
+                },
+                "cameraFixed": {
+                    "supported": false
+                },
+                "generatedAudio": {
+                    "supported": false
+                },
+                "watermark": {
+                    "supported": false
+                }
+            },
+            "prompt": {
+                "required": true
+            },
+            "notes": "2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-30秒、30图/10视频/10音频；固定按次计费；RavenHash售价CNY10/次；成本不是售价"
         },
         {
             "id": "ravenhash-video.seedance-2.0",

@@ -20,12 +20,17 @@ const { DEFAULT_MCP_CONFIG } = require('../shared/plan-service-core.cjs');
 const IS_MAC = process.platform === 'darwin';
 const IS_WINDOWS = process.platform === 'win32';
 const DEV_RENDERER_ORIGIN = 'http://127.0.0.1:15321';
+const MAIN_WINDOW_WIDTH = 1400;
+const MAIN_WINDOW_HEIGHT = 900;
+const SPLASH_MIN_DISPLAY_MS = 1500;
 
 // Some OpenAI-compatible relays close long-running HTTP/2 streams after completing the job.
 // Keep Electron's proxy-aware network stack, but force HTTP/1.1 for reliable response delivery.
 app.commandLine.appendSwitch('disable-http2');
 
 let mainWindow = null;
+let splashWindow = null;
+let splashMinimumDisplay = Promise.resolve();
 let orbWindow = null;
 let orbPosition = null;
 let orbDragTimer = null;
@@ -39,6 +44,37 @@ let browserSyncService = null;
 let apiConfigStore = null;
 let agentServices = null;
 let mediaPreviewWasFullScreen = null;
+// 文件移动会让 chokidar 先后报告旧路径 unlink、新路径 add。
+// 这两条事件由 moveFilesToFolder 的结果统一处理，不能再让 renderer 当成真实删除/新增。
+const suppressedMoveFileChanges = new Map();
+
+function normalizeMoveFilePath(filePath) {
+    const value = String(filePath || '').trim();
+    if (!value) return '';
+    const normalized = path.normalize(value);
+    return IS_WINDOWS ? normalized.toLowerCase() : normalized;
+}
+
+function suppressMoveFileChange(filePath, duration = 5000) {
+    const key = normalizeMoveFilePath(filePath);
+    if (!key) return;
+    const expiresAt = Date.now() + duration;
+    suppressedMoveFileChanges.set(key, expiresAt);
+    setTimeout(() => {
+        if (suppressedMoveFileChanges.get(key) === expiresAt) suppressedMoveFileChanges.delete(key);
+    }, duration + 250);
+}
+
+function isSuppressedMoveFileChange(filePath) {
+    const key = normalizeMoveFilePath(filePath);
+    const expiresAt = suppressedMoveFileChanges.get(key);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+        suppressedMoveFileChanges.delete(key);
+        return false;
+    }
+    return true;
+}
 
 const isDev = !app.isPackaged;
 
@@ -140,11 +176,13 @@ protocol.registerSchemesAsPrivileged([
 // ── 窗口创建 ───────────────────────────────────────────
 function createWindow() {
     mainWindow = new BrowserWindow({
-        width: 1400,
-        height: 900,
+        width: MAIN_WINDOW_WIDTH,
+        height: MAIN_WINDOW_HEIGHT,
         minWidth: 800,
         minHeight: 600,
         backgroundColor: '#0f0f14',
+        show: false,
+        icon: path.join(__dirname, 'assets/app-icon.png'),
         frame: IS_MAC,
         titleBarStyle: IS_MAC ? 'hiddenInset' : 'hidden',
         ...(IS_MAC
@@ -162,6 +200,40 @@ function createWindow() {
             nodeIntegration: false,
             sandbox: false
         }
+    });
+
+    const nextMainWindow = mainWindow;
+    const startupSplash = splashWindow;
+    const minimumDisplay = splashMinimumDisplay;
+    let mainWindowRevealed = false;
+    const revealMainWindow = () => {
+        if (mainWindowRevealed || nextMainWindow.isDestroyed()) return;
+        mainWindowRevealed = true;
+        void minimumDisplay.then(() => {
+            if (isQuitting || nextMainWindow.isDestroyed() || mainWindow !== nextMainWindow) return;
+            nextMainWindow.show();
+            if (startupSplash && !startupSplash.isDestroyed()) startupSplash.close();
+        });
+    };
+
+    mainWindow.once('ready-to-show', revealMainWindow);
+    // ready-to-show may not fire for a hidden window on some Electron/macOS builds.
+    mainWindow.webContents.once('did-finish-load', revealMainWindow);
+    const revealTimeout = setTimeout(() => {
+        // A splash that never painted must not block the existing startup fallback.
+        if (startupSplash && !startupSplash.isDestroyed() && !startupSplash.isVisible()) startupSplash.close();
+        if (!mainWindowRevealed) {
+            console.warn('[Main] Main window reveal timed out; showing it anyway.');
+            revealMainWindow();
+        }
+    }, 12000);
+    revealTimeout.unref?.();
+    nextMainWindow.once('show', () => clearTimeout(revealTimeout));
+    nextMainWindow.once('closed', () => clearTimeout(revealTimeout));
+
+    mainWindow.once('show', () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.focus();
     });
 
     // 拦截外部拖拽图片导致的页面导航，自动下载图片并通知渲染进程
@@ -239,6 +311,51 @@ function createWindow() {
             orbWindow.destroy();
         }
     });
+}
+
+function createSplashWindow() {
+    if (splashWindow && !splashWindow.isDestroyed()) return splashWindow;
+
+    const nextSplashWindow = new BrowserWindow({
+        width: MAIN_WINDOW_WIDTH,
+        height: MAIN_WINDOW_HEIGHT,
+        useContentSize: true,
+        center: true,
+        frame: false,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        show: false,
+        backgroundColor: '#f5f6fa',
+        icon: path.join(__dirname, 'assets/app-icon.png'),
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true
+        }
+    });
+    splashWindow = nextSplashWindow;
+    let finishMinimumDisplay;
+    let minimumDisplayTimer = null;
+    splashMinimumDisplay = new Promise(resolve => { finishMinimumDisplay = resolve; });
+    nextSplashWindow.once('show', () => {
+        minimumDisplayTimer = setTimeout(finishMinimumDisplay, SPLASH_MIN_DISPLAY_MS);
+    });
+    nextSplashWindow.once('ready-to-show', () => {
+        if (!nextSplashWindow.isDestroyed()) nextSplashWindow.show();
+    });
+    nextSplashWindow.on('closed', () => {
+        clearTimeout(minimumDisplayTimer);
+        finishMinimumDisplay();
+        if (splashWindow === nextSplashWindow) splashWindow = null;
+    });
+    void nextSplashWindow.loadFile(path.join(__dirname, 'splash.html')).catch(error => {
+        console.warn('[Main] Splash screen failed to load:', error.message);
+        if (!nextSplashWindow.isDestroyed()) nextSplashWindow.close();
+    });
+    return nextSplashWindow;
 }
 
 const ORB_WINDOW_SIZE = 80;
@@ -424,6 +541,10 @@ async function initServices() {
     browserSyncService = new BrowserSyncService(store);
     thumbnailer = new Thumbnailer();
     watcher = new Watcher(store, (event, filePath) => {
+        if (isSuppressedMoveFileChange(filePath)) {
+            console.log('[Watcher] 忽略剪切产生的预期文件事件:', event, filePath);
+            return;
+        }
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('file-change', { event, filePath });
         }
@@ -1422,7 +1543,16 @@ ipcMain.handle('folder:unwatch', (_, folderPath) => {
 });
 
 ipcMain.handle('folder:moveFiles', async (_, filePaths, targetDir) => {
-    return await moveFilesToFolder(filePaths, targetDir);
+    const sources = (Array.isArray(filePaths) ? filePaths : [filePaths])
+        .filter(Boolean)
+        .map(filePath => path.resolve(String(filePath)));
+    sources.forEach(filePath => suppressMoveFileChange(filePath));
+    const result = await moveFilesToFolder(sources, targetDir);
+    (result?.moved || []).forEach(({ oldPath, newPath }) => {
+        suppressMoveFileChange(oldPath);
+        suppressMoveFileChange(newPath);
+    });
+    return result;
 });
 
 ipcMain.handle('folder:copyFiles', async (_, filePaths, targetDir) => {
@@ -2352,38 +2482,12 @@ ipcMain.handle('mcp:image:compress-references', async (_, body) => {
     }
 });
 
-ipcMain.handle('mcp:video:compress-references', async (_, body) => {
-    try {
-        if (!flowCanvasBridge) {
-            return { success: false, error: 'Flow Canvas bridge is not ready' };
-        }
-        return { success: true, ...(await flowCanvasBridge.compressVideoReferenceImagesFromRenderer(body || {})) };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
 ipcMain.handle('mcp:video:generate', async (_, body) => {
     try {
         if (!flowCanvasBridge) {
             return { success: false, error: 'Flow Canvas bridge is not ready' };
         }
         return { success: true, ...(await flowCanvasBridge.generateVideoFromRenderer(body || {})) };
-    } catch (err) {
-        return {
-            success: false,
-            canceled: err?.code === 'GENERATION_CANCELED' || err?.name === 'AbortError',
-            error: err.message
-        };
-    }
-});
-
-ipcMain.handle('mcp:video:resume', async (_, body) => {
-    try {
-        if (!flowCanvasBridge) {
-            return { success: false, error: 'Flow Canvas bridge is not ready' };
-        }
-        return { success: true, ...(await flowCanvasBridge.resumeVideoFromRenderer(body || {})) };
     } catch (err) {
         return {
             success: false,
@@ -3121,6 +3225,7 @@ function startApplication() {
 
         // 监听本地文件加载
         protocol.handle('local-res', handleLocalResourceRequest);
+        createSplashWindow();
         await initServices();
 
         if (!mainWindow || mainWindow.isDestroyed()) createWindow();
@@ -3154,6 +3259,26 @@ ipcMain.handle('mcp:generation:recover', async (event, body) => {
     } catch (error) {
         return { success: false, error: error.message, code: error.code,
             canceled: error.code === 'GENERATION_CANCELED' || error.name === 'AbortError' };
+    }
+});
+
+ipcMain.handle('mcp:generation:land-result', async (event, body) => {
+    if (!isCurrentMainWindowSender(event)) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge?.landGenerationResult) throw new Error('原项目落图服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.landGenerationResult(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code };
+    }
+});
+
+ipcMain.handle('mcp:generation:node-status', async (event, body) => {
+    if (!isCurrentMainWindowSender(event)) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge?.updateGenerationNodeStatus) throw new Error('原项目状态服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.updateGenerationNodeStatus(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code };
     }
 });
 

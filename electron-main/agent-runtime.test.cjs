@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { AgentRuntime } = require('./agent-runtime.cjs');
 const { AgentRunStore } = require('./agent-run-store.cjs');
+const { pollOpenAiImageTask, pollOpenAiVideoTask } = require('./mcp-bridge.js');
 
 const provider = { id: 'text-provider', type: 'openai', endpoint: 'https://relay.example/v1',
     model: 'mock-model', apiKey: 'sk-runtime-fixture-secret-123456' };
@@ -567,6 +568,146 @@ test('generation checkpoints persist the remote ID before a polling failure and 
     h.runtime.resume({ runId: id });
     assert.equal((await h.idle(id)).status, 'completed');
     assert.equal(attempt, 2);
+});
+
+for (const kind of ['image', 'video']) {
+    for (const status of [400, 401, 403, 404, 413, 422, 429, 500]) {
+        test(`${kind} real poll HTTP ${status} preserves its remote task through restart and refuses regeneration`, async t => {
+            let available = false;
+            let submissions = 0;
+            let queries = 0;
+            const executeStep = async (step, run, context) => {
+                if (!context.resume) {
+                    submissions++;
+                    context.checkpoint({ status: 'submitting' });
+                    context.checkpoint({ status: 'submitted', remoteTaskId: 'remote-poll' });
+                }
+                assert.equal(step.remoteTaskId, 'remote-poll');
+                const poll = kind === 'image' ? pollOpenAiImageTask : pollOpenAiVideoTask;
+                const output = await poll(`https://api.test/v1/${kind === 'image' ? 'images' : 'video'}/generations`,
+                    'fixture-key', step.remoteTaskId, { status: 'pending' }, {
+                        signal: context.signal, wait: async () => {}, fetchTask: async (url, options) => {
+                            assert.equal(options.method, 'GET');
+                            assert.ok(url.includes('remote-poll'));
+                            assert.ok(++queries < 100, 'Mock polling must terminate');
+                            const payload = available
+                                ? kind === 'image' ? { status: 'completed', data: [{ url: 'https://cdn.test/output.png' }] }
+                                    : { status: 'completed', video_url: 'https://cdn.test/output.mp4' }
+                                : { error: { message: 'generation query failed' } };
+                            return { response: { status: available ? 200 : status, ok: available,
+                                headers: new Headers({ 'content-type': 'application/json' }) }, text: JSON.stringify(payload) };
+                        }
+                    });
+                assert.equal(output.taskId, 'remote-poll');
+                return { nodeIds: ['recovered-output'] };
+            };
+            const h = harness(t, { executeStep });
+            const { id } = await h.runtime.propose({ projectId: 'a', toolName: 'flow_canvas.graph.run',
+                input: { nodeIds: ['image-1'], summary: 'Mock generation' } });
+            h.confirm(id);
+            const failed = await h.idle(id);
+            assert.equal(failed.status, 'failed');
+            assert.match(failed.error, new RegExp(String(status)));
+            assert.equal(failed.steps[0].status, 'submitted');
+            assert.equal(failed.steps[0].confirmedFailure, false);
+            assert.equal(failed.steps[0].remoteTaskId, 'remote-poll');
+            if (status === 429) assert.equal(queries, 25);
+            assert.throws(() => h.runtime.retry({ runId: id }), { code: 'SUBMISSION_UNKNOWN' });
+            assert.equal(h.disk(id).plan.version, failed.plan.version);
+
+            const recovered = harness(t, { initialRuns: [h.disk(id)], executeStep });
+            assert.throws(() => recovered.runtime.retry({ runId: id }), { code: 'SUBMISSION_UNKNOWN' });
+            available = true;
+            recovered.runtime.resume({ runId: id });
+            const result = await recovered.idle(id);
+            assert.equal(result.status, 'completed');
+            assert.equal(result.steps[0].remoteTaskId, 'remote-poll');
+            assert.equal(result.steps[0].error, null);
+            assert.equal(recovered.stepCalls[0].context.resume, true);
+            assert.equal(submissions, 1);
+            assert.equal(h.requests.length + recovered.requests.length, 0);
+        });
+    }
+}
+
+test('legacy failed steps with a remote ID must be queried before a new generation is allowed', async t => {
+    const seed = recoveryRun({ status: 'failed', error: 'HTTP 429 generation query failed' }, { status: 'failed', external: true });
+    const h = harness(t, { initialRuns: [seed] });
+    assert.throws(() => h.runtime.retry({ runId: seed.id }), { code: 'SUBMISSION_UNKNOWN' });
+    assert.equal(h.disk(seed.id).steps[0].remoteTaskId, 'remote-existing');
+    h.runtime.resume({ runId: seed.id });
+    assert.equal((await h.idle(seed.id)).status, 'completed');
+    assert.equal(h.stepCalls.length, 1);
+    assert.equal(h.stepCalls[0].context.resume, true);
+    assert.equal(h.stepCalls[0].step.remoteTaskId, 'remote-existing');
+});
+
+for (const marker of [{ code: 'UPSTREAM_TASK_FAILED' }, { confirmedFailure: true }]) {
+    test(`explicit terminal task failure ${Object.keys(marker)[0]} survives restart and requires new confirmation`, async t => {
+        const seed = recoveryRun({}, { external: true });
+        const h = harness(t, { initialRuns: [seed], executeStep: async () => {
+            throw Object.assign(new Error('Upstream task rejected the requested content'), marker);
+        } });
+        h.runtime.resume({ runId: seed.id });
+        const failed = await h.idle(seed.id);
+        assert.equal(failed.steps[0].status, 'failed');
+        assert.equal(failed.steps[0].confirmedFailure, true);
+        assert.equal(failed.steps[0].remoteTaskId, 'remote-existing');
+
+        const recovered = harness(t, { initialRuns: [h.disk(seed.id)] });
+        recovered.runtime.resume({ runId: seed.id });
+        const stillFailed = await recovered.idle(seed.id);
+        assert.equal(stillFailed.status, 'failed');
+        assert.equal(recovered.stepCalls.length, 0);
+        const plan = recovered.runtime.retry({ runId: seed.id });
+        assert.equal(plan.status, 'awaiting_confirmation');
+        assert.notEqual(plan.plan.version, seed.plan.version);
+        assert.equal(plan.plan.steps[0].remoteTaskId, null);
+        assert.equal(plan.plan.steps[0].confirmedFailure, false);
+        assert.equal(plan.steps[0].remoteTaskId, 'remote-existing');
+        assert.equal(recovered.stepCalls.length, 0);
+        recovered.confirm(seed.id);
+        assert.equal((await recovered.idle(seed.id)).status, 'completed');
+        assert.equal(recovered.stepCalls.length, 1);
+        assert.equal(recovered.stepCalls[0].context.resume, false);
+    });
+}
+
+for (const status of [400, 401, 403, 404, 413, 422, 429]) {
+    test(`definitive HTTP ${status} submission rejection without a remote ID can be reconfirmed`, async t => {
+        const h = harness(t, { executeStep: async (_step, _run, context) => {
+            context.checkpoint({ status: 'submitting' });
+            throw new Error(`HTTP ${status}: request rejected`);
+        } });
+        const { id } = await h.runtime.propose({ projectId: 'a', toolName: 'flow_canvas.graph.run',
+            input: { nodeIds: ['image-1'], summary: 'Mock generation' } });
+        h.confirm(id);
+        const failed = await h.idle(id);
+        assert.equal(failed.steps[0].status, 'failed');
+        assert.equal(failed.steps[0].confirmedFailure, false);
+        assert.ok(!failed.steps[0].remoteTaskId);
+        h.runtime.resume({ runId: id });
+        await h.idle(id);
+        assert.equal(h.stepCalls.length, 1);
+        const retry = h.runtime.retry({ runId: id });
+        assert.equal(retry.status, 'awaiting_confirmation');
+        assert.notEqual(retry.plan.version, failed.plan.version);
+        assert.equal(h.stepCalls.length, 1);
+    });
+}
+
+test('an uncertain submission without a remote ID cannot be resumed or retried', async t => {
+    const h = harness(t, { executeStep: async (_step, _run, context) => {
+        context.checkpoint({ status: 'submitting' });
+        throw new Error('HTTP 503: generation query failed');
+    } });
+    const { id } = await h.runtime.propose({ projectId: 'a', toolName: 'flow_canvas.graph.run',
+        input: { nodeIds: ['image-1'], summary: 'Mock generation' } });
+    h.confirm(id);
+    assert.equal((await h.idle(id)).steps[0].status, 'unknown');
+    assert.throws(() => h.runtime.resume({ runId: id }), { code: 'SUBMISSION_UNKNOWN' });
+    assert.throws(() => h.runtime.retry({ runId: id }), { code: 'SUBMISSION_UNKNOWN' });
+    assert.equal(h.stepCalls.length, 1);
 });
 
 test('canceling a submitted generation ignores a late completion without losing the saved remote ID', async t => {

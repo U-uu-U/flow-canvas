@@ -1,0 +1,30 @@
+<!-- IconaMoon 1.1 Regular, Figma QoyjTYOfgb83Xs9eg6CQvJ, page 168:1995.
+     Original exported geometry; colors inherit the application theme. -->
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 17V5H10L12 7H21V17C21 18.1046 20.1046 19 19 19H5C3.89543 19 3 18.1046 3 17Z"/>
+  </symbol>
+  <symbol id="search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 21L16.6569 16.6569M16.6569 16.6569C18.1046 15.2091 19 13.2091 19 11C19 6.58172 15.4183 3 11 3C6.58172 3 3 6.58172 3 11C3 15.4183 6.58172 19 11 19C13.2091 19 15.2091 18.1046 16.6569 16.6569Z"/>
+  </symbol>
+  <symbol id="library" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3.00012 17V5H10.0001L12.0001 7H21.0001V17C21.0001 18.1046 20.1047 19 19.0001 19H5.00012C3.89555 19 3.00012 18.1046 3.00012 17Z M5 19L12 12L19 19"/>
+    <rect x="7.5" y="9.5" width="0.01" height="0.01" stroke-width="3"/>
+  </symbol>
+  <symbol id="plan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 21C5.89543 21 5 20.1046 5 19V3H14L19 8V19C19 20.1046 18.1046 21 17 21H7Z M13 3V9H19 M9 13H15 M9 17H15"/>
+  </symbol>
+  <symbol id="settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="2"/>
+    <path d="M5.39855 5.87919C4.46882 6.88128 3.7937 8.0705 3.4006 9.34458L4.99991 10.2679C6.33324 11.0377 6.33324 12.9622 4.99991 13.732L3.39889 14.6564C3.5941 15.2864 3.86206 15.9047 4.20576 16.5C4.54945 17.0953 4.95088 17.6364 5.39888 18.1205L6.99994 17.1961C8.33327 16.4263 9.99994 17.3886 9.99994 18.9282L9.99994 20.775C11.2999 21.0716 12.6673 21.0815 14 20.7774L14 18.9283C14 17.3887 15.6667 16.4264 17 17.1962L18.6014 18.1208C19.5312 17.1187 20.2063 15.9295 20.5994 14.6554L19 13.732C17.6667 12.9622 17.6667 11.0377 19 10.2679L20.6011 9.34352C20.4059 8.7135 20.1379 8.09527 19.7942 7.49998C19.4505 6.90468 19.0491 6.36349 18.6011 5.87941L17 6.80377C15.6667 7.57357 14 6.61132 14 5.07172L14 3.22499C12.7001 2.92838 11.3326 2.91844 9.99994 3.22257L9.99994 5.0717C9.99994 6.6113 8.33327 7.57355 6.99994 6.80375L5.39855 5.87919Z"/>
+  </symbol>
+  <symbol id="history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5.63606 18.364C9.15077 21.8787 14.8493 21.8787 18.364 18.364C21.8787 14.8492 21.8787 9.15076 18.364 5.63604C14.8493 2.12132 9.15077 2.12132 5.63606 5.63604C3.87757 7.39453 2.99889 9.69966 3.00002 12.0044L3 14 M1 12L3 14L5 12 M11 8L11 13L16 13"/>
+  </symbol>
+  <symbol id="files" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 3H4V16 M8 7H20V19C20 20.1046 19.1046 21 18 21H10C8.89543 21 8 20.1046 8 19V7Z"/>
+  </symbol>
+  <symbol id="close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M15 4H5V18C5 19.1046 5.89543 20 7 20H15 M16 9L19 12L16 15M19 12H9"/>
+  </symbol>
+</svg>

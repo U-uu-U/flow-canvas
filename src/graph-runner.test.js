@@ -28,6 +28,22 @@ const conn = (f, fp, t, tp) => ({
     id: `${f}->${t}`, from: { nodeId: f, port: fp }, to: { nodeId: t, port: tp }
 });
 
+function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+}
+
+function mockGenerationBridge(t, mcp) {
+    const previousWindow = globalThis.window;
+    globalThis.window = { flowCanvas: { mcp } };
+    t.after(() => {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+    });
+}
+
 test('runFrom: 单个文本节点执行成功', async () => {
     const items = [op('t1', 'text', { text: 'hello' })];
     const ctx = makeCtx(items);
@@ -562,3 +578,226 @@ test('timer start is stable during status changes and renewed for a new run', ()
     runner._setStatus(item, R.STATUS.QUEUED);
     assert.ok(item.runStartedAt > original);
 });
+
+for (const kind of ['image', 'video']) {
+    test(`${kind} captures project, output folder and source node before switching projects during reference preparation`, async t => {
+        const preparing = deferred();
+        const prepared = deferred();
+        let activeProjectId = 'a';
+        let captures = 0;
+        const boards = new Map(['a', 'b'].map(id => [id, [
+            media('reference', `C:/${id}/reference.png`), op('shared-node', kind, { prompt: `Render ${id}` })
+        ]]));
+        const originalNode = structuredClone(boards.get('a')[1]);
+        const originalOtherBoard = structuredClone(boards.get('b'));
+        const tasks = [];
+        const submissions = [];
+        const landed = [];
+        const outputPath = `C:/a/output.${kind === 'image' ? 'png' : 'mp4'}`;
+        mockGenerationBridge(t, { [kind === 'image' ? 'generateImage' : 'generateVideo']: async body => {
+            submissions.push(structuredClone(body));
+            return { success: true, filePath: outputPath };
+        } });
+        const context = { projectId: 'a', targetDir: 'C:/a/output' };
+        const runner = new R.GraphRunner({
+            captureRunContext: () => { captures++; return { projectId: activeProjectId, targetDir: `C:/${activeProjectId}/output` }; },
+            getItems: () => boards.get(activeProjectId),
+            getConnections: () => [conn('reference', 'out', 'shared-node', 'source')],
+            beforeRun: captured => { assert.deepEqual(captured, context); return true; },
+            getImageProvider: () => ({ apiKey: 'fixture', model: 'gpt-image-2.5-sunburst' }),
+            getVideoProvider: () => ({ apiKey: 'fixture', model: 'sora-2' }),
+            getImageIntentPipelineMode: () => 'off',
+            prepareImageReferences: references => {
+                preparing.resolve(structuredClone(references));
+                return prepared.promise;
+            },
+            createGenerationTask: details => {
+                tasks.push(structuredClone(details));
+                return { id: 'task-a', projectId: details.projectId,
+                    params: { ...details.params, targetDir: details.targetDir } };
+            },
+            onResult: async (item, output, captured) => {
+                assert.equal(item, boards.get('a')[1]);
+                assert.deepEqual(captured.expectedNode, originalNode);
+                landed.push({ projectId: captured.projectId, targetDir: captured.targetDir, output });
+                item.resultEntries = [{ filePath: output._resultFilePath }];
+            }
+        });
+
+        const pending = runner.runFrom('shared-node');
+        const references = await preparing.promise;
+        assert.deepEqual(references.map(reference => reference.filePath), ['C:/a/reference.png']);
+        assert.equal(submissions.length, 0);
+        activeProjectId = 'b';
+        prepared.resolve([{ filePath: 'C:/a/reference-prepared.png' }]);
+        const result = await pending;
+        assert.equal(result.ok, true, result.reason);
+        assert.equal(captures, 1, 'Execution must not recapture the active project after an await');
+        assert.equal(tasks.length, 1);
+        assert.equal(tasks[0].projectId, 'a');
+        assert.equal(tasks[0].targetDir, 'C:/a/output');
+        assert.equal(submissions.length, 1);
+        assert.equal(submissions[0].projectId, 'a');
+        assert.equal(submissions[0].nodeId, 'shared-node');
+        assert.equal(submissions[0].targetDir, 'C:/a/output');
+        assert.deepEqual(submissions[0].sourceReferences.map(reference => reference.filePath), ['C:/a/reference-prepared.png']);
+        assert.equal(landed.length, 1);
+        assert.equal(landed[0].projectId, 'a');
+        assert.equal(landed[0].targetDir, 'C:/a/output');
+        assert.equal(landed[0].output._resultFilePath, outputPath);
+        assert.deepEqual(boards.get('a')[1].resultEntries, [{ filePath: outputPath }]);
+        assert.deepEqual(boards.get('b'), originalOtherBoard);
+        assert.equal(runner.getResult('shared-node'), null);
+        activeProjectId = 'a';
+        assert.equal(runner.getResult('shared-node')._resultFilePath, outputPath);
+        assert.equal(runner.activeNodes.size, 0);
+        assert.equal(runner.activeRuns.size, 0);
+    });
+}
+
+for (const cancelSecond of [false, true]) {
+    test(`same node IDs in different projects isolate concurrent locks, results and ${cancelSecond ? 'cancellation' : 'completion'}`, async t => {
+        let activeProjectId = 'a';
+        const boards = new Map(['a', 'b'].map(id => [id, [op('same-id', 'image', { prompt: `Render ${id}` })]]));
+        const pendingApi = new Map();
+        const submissions = [];
+        const landed = [];
+        const cancellations = [];
+        mockGenerationBridge(t, { generateImage: body => {
+            submissions.push(structuredClone(body));
+            const request = deferred();
+            pendingApi.set(body.projectId, request);
+            return request.promise;
+        } });
+        const runner = new R.GraphRunner({
+            captureRunContext: () => ({ projectId: activeProjectId, targetDir: `C:/${activeProjectId}` }),
+            getItems: () => boards.get(activeProjectId), getConnections: () => [],
+            getImageProvider: () => ({ apiKey: 'fixture', model: 'gpt-image-2.5-sunburst' }),
+            getImageIntentPipelineMode: () => 'off',
+            createGenerationTask: details => ({ id: `task-${details.projectId}`, projectId: details.projectId,
+                params: { ...details.params, targetDir: details.targetDir } }),
+            onResult: (item, output, context) => {
+                assert.equal(item, boards.get(context.projectId)[0]);
+                landed.push({ projectId: context.projectId, filePath: output._resultFilePath });
+            },
+            cancelGenerationTasks: (nodeId, context) => {
+                cancellations.push({ nodeId, ...context });
+                pendingApi.get(context.projectId).resolve({ success: true, filePath: `C:/${context.projectId}/late.png` });
+            }
+        });
+        const first = runner.runFrom('same-id');
+        assert.equal((await runner.runFrom('same-id')).ok, false);
+        activeProjectId = 'b';
+        const second = runner.runFrom('same-id');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(submissions.map(body => body.projectId), ['a', 'b']);
+        assert.deepEqual(submissions.map(body => body.clientTaskId), ['task-a', 'task-b']);
+        assert.equal(runner.activeRuns.size, 2);
+        assert.equal((await runner.runFrom('same-id')).ok, false);
+        assert.equal(submissions.length, 2, 'A duplicate in either project must not submit');
+
+        if (cancelSecond) {
+            assert.equal(await runner.cancel('same-id'), true);
+            assert.equal((await second).canceled, true);
+            assert.deepEqual(cancellations, [{ nodeId: 'same-id', projectId: 'b', targetDir: 'C:/b' }]);
+            assert.equal(boards.get('b')[0].runStatus, R.STATUS.CANCELED);
+            assert.equal(runner.getResult('same-id'), null);
+        } else {
+            pendingApi.get('b').resolve({ success: true, filePath: 'C:/b/output.png' });
+            assert.equal((await second).ok, true);
+            assert.equal(boards.get('b')[0].runStatus, R.STATUS.DONE);
+            assert.equal(runner.getResult('same-id')._resultFilePath, 'C:/b/output.png');
+        }
+        assert.equal(await runner.cancel('same-id'), false, 'An inactive B run must not cancel the same node in A');
+        assert.equal(boards.get('a')[0].runStatus, R.STATUS.RUNNING);
+        assert.equal(runner.activeRuns.size, 1);
+        pendingApi.get('a').resolve({ success: true, filePath: 'C:/a/output.png' });
+        assert.equal((await first).ok, true);
+        activeProjectId = 'a';
+        assert.equal(runner.getResult('same-id')._resultFilePath, 'C:/a/output.png');
+        activeProjectId = 'b';
+        assert.equal(runner.getResult('same-id')?._resultFilePath || null, cancelSecond ? null : 'C:/b/output.png');
+        assert.deepEqual(landed, [
+            ...(cancelSecond ? [] : [{ projectId: 'b', filePath: 'C:/b/output.png' }]),
+            { projectId: 'a', filePath: 'C:/a/output.png' }
+        ]);
+        assert.equal(runner.activeRuns.size, 0);
+        assert.equal(runner.activeNodes.size, 0);
+    });
+}
+
+for (const kind of ['image', 'video']) {
+    test(`${kind} partialOutput lands every successful in-flight result and caches it before reporting batch failure`, async t => {
+        const requests = [];
+        const tasks = [];
+        const taskUpdates = [];
+        const errors = [];
+        const landed = [];
+        const landingStarted = deferred();
+        const finishLanding = deferred();
+        const target = op('generator', kind, { prompt: 'Render batch', count: 3, concurrency: 3 });
+        const downstream = op('downstream', 'text');
+        const items = [target, downstream];
+        mockGenerationBridge(t, { [kind === 'image' ? 'generateImage' : 'generateVideo']: body => {
+            const request = { ...deferred(), body };
+            requests.push(request);
+            return request.promise;
+        } });
+        const runner = new R.GraphRunner({
+            ...makeCtx(items, [conn('generator', kind, 'downstream', 'context')]),
+            captureRunContext: () => ({ projectId: 'a', targetDir: 'C:/a' }),
+            getImageProvider: () => ({ apiKey: 'fixture', model: 'gpt-image-2.5-sunburst' }),
+            getVideoProvider: () => ({ apiKey: 'fixture', model: 'sora-2' }),
+            getImageIntentPipelineMode: () => 'off',
+            createGenerationTask: details => {
+                const task = { id: `task-${tasks.length}`, projectId: details.projectId,
+                    params: { ...details.params, targetDir: details.targetDir } };
+                tasks.push(task);
+                return task;
+            },
+            updateGenerationTask: (id, patch) => taskUpdates.push({ id, patch }),
+            recordGenerationError: (id, error) => errors.push({ id, error }),
+            onResult: async (item, output, context) => {
+                assert.equal(item, target);
+                assert.equal(context.projectId, 'a');
+                assert.equal(context.targetDir, 'C:/a');
+                assert.deepEqual(context.expectedNode.resultEntries || [], item.resultEntries || []);
+                if (!landed.length) {
+                    landingStarted.resolve();
+                    await finishLanding.promise;
+                }
+                item.resultEntries = [...(item.resultEntries || []), { filePath: output._resultFilePath }];
+                landed.push(output);
+            }
+        });
+        let settled = false;
+        const pending = runner.runFrom('downstream').then(result => { settled = true; return result; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(requests.length, 3);
+        const failure = new Error('Second request rejected');
+        const extension = kind === 'image' ? 'png' : 'mp4';
+        const paths = [`C:/a/first.${extension}`, `C:/a/third.${extension}`];
+        requests[1].reject(failure);
+        requests[2].resolve({ success: true, filePath: paths[1] });
+        requests[0].resolve({ success: true, filePath: paths[0] });
+        await landingStarted.promise;
+        assert.equal(settled, false, 'The failed run still waits for successful output persistence');
+        assert.deepEqual(runner.getResult('generator')._batchResults.map(output => output._resultFilePath), paths);
+        finishLanding.resolve();
+        const result = await pending;
+        assert.equal(result.ok, false);
+        assert.equal(result.reason, failure.message);
+        assert.equal(result.failedAt, 'generator');
+        assert.equal(target.runStatus, R.STATUS.ERROR);
+        assert.equal(downstream.runStatus, R.STATUS.ERROR);
+        assert.deepEqual(target.resultEntries, paths.map(filePath => ({ filePath })));
+        assert.deepEqual(landed.map(output => output._resultFilePath), paths);
+        assert.deepEqual(runner.getResult('generator')._batchResults, landed);
+        assert.equal(runner.getResult('downstream'), null, 'A failed batch must not execute its downstream node');
+        assert.deepEqual(errors, [{ id: 'task-1', error: failure }]);
+        assert.deepEqual(taskUpdates.filter(update => update.patch.status === 'success').map(update => update.id).sort(), ['task-0', 'task-2']);
+        assert.equal(requests.length, 3, 'Partial failure must not automatically resubmit');
+        assert.equal(runner.activeRuns.size, 0);
+        assert.equal(runner.activeNodes.size, 0);
+    });
+}

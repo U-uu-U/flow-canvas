@@ -191,13 +191,14 @@ class AgentRuntime {
         this._assertProject(run, projectId);
         if (!run || !['failed', 'partial_failed'].includes(run.status) || !run.plan || this.controllers.has(runId))
             throw fail('INVALID_STATE', '当前任务没有可以重新确认的失败批次');
-        if (run.steps.some(step => ['submitted', 'submitting', 'unknown'].includes(step.status)))
+        if (run.steps.some(step => ['submitted', 'submitting', 'unknown'].includes(step.status)
+            || (step.remoteTaskId && step.status !== 'completed' && step.confirmedFailure !== true)))
             throw fail('SUBMISSION_UNKNOWN', '请先恢复查询已提交任务，不能直接重生成');
         const remaining = run.steps.filter(step => step.status !== 'completed');
         if (!remaining.length) throw fail('NO_FAILED_STEPS', '所有生成已经完成，无需重复生成');
         run.plan = { ...run.plan, version: crypto.randomUUID(), approved: false,
             summary: '仅重试未完成的步骤', steps: remaining.map(step => ({ ...step, id: `step-${crypto.randomUUID()}`,
-                status: 'queued', remoteTaskId: null, error: null, result: null })),
+                status: 'queued', remoteTaskId: null, confirmedFailure: false, error: null, result: null })),
             estimatedCost: run.plan.priceKnown ? remaining.reduce((sum, step) => sum + step.price.amount, 0) : null };
         this._event(run, 'plan', run.plan);
         this._status(run, 'awaiting_confirmation');
@@ -471,9 +472,11 @@ class AgentRuntime {
             for (const step of run.steps) {
                 this._check(run);
                 if (step.status === 'completed') continue;
-                if (step.status === 'failed') throw fail('NEW_CONFIRMATION_REQUIRED', '失败项重生成需要新的计划确认');
+                // Older runs may have mistaken a polling HTTP error for a terminal task failure.
+                if (step.status === 'failed' && (!step.remoteTaskId || step.confirmedFailure === true))
+                    throw fail('NEW_CONFIRMATION_REQUIRED', '失败项重生成需要新的计划确认');
                 this._status(run, 'waiting_provider');
-                const wasSubmitted = ['submitting', 'submitted', 'unknown'].includes(step.status);
+                const wasSubmitted = Boolean(step.remoteTaskId) || ['submitting', 'submitted', 'unknown'].includes(step.status);
                 step.status = wasSubmitted ? 'submitted' : 'preparing';
                 this.runStore.save(run);
                 try {
@@ -481,12 +484,17 @@ class AgentRuntime {
                         checkpoint: patch => { Object.assign(step, patch); this._event(run, 'step', { stepId: step.id, ...patch }); } });
                     this._check(run);
                     step.status = 'completed';
+                    step.error = null;
+                    step.confirmedFailure = false;
                     step.result = redact(output);
                     run.results.push({ stepId: step.id, ...redact(output) });
                     this._event(run, 'step', { stepId: step.id, status: 'completed', result: output });
                 } catch (error) {
-                    const confirmedFailure = /HTTP (400|401|403|404|413|422|429)\b|生成任务失败|generation.*failed/i.test(error.message);
-                    step.status = confirmedFailure ? 'failed' : step.remoteTaskId ? 'submitted' : step.status === 'submitting' ? 'unknown' : 'failed';
+                    // Only an explicit upstream terminal result can invalidate an existing remote task.
+                    step.confirmedFailure = error.code === 'UPSTREAM_TASK_FAILED' || error.confirmedFailure === true;
+                    const rejectedSubmission = !step.remoteTaskId && /HTTP (400|401|403|404|413|422|429)\b/i.test(error.message);
+                    step.status = step.confirmedFailure || rejectedSubmission ? 'failed'
+                        : step.remoteTaskId ? 'submitted' : step.status === 'submitting' ? 'unknown' : 'failed';
                     step.error = this._redact(error.message);
                     this.runStore.save(run);
                     throw error;
