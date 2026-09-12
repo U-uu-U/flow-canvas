@@ -1,6 +1,6 @@
 {
     "name": "flow-canvas",
-    "version": "1.5.0-beta.10",
+    "version": "1.6.0-beta.1",
     "description": "本地素材管理、无限画布与 AI 图片/视频创作桌面应用",
     "main": "electron-main/main.js",
     "scripts": {
@@ -42,6 +42,7 @@
     "build": {
         "appId": "org.ravenhash.flowcanvas",
         "productName": "Flow Canvas",
+        "icon": "electron-main/assets/app-icon.png",
         "asar": true,
         "directories": {
             "output": "release"
@@ -52,7 +53,9 @@
             "shared/**/*",
             "src/{package.json,board-transaction.js,graph-model.js,node-types.js,generator-result-stack.js,generation-request-params.js,image-node-settings.js,image-intent-pipeline.js,provider-capabilities.js,reference-citations.js,model-config.js,model-config-default.js,model-config-capabilities.js}",
             "mcp/**/*",
-            "package.json"
+            "package.json",
+            "!**/*.{test,spec}.{js,cjs,mjs,ts,cts,mts,jsx,tsx}",
+            "!**/{__tests__,__mocks__,test,tests}/**/*"
         ],
         "win": {
             "target": [
