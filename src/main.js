@@ -66,6 +66,10 @@ async function bootstrap() {
         sidebarManager = initRequiredModule('sidebar', () => new SidebarManager(storeData, assetLibraryContext));
         contextMenu = initRequiredModule('context-menu', () => new ContextMenu());
         canvasManager = initRequiredModule('canvas', () => new CanvasManager('canvasContainer', storeData, contextMenu, planService, {
+            flushBoard: () => saveStoreNow(),
+            syncBackgroundProject: projectId => handleExternalStoreUpdate({
+                event: 'generation:project-updated', projectIds: [projectId], data: storeData
+            }),
             getTextProvider: (binding) => agentSidebar?.getTextProviderConfig?.(binding) || null,
             getImageProvider: (binding) => agentSidebar?.getImageProviderConfig?.(binding) || null,
             setImageProvider: (id) => agentSidebar?.setImageProvider?.(id) || false,
@@ -97,7 +101,7 @@ async function bootstrap() {
             createGenerationTask: (details) => agentSidebar?.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => agentSidebar?.updateGenerationTask?.(taskId, patch) || null,
             recordGenerationError: (taskId, error) => agentSidebar?.recordGenerationError?.(taskId, error) || null,
-            cancelGenerationTasks: (nodeId) => agentSidebar?.cancelGenerationTasksForNode?.(nodeId) || false,
+            cancelGenerationTasks: (nodeId, context) => agentSidebar?.cancelGenerationTasksForNode?.(nodeId, context) || false,
             cancelGenerationTask: (taskId) => agentSidebar?.cancelGenerationTask?.(taskId) || false,
             retryGenerationTask: (taskId, options) => agentSidebar?.retryGenerationTask?.(taskId, options) || null,
             persistCompletedGenerationNode: (nodeData) => persistCompletedGenerationNode(nodeData)
@@ -649,15 +653,18 @@ function showStartupError(err, area = 'startup') {
 function handleExternalStoreUpdate(payload) {
     if (!payload?.data || !canvasManager || !sidebarManager) return;
 
-    if (saveTimer && !payload.skipFlush) saveStoreNow(true);
-    if (window.flowCanvas.store.loadSync) payload = { ...payload, data: window.flowCanvas.store.loadSync() };
     if (payload.projectIds?.length && !payload.projectIds.includes(storeData.activeGroupId)
         && payload.data.activeGroupId === storeData.activeGroupId) {
-        storeData.folderGroups = payload.data.folderGroups.map(group => group.id === storeData.activeGroupId
+        // Refresh the background group before a pending save can send its old copy.
+        const latest = window.flowCanvas.store.loadSync?.() || payload.data;
+        storeData.folderGroups = latest.folderGroups.map(group => group.id === storeData.activeGroupId
             ? sidebarManager.getActiveGroup() : group);
         sidebarManager.renderGroups();
         return;
     }
+
+    if (saveTimer && !payload.skipFlush) saveStoreNow(true);
+    if (window.flowCanvas.store.loadSync) payload = { ...payload, data: window.flowCanvas.store.loadSync() };
 
     isRestoringHistory = true;
     clearTimeout(historyCommitTimer);

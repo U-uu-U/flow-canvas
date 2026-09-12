@@ -114,6 +114,54 @@ function response(status, payload) {
 }
 
 for (const kind of ['image', 'video']) {
+    test(`${kind} retry with a journal ID queries rather than resubmitting from stale renderer state`, async t => {
+        const { bridge, body } = setup(t);
+        bridge[`_generate${kind === 'image' ? 'Image' : 'Video'}FromRenderer`] = () => assert.fail('must not resubmit');
+        let recovered;
+        bridge.recoverGenerationFromRenderer = async request => { recovered = request; return { recovered: true }; };
+        const result = await bridge[`generate${kind === 'image' ? 'Image' : 'Video'}FromRenderer`]({ ...body, restoreToProject: true });
+        assert.equal(result.recovered, true);
+        assert.equal(recovered.clientTaskId, body.clientTaskId);
+    });
+
+    test(`${kind} retry captures original target before submitting and attaches after switching projects`, async t => {
+        const { bridge, directory } = setup(t);
+        const trace = [];
+        bridge.captureRecoveryTarget = request => { trace.push('capture'); assert.equal(request.projectId, 'original'); return 'original-signature'; };
+        bridge.attachRecoveredGeneration = async request => {
+            trace.push('attach'); assert.equal(request.targetSignature, 'original-signature');
+            assert.equal(request.projectId, 'original'); assert.equal(request.params.webSearch, true);
+            return { nodeId: 'node', projectId: 'original' };
+        };
+        bridge[`_generate${kind === 'image' ? 'Image' : 'Video'}FromRenderer`] = async request => {
+            trace.push('submit'); assert.equal(request.addToCanvas, false);
+            bridge.store.load = () => ({ activeGroupId: 'other' });
+            const result = { filePath: path.join(directory, 'output'), taskId: 'new-remote' };
+            bridge._rememberResult(request, result);
+            return result;
+        };
+        const result = await bridge[`generate${kind === 'image' ? 'Image' : 'Video'}FromRenderer`]({
+            clientTaskId: 'fresh', projectId: 'original', nodeId: 'node', restoreToProject: true, webSearch: true
+        });
+        assert.deepEqual(trace, ['capture', 'submit', 'attach']);
+        assert.equal(result.projectId, 'original');
+        assert.equal(bridge.recoveryStore.get('fresh').state, 'attached');
+    });
+
+    test(`${kind} polling distinguishes upstream terminal failure from query errors`, async () => {
+        const poll = Bridge[kind === 'image' ? 'pollOpenAiImageTask' : 'pollOpenAiVideoTask'];
+        await assert.rejects(poll('https://api.test/v1/generations', 'test-key', 'task', { status: 'pending' }, {
+            wait: async () => {}, fetchTask: async () => response(200, { status: 'failed', error: { message: 'generation rejected' } })
+        }), error => error.code === 'UPSTREAM_TASK_FAILED');
+        for (const status of [401, 404, 429]) {
+            await assert.rejects(poll('https://api.test/v1/generations', 'test-key', 'task', { status: 'pending' }, {
+                wait: async () => {}, fetchTask: async () => response(status, 'query unavailable')
+            }), error => error.code !== 'UPSTREAM_TASK_FAILED');
+        }
+    });
+}
+
+for (const kind of ['image', 'video']) {
     test(`${kind} polling tolerates 502, invalid JSON, and delayed completed output using only GET`, async () => {
         const replies = [response(502, 'bad gateway'), response(200, '<html>busy</html>'),
             response(200, { status: 'completed' }), response(200, kind === 'image'

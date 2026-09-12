@@ -1407,7 +1407,7 @@ export class SidebarManager {
         this._acknowledgeGroupTaskState(groupId);
         this._ensureGroupDefaultFolder(newGroup);
 
-        if (oldGroup && oldGroup.id !== groupId) {
+        if (!oldGroup || oldGroup.id !== groupId) {
             this.storeData.items = newGroup.savedItems || [];
             this.storeData.connections = [...(newGroup.connections || [])];
             this.storeData.boardRevision = Number(newGroup.boardRevision) || 0;

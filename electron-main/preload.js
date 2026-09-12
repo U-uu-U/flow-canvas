@@ -165,6 +165,8 @@ contextBridge.exposeInMainWorld('flowCanvas', {
         generateImage: (body) => ipcRenderer.invoke('mcp:image:generate', body),
         cancelGeneration: (clientTaskId) => ipcRenderer.invoke('mcp:generation:cancel', clientTaskId),
         recoverGeneration: (body) => ipcRenderer.invoke('mcp:generation:recover', body),
+        landGenerationResult: body => ipcRenderer.invoke('mcp:generation:land-result', body),
+        updateGenerationNodeStatus: body => ipcRenderer.invoke('mcp:generation:node-status', body),
         listRecoverableGenerations: () => ipcRenderer.invoke('mcp:generation:recovery-list'),
         compressImageReferences: (body) => ipcRenderer.invoke('mcp:image:compress-references', body),
         compressVideoReferences: (body) => ipcRenderer.invoke('mcp:video:compress-references', body),

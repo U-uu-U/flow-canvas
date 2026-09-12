@@ -1,9 +1,150 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DEFAULT_MODEL_CONFIG } from './model-config-default.js';
+import { validateModelRequest } from './model-config-capabilities.js';
 
 let helpers;
 test.before(async () => {
     helpers = await import('./node-types.js');
+});
+
+function trackedNodeContext(t, kind, model, generate) {
+    const previousWindow = global.window;
+    const calls = [], tasks = [], updates = [], failures = [];
+    global.window = { flowCanvas: { mcp: {
+        [kind === 'image' ? 'generateImage' : 'generateVideo']: async request => {
+            calls.push(structuredClone(request));
+            return generate(request, calls.length - 1);
+        }
+    } } };
+    t.after(() => { global.window = previousWindow; });
+    const provider = { id: `${kind}-provider`, apiKey: 'test-key', endpoint: 'https://example.test/v1', model };
+    const ctx = {
+        item: { id: `${kind}-node` },
+        getImageProvider: () => provider, getVideoProvider: () => provider,
+        createGenerationTask(details) {
+            const task = { id: `task-${tasks.length}`, ...structuredClone(details) };
+            tasks.push(task);
+            return task;
+        },
+        updateGenerationTask: (id, patch) => updates.push({ id, patch: structuredClone(patch) }),
+        recordGenerationError: (id, error) => failures.push({ id, error })
+    };
+    return { calls, tasks, updates, failures, ctx };
+}
+
+test('image execute: a failed batch retains all late successful images in partialOutput', async t => {
+    const failure = Object.assign(new Error('Image request failed'), { code: 'UPSTREAM_TASK_FAILED' });
+    const filePaths = ['C:/output/late-a.png', 'C:/output/late-b.png'];
+    const h = trackedNodeContext(t, 'image', 'gpt-image-2', async (_, index) => {
+        if (index === 0) throw failure;
+        await new Promise(resolve => setImmediate(resolve));
+        return { filePaths, taskId: 'remote-success', mediaType: 'image' };
+    });
+    await assert.rejects(helpers.NODE_TYPES.image.execute({}, {
+        prompt: 'batch', width: 1024, height: 1024, count: 4, concurrency: 2
+    }, h.ctx), actual => actual === failure);
+
+    assert.equal(h.calls.length, 2, 'unstarted batch items must not be submitted');
+    assert.equal(h.tasks.length, 2);
+    assert.deepEqual(h.failures, [{ id: 'task-0', error: failure }]);
+    assert.equal(failure.code, 'UPSTREAM_TASK_FAILED');
+    assert.deepEqual(failure.unstartedIndices, [2, 3]);
+    assert.deepEqual(failure.partialOutput.image, filePaths.map(file => `local-res://${encodeURIComponent(file)}`));
+    assert.deepEqual(failure.partialOutput._batchResults.map(result => result._resultFilePath), filePaths);
+    assert.ok(failure.partialOutput._batchResults.every(result => result._generation.taskId === 'remote-success'));
+    assert.deepEqual(h.updates.map(update => [update.id, update.patch.status]), [['task-1', 'success']]);
+    assert.deepEqual(h.updates[0].patch.params.filePaths, filePaths);
+});
+
+test('video execute: partialOutput keeps late results while unstarted tasks become canceled/not_submitted', async t => {
+    const failure = Object.assign(new Error('Video request failed'), { code: 'UPSTREAM_TASK_FAILED' });
+    const h = trackedNodeContext(t, 'video', 'seedance_v2.5', async (_, index) => {
+        if (index === 0) throw failure;
+        await new Promise(resolve => setImmediate(resolve));
+        return { filePath: `C:/output/late-${index}.mp4`, taskId: `remote-${index}` };
+    });
+    await assert.rejects(helpers.NODE_TYPES.video.execute({}, {
+        prompt: 'batch', duration: 8, resolution: '720p', count: 5, concurrency: 3
+    }, h.ctx), actual => actual === failure);
+
+    assert.equal(h.tasks.length, 5, 'video tasks are created before the batch starts');
+    assert.deepEqual(h.calls.map(call => call.clientTaskId), ['task-0', 'task-1', 'task-2']);
+    assert.deepEqual(h.failures, [{ id: 'task-0', error: failure }]);
+    assert.equal(failure.code, 'UPSTREAM_TASK_FAILED');
+    assert.deepEqual(failure.unstartedIndices, [3, 4]);
+    const partial = failure.partialOutput._batchResults;
+    assert.deepEqual(partial.map(result => result._resultFilePath), ['C:/output/late-1.mp4', 'C:/output/late-2.mp4']);
+    assert.deepEqual(partial.map(result => result._generation.taskId), ['remote-1', 'remote-2']);
+    assert.deepEqual(failure.partialOutput.video, partial.map(result => result.video));
+    assert.deepEqual(h.updates.filter(update => update.patch.params?.syncStage === 'submit').map(update => update.id),
+        ['task-0', 'task-1', 'task-2']);
+    assert.deepEqual(h.updates.filter(update => update.patch.status === 'success').map(update => update.id), ['task-1', 'task-2']);
+    const unstarted = h.updates.filter(update => update.patch.status === 'canceled');
+    assert.deepEqual(unstarted.map(update => update.id), ['task-3', 'task-4']);
+    assert.ok(unstarted.every(update => update.patch.params.syncStage === 'not_submitted' && update.patch.error));
+});
+
+test('video execute: a fully failed serial batch has no partialOutput or queued orphan tasks', async t => {
+    const failure = new Error('First request failed');
+    const h = trackedNodeContext(t, 'video', 'seedance_v2.5', async () => { throw failure; });
+    await assert.rejects(helpers.NODE_TYPES.video.execute({}, {
+        prompt: 'batch', duration: 8, resolution: '720p', count: 3, concurrency: 1
+    }, h.ctx), actual => actual === failure);
+    assert.equal(failure.partialOutput, undefined);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.updates.filter(update => update.patch.status === 'canceled').map(update => [update.id, update.patch.params.syncStage]),
+        [['task-1', 'not_submitted'], ['task-2', 'not_submitted']]);
+});
+
+test('video execute: H3 legacy 720p is normalized before CONFIG validation and task creation', async t => {
+    const h = trackedNodeContext(t, 'video', 'minimax-h3', async () => ({ filePath: 'C:/output/h3-768p.mp4' }));
+    const checked = [];
+    h.ctx.validateGenerationRequest = request => {
+        assert.equal(h.tasks.length, 0, 'CONFIG must be validated before task creation');
+        assert.equal(h.calls.length, 0);
+        assert.equal(request.fields.resolutionTier, '768p');
+        const result = validateModelRequest({ ...request, config: DEFAULT_MODEL_CONFIG,
+            provider: { ...request.provider, kind: request.kind } });
+        assert.equal(result.ok, true, JSON.stringify(result.errors));
+        checked.push(structuredClone(request));
+    };
+    await helpers.NODE_TYPES.video.execute({}, {
+        prompt: 'H3 legacy', resolution: '720p', ratio: '16:9', ratioMode: 'manual', duration: 5, count: 1
+    }, h.ctx);
+    assert.equal(checked.length, 1);
+    assert.equal(h.tasks[0].params.resolution, '768p');
+    assert.equal(h.calls[0].resolution, '768p');
+    assert.equal(h.updates.at(-1).patch.params.resolution, '768p');
+});
+
+test('image execute: task snapshots preserve every MJ parameter and webSearch through success', async t => {
+    const h = trackedNodeContext(t, 'image', 'mj_imagine', async () => ({ filePath: 'C:/output/mj-hd.png', taskId: 'mj-remote' }));
+    await helpers.NODE_TYPES.image.execute({}, {
+        prompt: 'MJ snapshot', size: '2048x1360', width: 512, height: 512, resolutionTier: '2K', ratio: '3:2',
+        quality: 'medium', webSearch: true, responseFormat: 'b64_json', historyDisabled: false, stream: true,
+        midjourneyVersion: '8.2', midjourneyRaw: true, midjourneyStylize: 250, midjourneyChaos: 20,
+        midjourneyWeird: 400, midjourneyQuality: 2, midjourneyImageWeight: 1.5,
+        midjourneyStyleReference: 'https://example.test/style.png', midjourneyStyleWeight: 80,
+        midjourneyStyleVersion: 6, midjourneyOmniReference: 'https://example.test/subject.png', midjourneyOmniWeight: 100,
+        midjourneyProfile: 'profile-1', midjourneySeed: 42, midjourneyTile: true, midjourneyDraft: true,
+        midjourneyRepeat: 2, midjourneySpeed: 'turbo', midjourneyVisibility: 'stealth', negativePrompt: 'blur'
+    }, h.ctx);
+    const expected = {
+        size: '2048x1360', quality: 'medium', responseFormat: 'url', historyDisabled: true, stream: false,
+        webSearch: true, nodeId: 'image-node', midjourney: {
+            ratio: '3:2', version: '8.2', raw: true, stylize: 250, chaos: 20, weird: 400,
+            quality: 2, imageWeight: 1.5, styleReference: 'https://example.test/style.png', styleWeight: 80,
+            styleVersion: 6, omniReference: 'https://example.test/subject.png', omniWeight: 100,
+            profile: 'profile-1', seed: 42, tile: true, draft: true, repeat: 2, speed: 'turbo', visibility: 'stealth',
+            definition: 'hd', negativePrompt: 'blur'
+        }
+    };
+    assert.equal(h.tasks.length, 1);
+    assert.deepEqual(h.tasks[0].params, expected);
+    for (const [key, value] of Object.entries(expected)) assert.deepEqual(h.calls[0][key], value, key);
+    assert.deepEqual(h.updates.at(-1).patch.params, { ...expected, filePaths: ['C:/output/mj-hd.png'] });
+    assert.equal(h.updates.at(-1).patch.taskId, 'mj-remote');
 });
 
 test('expandGenerationPrompts: 默认把上游文本追加到节点提示词并展开生成数量', () => {

@@ -8,6 +8,7 @@ import { collectUpstreamMediaAttachments, collectUpstreamPromptContext } from '.
 import { NODE_TYPES } from './node-types.js';
 import { nodeIconSvg } from './node-icons.js';
 import { GraphRunner, STATUS } from './graph-runner.js';
+import { generationNodeSignature } from '../shared/generation-node-state.mjs';
 import {
     MAX_VIEWPORT_SCALE,
     MIN_VIEWPORT_SCALE,
@@ -10856,14 +10857,20 @@ export class CanvasManager {
     _ensureRunner() {
         if (this.graphRunner) return this.graphRunner;
         this.graphRunner = new GraphRunner({
+            captureRunContext: () => ({ projectId: this.storeData.activeGroupId || null,
+                targetDir: this.storeData.activeGroupDefaultSaveFolder || this.storeData.defaultSaveFolder || null }),
+            beforeRun: () => this.options.flushBoard?.(),
             getItems: () => {
                 const map = new Map();
                 this.items.forEach((entry, id) => { if (entry?.data) map.set(id, entry.data); });
                 return map;
             },
             getConnections: () => this.graphView?.serialize() || [],
-            onStatus: (id) => this.refreshOpNode(id),
-            onResult: (item, output) => this._landResult(item, output),
+            onStatus: (id, item) => {
+                if (this.items.get(id)?.data === item) this.refreshOpNode(id);
+            },
+            onResult: (item, output, context) => this._landRunResult(item, output, context),
+            onSettled: (item, context) => this._persistRunStatus(item, context),
             // 复用 main.js 注入的 provider 取值器（canvas.js:5977 同一套）
             getTextProvider: (binding) => this.options.getTextProvider?.(binding) || null,
             getImageProvider: (binding) => this.options.getImageProvider?.(binding) || null,
@@ -10879,9 +10886,53 @@ export class CanvasManager {
             createGenerationTask: (details) => this.options.createGenerationTask?.(details) || null,
             updateGenerationTask: (taskId, patch) => this.options.updateGenerationTask?.(taskId, patch) || null,
             recordGenerationError: (taskId, error) => this.options.recordGenerationError?.(taskId, error) || null,
-            cancelGenerationTasks: (nodeId) => this.options.cancelGenerationTasks?.(nodeId) || false
+            cancelGenerationTasks: (nodeId, context) => this.options.cancelGenerationTasks?.(nodeId, context) || false
         });
         return this.graphRunner;
+    }
+
+    async _landRunResult(sourceItem, output, context) {
+        if (!output?.image && !output?.video && !output?.file) return null;
+        if (context.runState?.canceled) throw Object.assign(new Error('生成任务已中断'), { code: 'GENERATION_CANCELED' });
+        if (context.projectId === (this.storeData.activeGroupId || null) && this.items.get(sourceItem.id)?.data === sourceItem) {
+            if (generationNodeSignature(sourceItem) !== generationNodeSignature(context.expectedNode)) {
+                throw new Error('生成期间节点已修改，产物已保留，请从任务记录拉取');
+            }
+            const landed = await this._landResult(sourceItem, output);
+            if (!landed) throw new Error('产物未写入画布，请从任务记录拉取');
+            return landed;
+        }
+        if (!context.projectId || !window.flowCanvas?.mcp?.landGenerationResult) {
+            throw new Error('原项目落图服务不可用，产物已保留，请从任务记录拉取');
+        }
+        if (await this.options.flushBoard?.() === false) throw new Error('画板保存冲突，产物已保留，请从任务记录拉取');
+        if (context.runState?.canceled) throw Object.assign(new Error('生成任务已中断'), { code: 'GENERATION_CANCELED' });
+        const result = await window.flowCanvas.mcp.landGenerationResult({
+            projectId: context.projectId, nodeId: sourceItem.id, expectedNode: context.expectedNode, output,
+            operationId: JSON.stringify([context.projectId, sourceItem.id, output._resultFilePath || output.image || output.video || output.file])
+        });
+        if (!result?.success) throw new Error(result?.error || '原项目产物保存失败');
+        if (result.sourceNode) {
+            Object.keys(sourceItem).forEach(key => delete sourceItem[key]);
+            Object.assign(sourceItem, result.sourceNode);
+        }
+        this.options.syncBackgroundProject?.(context.projectId);
+        return result;
+    }
+
+    async _persistRunStatus(item, context) {
+        if (this.storeData.activeGroupId === context.projectId && this.items.get(item.id)?.data === item) {
+            this.emit('change');
+            return;
+        }
+        if (!context.projectId || !window.flowCanvas?.mcp?.updateGenerationNodeStatus) return;
+        if (await this.options.flushBoard?.() === false) throw new Error('画板保存冲突，未写回后台运行状态');
+        const result = await window.flowCanvas.mcp.updateGenerationNodeStatus({
+            projectId: context.projectId, nodeId: item.id, expectedNode: context.expectedNode,
+            status: item.runStatus, error: item.runError, operationId: context.operationId
+        });
+        if (result?.success !== true) throw new Error(result?.error || '原项目状态保存失败');
+        this.options.syncBackgroundProject?.(context.projectId);
     }
 
     /**

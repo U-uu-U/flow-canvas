@@ -19,7 +19,11 @@ export function runtimeActions(run) {
     if (run.status === 'awaiting_confirmation' && run.plan?.version != null) {
         return run.external ? ['confirm', 'cancel'] : ['confirm', 'revise', 'cancel'];
     }
-    if (['partial_failed', 'failed'].includes(run.status)) return ['resume', 'retry'];
+    if (['partial_failed', 'failed'].includes(run.status)) {
+        const unresolved = (run.steps || []).some(step => ['submitting', 'submitted', 'unknown'].includes(step.status)
+            || (step.remoteTaskId && step.status !== 'completed' && step.confirmedFailure !== true));
+        return unresolved ? ['resume'] : ['resume', 'retry'];
+    }
     if (run.status === 'interrupted') return ['resume'];
     return isRuntimeTerminal(run.status) ? [] : ['cancel'];
 }
@@ -168,11 +172,12 @@ export function runtimeProgressText(run) {
 }
 
 export class AgentRuntimeClient {
-    constructor(api, { onChange = () => {}, onError = () => {}, onSync = () => {} } = {}) {
+    constructor(api, { onChange = () => {}, onError = () => {}, onSync = () => {}, beforeExecute } = {}) {
         this.api = api;
         this.onChange = onChange;
         this.onError = onError;
         this.onSync = onSync;
+        this.beforeExecute = beforeExecute;
         this.runs = new Map();
         this.cursors = new Map();
         this.pending = new Map();
@@ -264,12 +269,16 @@ export class AgentRuntimeClient {
 
     async act(runId, action, instruction) {
         const run = this.runs.get(runId);
-        if (!run || this.actions.has(runId) || !runtimeActions(run).includes(action)) return;
+        if (this.closed || !run || this.actions.has(runId) || !runtimeActions(run).includes(action)) return;
         if (action === 'confirm' && this.confirmedVersions.get(runId) === run.plan.version) return;
         if (action === 'revise' && !String(instruction || '').trim()) return;
         this.actions.add(runId);
-        this.onChange(run);
         try {
+            this.onChange(run);
+            if (['confirm', 'resume'].includes(action) && await this.beforeExecute?.() === false) {
+                throw new Error('本地画板保存失败，任务未执行。请先解决保存问题后重试。');
+            }
+            if (this.closed) return;
             const args = { runId };
             if (action === 'confirm') args.planVersion = run.plan.version;
             if (action === 'revise') args.instruction = String(instruction).trim();

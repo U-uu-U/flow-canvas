@@ -32,6 +32,7 @@ import {
 } from './agent-image-generation.js';
 import { reconcileApiConfig } from './api-config-recovery.js';
 import { CANCELED_IMAGE_REFERENCES } from './node-types.js';
+import { imageGenerationRequestParams, normalizeVideoGenerationResolution } from './generation-request-params.js';
 import { requestRecoveryTaskId } from './generation-recovery-dialog.js';
 import { getVideoModelProfile } from '../shared/video-model-profiles.mjs';
 import { modelConfigStore } from './model-config.js';
@@ -40,7 +41,8 @@ import {
     mergeVideoProfile,
     resolveModelConfigEntry,
     toImageProfileOverrides,
-    toVideoProfileOverrides
+    toVideoProfileOverrides,
+    validateModelRequest
 } from './model-config-capabilities.js';
 import {
     AgentRuntimeClient, createRuntimeCard, isRuntimeTerminal, runtimeOutputFiles,
@@ -1406,6 +1408,7 @@ export class AgentSidebar {
         if (!this.runtimeClient || this.runtimeClient.closed) {
             const previousRuns = this.runtimeClient?.runs;
             this.runtimeClient = new AgentRuntimeClient(api, {
+                beforeExecute: () => this.options.flushBoard?.(),
                 onChange: run => this._onAgentRuntimeChange(run),
                 onSync: scope => {
                     if (this.runtimeSyncError && this._isActiveConversation(this._projectCacheKey(scope.projectId), scope.conversationId)) {
@@ -2757,14 +2760,14 @@ export class AgentSidebar {
         this._renderGenerationTasks();
     }
 
-    _createGenerationTask(kind, provider, prompt, params = {}, sourcePaths = [], promptInfo = {}) {
+    _createGenerationTask(kind, provider, prompt, params = {}, sourcePaths = [], promptInfo = {}, projectId = this.options.getActiveProjectId?.() || null) {
         const now = new Date().toISOString();
         const id = globalThis.crypto?.randomUUID?.()
             || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const task = {
             id,
             kind,
-            projectId: this.options.getActiveProjectId?.() || null,
+            projectId,
             status: 'running',
             providerId: provider?.id || null,
             providerName: this._providerLabel(provider),
@@ -2787,8 +2790,9 @@ export class AgentSidebar {
         return task;
     }
 
-    createGenerationTask({ kind = 'image', provider = null, prompt = '', params = {}, sourcePaths = [], promptDraftConfig, referenceBindings, userPrompt } = {}) {
-        return this._createGenerationTask(kind, provider, prompt, params, sourcePaths, { promptDraftConfig, referenceBindings, userPrompt });
+    createGenerationTask({ kind = 'image', provider = null, prompt = '', params = {}, sourcePaths = [], promptDraftConfig, referenceBindings, userPrompt, projectId, targetDir } = {}) {
+        return this._createGenerationTask(kind, provider, prompt, { ...params, ...(targetDir ? { targetDir } : {}) }, sourcePaths,
+            { promptDraftConfig, referenceBindings, userPrompt }, projectId);
     }
 
     _updateGenerationTask(id, patch = {}) {
@@ -2905,9 +2909,10 @@ export class AgentSidebar {
         return this._cancelGenerationTask(taskId);
     }
 
-    async cancelGenerationTasksForNode(nodeId) {
+    async cancelGenerationTasksForNode(nodeId, context = {}) {
         const taskIds = this.generationTasks
-            .filter(task => task.status === 'running' && task.params?.nodeId === nodeId)
+            .filter(task => task.status === 'running' && task.params?.nodeId === nodeId
+                && (context.projectId === undefined || task.projectId === context.projectId))
             .map(task => task.id);
         await Promise.all(taskIds.map(taskId => this._cancelGenerationTask(taskId)));
         return taskIds.length > 0;
@@ -3172,6 +3177,7 @@ export class AgentSidebar {
             params: { syncStage: 'recovering', recoveryStartedAt: Date.now() } });
         try {
             if (!window.flowCanvas?.mcp?.recoverGeneration) throw new Error('请重启 Flow Canvas 以启用新版任务恢复接口');
+            if (await this.options.flushBoard?.() === false) throw new Error('画板保存冲突，未开始恢复');
             const result = await window.flowCanvas.mcp.recoverGeneration({
                 clientTaskId: task.id, taskId: remoteTaskId, kind: task.kind,
                 projectId: task.projectId || this.options.getActiveProjectId?.(), nodeId: task.params?.nodeId,
@@ -3196,20 +3202,13 @@ export class AgentSidebar {
         }
     }
 
-    async _retryGenerationTask(taskId, options = {}) {
+    async _retryGenerationTask(taskId) {
         const task = this.generationTasks.find(item => item.id === taskId);
         if (task?.taskId || task?.filePath) return this._recoverGenerationTask(taskId);
         if (!task || !['failed', 'disconnected'].includes(task.status)) return;
         const originalNodeId = String(task.params?.nodeId || '').trim();
-        const restoreOnOriginalNode = options.restoreOnOriginalNode === true
-            && Boolean(originalNodeId)
-            && typeof this.options.completeGenerationTaskOnNode === 'function';
-        const shouldResumeVideo = task.kind === 'video'
-            && Boolean(task.taskId)
-            && (task.status === 'disconnected'
-                || task.params?.syncStage === 'download'
-                || task.params?.syncStage === 'prompt_moderation_failed')
-            && Boolean(window.flowCanvas?.mcp?.resumeVideo);
+        this.retryingGenerationTasks ||= new Set();
+        if (this.retryingGenerationTasks.has(taskId)) return;
         const sourceProviderId = String(task.providerId || '').split('::model:')[0];
         const currentProvider = this.providers.find(item => item.id === sourceProviderId);
         const provider = currentProvider
@@ -3228,11 +3227,28 @@ export class AgentSidebar {
             return;
         }
 
-        let retryImageReferences = task.kind === 'image'
-            ? task.sourcePaths.map(filePath => ({ filePath }))
-            : [];
-        if (retryImageReferences.length > 0) {
-            try {
+        this.retryingGenerationTasks.add(taskId);
+        let placeholder = null;
+        let result = null;
+        try {
+            const projectId = task.projectId || this.options.getActiveProjectId?.();
+            if (await this.options.flushBoard?.() === false) throw new Error('画板保存失败，未重新提交任务');
+            if (!projectId) throw new Error('原项目未记录，请在原项目中重试');
+            const imageParams = { ...imageGenerationRequestParams({ ...task.promptDraftConfig, ...task.params }, task.model, originalNodeId),
+                ...(task.params?.midjourney ? { midjourney: task.params.midjourney } : {}) };
+            const resolution = normalizeVideoGenerationResolution(task.model, task.params?.resolution);
+            const validation = validateModelRequest({ config: modelConfigStore.getConfig(), provider: { ...provider, kind: task.kind },
+                prompt: task.prompt,
+                fields: task.kind === 'image' ? { resolutionTier: imageParams.size, quality: imageParams.quality, n: 1 }
+                    : { resolutionTier: resolution, ratio: task.params?.ratio, duration: task.params?.duration },
+                features: task.kind === 'video' ? task.params : { webSearch: imageParams.webSearch },
+                references: { image: { count: task.sourcePaths?.length || 0 }, video: { count: task.params?.videoSourcePaths?.length || 0 },
+                    audio: { count: task.params?.audioSourcePaths?.length || 0 } } });
+            if (!validation.ok) throw new Error(validation.errors.map(issue => issue.message).join('\n'));
+            let retryImageReferences = task.kind === 'image'
+                ? (task.sourcePaths || []).map(filePath => ({ filePath }))
+                : [];
+            if (retryImageReferences.length > 0) {
                 const prepared = await this._prepareImageReferencesForGeneration(retryImageReferences);
                 if (prepared === CANCELED_IMAGE_REFERENCES) {
                     this._updateGenerationTask(task.id, {
@@ -3242,28 +3258,19 @@ export class AgentSidebar {
                 }
                 if (!prepared) return;
                 retryImageReferences = prepared.references;
-            } catch (error) {
-                this._recordGenerationError(task.id, error);
-                return;
             }
-        }
-        this._updateGenerationTask(task.id, {
-            status: 'running',
-            error: null,
-            attempts: (task.attempts || 1) + 1,
-            params: {
-                syncStage: shouldResumeVideo ? 'recovering' : 'submit'
-            },
-            ...(task.kind === 'image' ? {
-                sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
-            } : {})
-        });
-        let placeholder = null;
-        let result = null;
-        const promptInfo = { promptDraftConfig: task.promptDraftConfig, referenceBindings: task.referenceBindings, userPrompt: task.userPrompt };
-        try {
+            this._updateGenerationTask(task.id, {
+                status: 'running',
+                error: null,
+                attempts: (task.attempts || 1) + 1,
+                params: { syncStage: 'submit' },
+                ...(task.kind === 'image' ? {
+                    sourcePaths: retryImageReferences.map(reference => reference.filePath).filter(Boolean)
+                } : {})
+            });
+            const promptInfo = { promptDraftConfig: task.promptDraftConfig, referenceBindings: task.referenceBindings, userPrompt: task.userPrompt };
             if (task.kind === 'image') {
-                placeholder = restoreOnOriginalNode ? null : this.options.beginImageGeneration?.({
+                placeholder = originalNodeId || projectId !== this.options.getActiveProjectId?.() ? null : this.options.beginImageGeneration?.({
                     size: task.params?.size,
                     sourceReferences: retryImageReferences,
                     onCancel: () => this._cancelGenerationTask(task.id)
@@ -3273,51 +3280,40 @@ export class AgentSidebar {
                     provider: 'openai',
                     providerConfig: provider,
                     clientTaskId: task.id,
+                    projectId,
+                    nodeId: originalNodeId || undefined,
+                    targetDir: task.params?.targetDir || undefined,
                     prompt: task.prompt,
                     ...promptInfo,
-                    size: task.params?.size || undefined,
-                    quality: task.params?.quality || 'high',
-                    responseFormat: task.params?.responseFormat || 'url',
-                    historyDisabled: task.params?.historyDisabled !== false,
-                    stream: task.params?.stream === true,
+                    ...imageParams,
                     sourceReferences: retryImageReferences,
                     x: placeholder?.x,
                     y: placeholder?.y,
                     canvasWidth: placeholder?.width,
                     canvasHeight: placeholder?.height,
-                    addToCanvas: !restoreOnOriginalNode
+                    addToCanvas: false,
+                    restoreToProject: true
                 });
             } else {
-                if (!window.flowCanvas?.mcp?.generateVideo && !shouldResumeVideo) throw new Error('本地视频接口不可用');
-                placeholder = restoreOnOriginalNode ? null : this.options.beginVideoGeneration?.({
+                if (!window.flowCanvas?.mcp?.generateVideo) throw new Error('本地视频接口不可用');
+                placeholder = originalNodeId || projectId !== this.options.getActiveProjectId?.() ? null : this.options.beginVideoGeneration?.({
                     ratio: task.params?.ratio || '16:9',
                     sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
                     onCancel: () => this._cancelGenerationTask(task.id)
                 }) || null;
-                result = shouldResumeVideo
-                    ? await window.flowCanvas.mcp.resumeVideo({
-                        providerConfig: provider,
-                        clientTaskId: task.id,
-                        taskId: task.taskId,
-                        prompt: task.prompt,
-                        ...promptInfo,
-                        targetDir: task.params?.targetDir || undefined,
-                        x: placeholder?.x,
-                        y: placeholder?.y,
-                        canvasWidth: placeholder?.width,
-                        canvasHeight: placeholder?.height,
-                        addToCanvas: !restoreOnOriginalNode
-                    })
-                    : await window.flowCanvas.mcp.generateVideo({
+                result = await window.flowCanvas.mcp.generateVideo({
                     provider: 'openai-video',
                     providerConfig: provider,
                     clientTaskId: task.id,
+                    projectId,
+                    nodeId: originalNodeId || undefined,
+                    targetDir: task.params?.targetDir || undefined,
                     prompt: task.prompt,
                     ...promptInfo,
                     sourceReferences: task.sourcePaths.map(filePath => ({ filePath })),
                     videoReferences: (task.params?.videoSourcePaths || []).map(filePath => ({ filePath })),
                     audioReferences: (task.params?.audioSourcePaths || []).map(filePath => ({ filePath })),
-                    resolution: task.params?.resolution || undefined,
+                    resolution: resolution || undefined,
                     ratio: task.params?.ratio || undefined,
                     duration: task.params?.duration ?? undefined,
                     cameraFixed: task.params?.cameraFixed,
@@ -3329,31 +3325,26 @@ export class AgentSidebar {
                     y: placeholder?.y,
                     canvasWidth: placeholder?.width,
                     canvasHeight: placeholder?.height,
-                    addToCanvas: !restoreOnOriginalNode
+                    addToCanvas: false,
+                    restoreToProject: true
                 });
             }
             if (this._isGenerationTaskCanceled(task.id) || result?.canceled) {
                 throw this._generationCancellationError();
             }
             if (result?.success === false) throw this._generationFailureError(result, '生成请求失败');
-            if (restoreOnOriginalNode) {
-                const restored = await this.options.completeGenerationTaskOnNode({
-                    nodeId: originalNodeId,
-                    kind: task.kind,
-                    taskId: task.id,
-                    result
-                });
-                if (!restored) throw new Error('原生成节点已不存在，无法恢复到原位置');
-            }
             this._updateGenerationTask(task.id, {
                 status: 'success',
                 error: null,
                 filePath: result?.filePath || null,
+                filePaths: result?.filePaths || [result?.filePath].filter(Boolean),
+                params: { nodeId: result?.nodeId || originalNodeId, syncStage: 'completed' },
                 taskId: result?.taskId || null
             });
         } catch (error) {
             this._recordGenerationError(task.id, error);
         } finally {
+            this.retryingGenerationTasks.delete(taskId);
             if (placeholder?.id) {
                 if (task.kind === 'image') this.options.endImageGeneration?.(placeholder.id, result?.item?.id);
                 else this.options.endVideoGeneration?.(placeholder.id, result?.item?.id);

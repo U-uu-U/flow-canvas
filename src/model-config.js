@@ -443,3 +443,9 @@ export function createModelConfigStore(options = {}) {
 }
 
 export const modelConfigStore = createModelConfigStore();
+
+if (typeof window !== 'undefined') {
+    window.__flowCanvasGetModelConfigSnapshot = () => ({
+        config: modelConfigStore.getConfig(), status: modelConfigStore.getStatus()
+    });
+}

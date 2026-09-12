@@ -3157,6 +3157,26 @@ ipcMain.handle('mcp:generation:recover', async (event, body) => {
     }
 });
 
+ipcMain.handle('mcp:generation:land-result', async (event, body) => {
+    if (!isCurrentMainWindowSender(event)) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge?.landGenerationResult) throw new Error('原项目落图服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.landGenerationResult(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code };
+    }
+});
+
+ipcMain.handle('mcp:generation:node-status', async (event, body) => {
+    if (!isCurrentMainWindowSender(event)) return { success: false, error: 'Invalid sender' };
+    try {
+        if (!flowCanvasBridge?.updateGenerationNodeStatus) throw new Error('原项目状态服务尚未就绪');
+        return { success: true, ...await flowCanvasBridge.updateGenerationNodeStatus(body || {}) };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code };
+    }
+});
+
 ipcMain.handle('mcp:generation:recovery-list', event => {
     if (event.sender !== mainWindow?.webContents) return [];
     return flowCanvasBridge?.recoveryStore.list() || [];

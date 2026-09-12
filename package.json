@@ -50,7 +50,7 @@
             "dist/**/*",
             "electron-main/**/*",
             "shared/**/*",
-            "src/{package.json,board-transaction.js,graph-model.js,node-types.js,generator-result-stack.js,image-node-settings.js,image-intent-pipeline.js,provider-capabilities.js,reference-citations.js}",
+            "src/{package.json,board-transaction.js,graph-model.js,node-types.js,generator-result-stack.js,generation-request-params.js,image-node-settings.js,image-intent-pipeline.js,provider-capabilities.js,reference-citations.js,model-config.js,model-config-default.js,model-config-capabilities.js}",
             "mcp/**/*",
             "package.json"
         ],

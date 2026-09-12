@@ -286,6 +286,13 @@ class FlowCanvasBridge {
             .filter(key => body[key] !== undefined).map(key => [key, body[key]]));
         params.videoSourcePaths = (body.videoReferences || []).map(reference => reference.filePath).filter(Boolean);
         params.audioSourcePaths = (body.audioReferences || []).map(reference => reference.filePath).filter(Boolean);
+        if (body.restoreToProject === true) {
+            if (typeof this.captureRecoveryTarget !== 'function') throw new Error('画板恢复服务尚未就绪，未重新提交任务');
+            request.params = params;
+            request.sourcePaths = (body.sourceReferences || []).map(reference => reference.filePath).filter(Boolean);
+            request.targetSignature = this.captureRecoveryTarget(request);
+            request.addToCanvas = false;
+        }
         this.recoveryStore.update(request.clientTaskId, {
             kind, projectId: request.projectId, nodeId: body.nodeId || null,
             providerId: body.providerConfig?.sourceProviderId || body.providerConfig?.id || null,
@@ -851,10 +858,22 @@ class FlowCanvasBridge {
     }
 
     async generateImageFromRenderer(body) {
+        const existing = body?.restoreToProject && this.recoveryStore.get(body.clientTaskId);
+        if (existing?.taskId || existing?.result?.filePath) return this.recoverGenerationFromRenderer({ ...body, kind: 'image' });
         body = this._rememberGeneration('image', body);
-        return this._runCancelableGeneration(body?.clientTaskId, signal =>
-            this._generateImageFromRenderer(body, signal)
-        );
+        return this._runCancelableGeneration(body?.clientTaskId, async signal => {
+            const result = await this._generateImageFromRenderer(body, signal);
+            return this._attachRetriedGeneration('image', body, result, signal);
+        });
+    }
+
+    async _attachRetriedGeneration(kind, body, result, signal) {
+        if (body.restoreToProject !== true) return result;
+        throwIfGenerationCanceled(signal);
+        if (typeof this.attachRecoveredGeneration !== 'function') throw new Error('画板恢复服务尚未就绪，产物已保留');
+        const attached = await this.attachRecoveredGeneration({ ...body, kind, taskId: result.taskId }, result, signal);
+        this.recoveryStore.update(body.clientTaskId, { state: 'attached', nodeId: attached.nodeId });
+        return { ...result, ...attached };
     }
 
     async _generateImageFromRenderer(body, signal) {
@@ -898,7 +917,7 @@ class FlowCanvasBridge {
                 onDownloaded: result => this._rememberResult(body, result)
             });
             if (!result?.success && (body.provider || body.providerConfig)) {
-                throw new Error(result?.error || 'Image generation API failed');
+                throw Object.assign(new Error(result?.error || 'Image generation API failed'), { code: result?.code });
             }
         }
         if (!result?.success) {
@@ -990,10 +1009,13 @@ class FlowCanvasBridge {
     }
 
     async generateVideoFromRenderer(body) {
+        const existing = body?.restoreToProject && this.recoveryStore.get(body.clientTaskId);
+        if (existing?.taskId || existing?.result?.filePath) return this.recoverGenerationFromRenderer({ ...body, kind: 'video' });
         body = this._rememberGeneration('video', body);
-        return this._runCancelableGeneration(body?.clientTaskId, signal =>
-            this._generateVideoFromRenderer(body, signal)
-        );
+        return this._runCancelableGeneration(body?.clientTaskId, async signal => {
+            const result = await this._generateVideoFromRenderer(body, signal);
+            return this._attachRetriedGeneration('video', body, result, signal);
+        });
     }
 
     async _generateVideoFromRenderer(body, signal) {
@@ -1031,7 +1053,7 @@ class FlowCanvasBridge {
             })
         });
         throwIfGenerationCanceled(signal);
-        if (!result?.success) throw new Error(result?.error || '\u89c6\u9891\u751f\u6210 API \u8bf7\u6c42\u5931\u8d25');
+        if (!result?.success) throw Object.assign(new Error(result?.error || '\u89c6\u9891\u751f\u6210 API \u8bf7\u6c42\u5931\u8d25'), { code: result?.code });
         this.notifyTaskCompleted?.({
             clientTaskId: body.clientTaskId || null,
             remoteTaskId: result.taskId,
@@ -1898,7 +1920,7 @@ async function pollOpenAiImageTask(generationEndpoint, apiKey, taskId, initialPa
         const status = imageTaskStatus(payload);
         if (isFailedImageTaskStatus(status)) {
             const reason = imageTaskErrorMessage(payload) || '服务器未提供失败原因';
-            throw new Error(`图片生成任务失败：${reason}`);
+            throw Object.assign(new Error(`图片生成任务失败：${reason}`), { code: 'UPSTREAM_TASK_FAILED' });
         }
         if (isCompletedImageTaskStatus(status)) {
             if (++emptyCompleted > 12) throw new Error(`图片任务 ${taskId} 已完成，但上游尚未返回产物地址；可稍后再次拉取`);
@@ -2254,7 +2276,7 @@ async function tryGenerateWithOpenAI(prompt, targetDir, options = {}) {
             } : null
         };
     } catch (error) {
-        return { success: false, error: error.message };
+        return { success: false, error: error.message, code: error.code };
     }
 }
 
@@ -2929,7 +2951,8 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         transientFailures = 0;
         const payloadError = getVideoPayloadError(payload);
         if (payloadError && !getVideoResultUrl(payload)) {
-            throw new Error(formatVideoTaskFailure(payloadError, describeRemoteEndpoint(taskUrl), '查询视频任务失败'));
+            throw Object.assign(new Error(formatVideoTaskFailure(payloadError, describeRemoteEndpoint(taskUrl), '查询视频任务失败')),
+                { code: isFailedVideoStatus(getVideoTaskStatus(payload)) ? 'UPSTREAM_TASK_FAILED' : undefined });
         }
         const resolvedTaskId = getVideoTaskId(payload);
         if (resolvedTaskId && resolvedTaskId !== currentTaskId) {
@@ -2946,7 +2969,7 @@ async function pollOpenAiVideoTask(generationEndpoint, apiKey, taskId, initialRe
         }
         if (isFailedVideoStatus(taskStatus)) {
             const reason = getVideoPayloadError(payload) || '\u670d\u52a1\u7aef\u672a\u63d0\u4f9b\u5931\u8d25\u539f\u56e0';
-            throw new Error(formatVideoTaskFailure(reason));
+            throw Object.assign(new Error(formatVideoTaskFailure(reason)), { code: 'UPSTREAM_TASK_FAILED' });
         }
         if (isCompletedVideoStatus(taskStatus) && !url && ++emptyCompleted > 12) {
             throw new Error(`视频任务 ${currentTaskId} 已完成，但上游尚未返回产物地址；可稍后再次拉取`);
@@ -3423,7 +3446,7 @@ async function tryGenerateWithOpenAIVideo(prompt, targetDir, options = {}) {
             height: Number(options.height) || undefined
         };
     } catch (error) {
-        return { success: false, error: error.message || String(error) };
+        return { success: false, error: error.message || String(error), code: error.code };
     }
 }
 
