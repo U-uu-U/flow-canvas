@@ -456,7 +456,8 @@ describe('AgentMedia isolated previews', () => {
         const h = await mediaSetup(t, 'source.mp4');
         const controller = new AbortController();
         const result = await h.media.read('original', { nodeId: 'source', time: 3 }, controller.signal);
-        assert.equal(h.frameCalls[0][0], await fs.realpath(h.filePath));
+        // Resolve both sides with the same API; Windows may return an 8.3 path alias.
+        assert.equal(await fs.realpath(h.frameCalls[0][0]), await fs.realpath(h.filePath));
         assert.equal(h.frameCalls[0][1], 3);
         assert.equal(h.frameCalls[0][2], controller.signal);
         assert.deepEqual(result.frames, [{ time: 1 }, { time: 7 }]);
