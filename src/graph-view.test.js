@@ -10,8 +10,10 @@ test.before(async () => {
     ({ curvePoints, getCompatibleNodeOptions, boxIntersectsViewport, viewportFixedScale } = await import('./graph-view.js'));
 });
 
-test('viewportFixedScale: 抵消画布缩放并保持屏幕尺寸', () => {
-    assert.equal(viewportFixedScale(0.25), 4);
+test('viewportFixedScale: 缩放补偿受上限约束，放大时保持屏幕尺寸', () => {
+    assert.equal(viewportFixedScale(0.25), 2);
+    assert.equal(viewportFixedScale(0.25, 1, 4), 4);
+    assert.equal(viewportFixedScale(0.1, 1, 6), 6);
     assert.equal(viewportFixedScale(1), 1);
     assert.equal(viewportFixedScale(2), 0.5);
     assert.equal(viewportFixedScale(2, 2), 1);

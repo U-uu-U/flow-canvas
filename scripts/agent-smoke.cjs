@@ -111,8 +111,14 @@ async function poll(read, test, timeout = 30000) {
         electronApp = await electron.launch({ executablePath: require('electron'), args: [path.join(__dirname, 'agent-smoke-entry.cjs')], env: launchEnv });
         electronApp.process().stderr.on('data', chunk => process.stderr.write(chunk));
         electronApp.process().stdout.on('data', chunk => process.stdout.write(chunk));
-        const page = await electronApp.firstWindow();
-        await page.waitForFunction(() => window.flowCanvas?.agent && document.querySelector('#agentInput'), { timeout: 20000 });
+        let page;
+        for (let attempt = 0; attempt < 150; attempt++) {
+            page = electronApp.windows().find(window => /dist[\\/]index\.html|127\.0\.0\.1:15321/.test(window.url()));
+            if (page) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!page) throw new Error('The main renderer window did not open');
+        await page.waitForFunction(() => window.flowCanvas?.agent && document.querySelector('#agentInput'), null, { timeout: 20000 });
         await page.waitForFunction(() => !document.body.classList.contains('app-startup-error'));
         if (live) console.log(await page.evaluate(async () => {
             const loaded = await window.flowCanvas.apiConfig.load();

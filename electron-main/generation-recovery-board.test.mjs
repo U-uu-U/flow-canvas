@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { installGenerationRecoveryBoard } from './generation-recovery-board.mjs';
 import { AgentBoardService } from './agent-board-service.mjs';
+import { applyGeneratorStackResult } from '../shared/generation-result-state.mjs';
 
 function setup() {
     const node = { id: 'node', kind: 'op', nodeType: 'image', config: { prompt: 'original' }, width: 400, height: 300, x: 10, y: 10 };
@@ -14,6 +15,34 @@ function setup() {
         prompt: 'original', providerConfig: { model: 'mj', id: 'api' } };
     request.targetSignature = bridge.captureRecoveryTarget(request);
     return { bridge, board, request, result: { taskId: 'remote', filePath: '/one.png', filePaths: ['/one.png', '/two.png', '/three.png', '/four.png'] } };
+}
+
+for (const kind of ['image', 'video']) {
+    test(`${kind} recovery and direct stack application retain the same dimensions and candidate order`, async () => {
+        const h = setup();
+        await h.board.updateProject('original', project => Object.assign(project.items[0], {
+            nodeType: kind, runStatus: 'error', runError: 'old failure'
+        }));
+        h.request.kind = kind;
+        h.request.sourcePaths = ['/reference.png'];
+        h.request.targetSignature = h.bridge.captureRecoveryTarget(h.request);
+        h.result.images = h.result.filePaths.map((filePath, index) => ({ filePath, candidateIndex: index + 1,
+            naturalWidth: index ? 900 : 1800, naturalHeight: index ? 1800 : 900 }));
+        const expected = h.board.readProject('original').items[0];
+        await h.bridge.attachRecoveredGeneration(h.request, h.result);
+        const actual = h.board.readProject('original').items[0];
+        for (const item of h.result.images) applyGeneratorStackResult(expected, {
+            _resultFilePath: item.filePath, _resultItem: { ...item, mediaType: kind, generation: actual.generation }
+        }, { generation: actual.generation, completed: true });
+        Object.assign(expected, { filePath: h.result.filePath, mediaType: kind, metadata: actual.metadata });
+        assert.deepEqual(actual, expected);
+        assert.deepEqual([actual.width, actual.height], kind === 'image' ? [264, 132] : [320, 160]);
+        assert.deepEqual(actual.resultItems.map(item => item.candidateIndex), [1, 2, 3, 4]);
+        assert.deepEqual(actual.generation.references, [{ filePath: '/reference.png' }]);
+        assert.equal(actual.runError, '');
+        await h.bridge.attachRecoveredGeneration(h.request, h.result);
+        assert.deepEqual(h.board.readProject('original').items[0], actual);
+    });
 }
 
 test('restores all results to original project/node with fixed dimensions and no duplicate stack', async () => {

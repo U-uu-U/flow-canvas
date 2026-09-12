@@ -41,7 +41,7 @@
   </symbol>
 
   <symbol id="icon-search" viewBox="0 0 24 24">
-    <path fill-rule="evenodd" d="M10.5 2a8.5 8.5 0 1 1-5.1 15.3L1.7 21 3 22.3l3.7-3.7A8.5 8.5 0 0 1 10.5 2Zm0 3.2a5.3 5.3 0 1 0 0 10.6 5.3 5.3 0 0 0 0-10.6Z"/>
+    <path fill-rule="evenodd" d="M10.5 2a8.5 8.5 0 1 0 6.1 14.4l5 5 1.4-1.4-5-5A8.5 8.5 0 0 0 10.5 2Zm0 3.2a5.3 5.3 0 1 1 0 10.6 5.3 5.3 0 0 1 0-10.6Z"/>
   </symbol>
 
   <symbol id="icon-models" viewBox="0 0 24 24">

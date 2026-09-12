@@ -283,6 +283,32 @@ test('MiniMax H3 视频协议: 中转地址不被改写，显式任务中心按 
     assert.equal(isMiniMaxH3UnavailableResponse(401, '模型不可用'), false);
 });
 
+test('HM multimodal routes use the documented unified wire format without truncation', () => {
+    const { isSeedanceVideoModel, seedanceReferenceLimits } = require('./video-provider-adapters');
+    for (const [model, maxDuration, image, video, audio] of [
+        ['seedance_v2.0-933', 15, 9, 3, 3],
+        ['seedance_v2.5-101010', 30, 10, 10, 10],
+        ['seedance_v2.5-301010', 30, 30, 10, 10]
+    ]) {
+        assert.equal(isSeedanceVideoModel(model), true);
+        assert.deepEqual(seedanceReferenceLimits(model), { image, video, audio });
+        const refs = (count, ext) => Array.from({ length: count }, (_, i) => `https://example.com/${i}.${ext}`);
+        const input = { model, prompt: 'test', aspectRatio: '16:9', referenceImages: refs(image, 'jpg'),
+            referenceVideos: refs(video, 'mp4'), referenceAudios: refs(audio, 'mp3') };
+        const body = buildSeedance25RequestBody(input);
+        assert.deepEqual(body, { model, prompt: 'test', seconds: maxDuration, ratio: '16:9', resolution: '720p',
+            image_urls: input.referenceImages, video_urls: input.referenceVideos, audio_urls: input.referenceAudios });
+        for (const duration of [3, maxDuration + 1, 4.5]) assert.throws(() => buildSeedance25RequestBody({ ...input, duration }));
+        assert.equal(buildSeedance25RequestBody({ ...input, duration: 4 }).seconds, 4);
+        for (const field of ['referenceImages', 'referenceVideos', 'referenceAudios']) {
+            assert.throws(() => buildSeedance25RequestBody({ ...input, [field]: [...input[field], input[field][0]] }));
+        }
+        assert.equal(buildVideoGenerationEndpoint('https://art.ravenhash.org/v1', model), 'https://art.ravenhash.org/v1/video/generations');
+        assert.equal(buildVideoGenerationEndpoint('https://video.zhubo.asia/v1', model), 'https://video.zhubo.asia/v1/videos');
+    }
+    assert.throws(() => buildSeedance25RequestBody({ model: 'seedance_v2.5', prompt: 'x', referenceVideos: ['https://example.com/v.mp4'] }));
+});
+
 test('MiniMax H3 中转请求体: 使用 RavenHash 统一视频协议', () => {
     const references = ['https://example.com/1.png', 'https://example.com/2.png'];
     const relayBody = buildMiniMaxH3RequestBody({

@@ -11,3 +11,6 @@
 "MiniMax视频","H3原生任务中心","MiniMax-H3-c1","model; prompt; resolution=720p; duration; aspect_ratio; reference_images; reference_audios","当前固定发送720p；支持参考图片和音频；不支持参考视频"
 "文字模型","OpenAI兼容线路","gpt-5.6-terra / gpt-5.5","model; messages; tools; stream","当前没有维护模型专属上下文窗口和最大输出Token限制表"
 "文字模型","Anthropic线路","claude-opus-5","model; messages; tools; stream","当前没有维护模型专属上下文窗口和最大输出Token限制表"
+"RavenHash视频","主播 HM 933","seedance_v2.0-933","model; prompt; seconds; ratio; resolution; image_urls; video_urls; audio_urls","2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-15秒、9图/3视频/3音频；固定按次计费；RavenHash售价CNY6.5/次"
+"RavenHash视频","主播 HM 101010","seedance_v2.5-101010","model; prompt; seconds; ratio; resolution; image_urls; video_urls; audio_urls","2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-30秒、10图/10视频/10音频；固定按次计费；RavenHash售价CNY7/次"
+"RavenHash视频","主播 HM 301010","seedance_v2.5-301010","model; prompt; seconds; ratio; resolution; image_urls; video_urls; audio_urls","2026-09-12核对video.zhubo.asia模型目录及统一视频API文档：720p、4-30秒、30图/10视频/10音频；固定按次计费；RavenHash售价CNY10/次；成本不是售价"

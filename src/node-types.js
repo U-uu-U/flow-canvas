@@ -8,7 +8,8 @@ import {
     extractDeterministicSignals,
     validateEditPlan
 } from './image-intent-pipeline.js';
-import { isGptImage2Model, isMidjourneyImageModel } from './provider-capabilities.js';
+import { isMidjourneyImageModel } from './provider-capabilities.js';
+import { imageGenerationRequestParams, normalizeVideoGenerationResolution } from './generation-request-params.js';
 import { inferClosestAspectRatio } from './image-node-settings.js';
 import { restoreReferenceCitations, referenceCitationGuide, withoutReferenceCitationGuide, bindReferenceCitations } from './reference-citations.js';
 
@@ -385,7 +386,11 @@ async function mapWithConcurrency(values, concurrency, worker) {
         }
     };
     await Promise.all(Array.from({ length: limit }, consume));
-    if (aborted) throw firstError;
+    if (aborted) {
+        firstError.partialResults = results.filter(result => result !== undefined);
+        firstError.unstartedIndices = list.slice(cursor).map((_, index) => cursor + index);
+        throw firstError;
+    }
     return results;
 }
 
@@ -537,15 +542,7 @@ NODE_TYPES['image'] = {
                 ? `${providerPrompt}\n\nNegative: ${config.negativePrompt}`
                 : providerPrompt;
             const imageModel = provider?.model || config.model;
-            const gptImage2 = isGptImage2Model(imageModel);
-            const imageRequestParams = {
-                size: `${config.width || 1024}x${config.height || 1024}`,
-                quality: config.quality || 'high',
-                responseFormat: gptImage2 ? (config.responseFormat || 'url') : 'url',
-                historyDisabled: gptImage2 ? config.historyDisabled !== false : true,
-                stream: gptImage2 ? config.stream === true : false,
-                nodeId: ctx?.item?.id || null
-            };
+            const imageRequestParams = imageGenerationRequestParams(config, imageModel, ctx?.item?.id);
             ctx?.validateGenerationRequest?.({
                 kind: 'image', provider, prompt: requestPrompt,
                 fields: { resolutionTier: imageRequestParams.size, quality: imageRequestParams.quality, n: 1 },
@@ -571,40 +568,12 @@ NODE_TYPES['image'] = {
                     clientTaskId: clientTaskId || undefined,
                     nodeId: ctx?.item?.id,
                     projectId: generationTask?.projectId,
+                    targetDir: generationTask?.params?.targetDir || undefined,
                     prompt: requestPrompt,
                     promptDraftConfig,
                     referenceBindings: bound.bindings,
                     userPrompt: generationUserPrompt(prompt, config),
-                    size: imageRequestParams.size,
-                    quality: imageRequestParams.quality,
-                    webSearch: config.webSearch === true ? true : undefined,
-                    responseFormat: imageRequestParams.responseFormat,
-                    historyDisabled: imageRequestParams.historyDisabled,
-                    stream: imageRequestParams.stream,
-                    midjourney: midjourneyModel ? {
-                        ratio: config.ratio,
-                        version: config.midjourneyVersion,
-                        raw: config.midjourneyRaw === true,
-                        stylize: config.midjourneyStylize,
-                        chaos: config.midjourneyChaos,
-                        weird: config.midjourneyWeird,
-                        quality: config.midjourneyQuality,
-                        imageWeight: config.midjourneyImageWeight,
-                        styleReference: config.midjourneyStyleReference,
-                        styleWeight: config.midjourneyStyleWeight,
-                        styleVersion: config.midjourneyStyleVersion,
-                        omniReference: config.midjourneyOmniReference,
-                        omniWeight: config.midjourneyOmniWeight,
-                        profile: config.midjourneyProfile,
-                        seed: config.midjourneySeed,
-                        tile: config.midjourneyTile === true,
-                        draft: config.midjourneyDraft === true,
-                        repeat: config.midjourneyRepeat,
-                        speed: config.midjourneySpeed,
-                        visibility: config.midjourneyVisibility,
-                        definition: config.resolutionTier === '2K' ? 'hd' : 'sd',
-                        negativePrompt: config.negativePrompt
-                    } : undefined,
+                    ...imageRequestParams,
                     sourceReferences,
                     addToCanvas: false
                 });
@@ -695,6 +664,9 @@ NODE_TYPES['image'] = {
                     generatedAt: Date.now()
                 }
             }));
+        }).catch(error => {
+            if (error.partialResults?.length) error.partialOutput = packGenerationResults('image', error.partialResults.flat());
+            throw error;
         });
 
         const results = resultGroups.flat();
@@ -762,6 +734,7 @@ NODE_TYPES['video'] = {
             entry?.source?.filePath && entry.source.filePath === frames[0]?.filePath
         );
         const videoModel = String(provider.model || config.model || '');
+        config.resolution = normalizeVideoGenerationResolution(videoModel, config.resolution);
         const h3Model = /minimax[^a-z0-9]*h3/i.test(videoModel);
         const seedance25Model = /seedance[^a-z0-9]*(?:v[^a-z0-9]*)?2[._-]?5/i.test(videoModel)
             || /^sd2(?:\.5|_5|-5)(?:$|-haidiyue-face$)/i.test(videoModel.trim());
@@ -848,6 +821,7 @@ NODE_TYPES['video'] = {
                     clientTaskId: clientTaskId || undefined,
                     nodeId: ctx?.item?.id,
                     projectId: generationTask?.projectId,
+                    targetDir: generationTask?.params?.targetDir || undefined,
                     prompt,
                     promptDraftConfig,
                     referenceBindings: bound.bindings,
@@ -929,6 +903,16 @@ NODE_TYPES['video'] = {
                     generatedAt: Date.now()
                 }
             };
+        }).catch(error => {
+            for (const index of error.unstartedIndices || []) {
+                const task = generationTasks[index];
+                const taskId = typeof task === 'string' ? task : task?.id;
+                if (taskId) ctx?.updateGenerationTask?.(taskId, {
+                    status: 'canceled', error: '批次中其他任务失败，本项尚未提交', params: { syncStage: 'not_submitted' }
+                });
+            }
+            if (error.partialResults?.length) error.partialOutput = packGenerationResults('video', error.partialResults);
+            throw error;
         });
 
         return packGenerationResults('video', results);

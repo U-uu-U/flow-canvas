@@ -4,6 +4,7 @@ const { AgentRuntime } = require('./agent-runtime.cjs');
 const { AgentRunStore, redact } = require('./agent-run-store.cjs');
 const { AgentMedia } = require('./agent-media.cjs');
 const { callAgentProvider } = require('./agent-provider.cjs');
+const { createEffectiveModelConfigReader } = require('./model-config-service.cjs');
 
 async function createAgentServices({ store, bridge, apiConfigStore, dataDir, getSaveDir, getMainWindow, BrowserWindow, net, safeStorage }) {
     const { AgentBoardService } = await import('./agent-board-service.mjs');
@@ -17,9 +18,14 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         if (change.type !== 'mergeRendererSave') {setImmediate(() => notify({ event: 'agent:board-updated',
             projectIds: change.projectIds, data: store.load() }));}
     } });
-    const generation = new AgentGeneration({ board, bridge, loadConfig: () => apiConfigStore.load().config || {}, fallbackDir: getSaveDir() });
+    const readModelConfig = createEffectiveModelConfigReader({ getMainWindow });
+    const generation = new AgentGeneration({ board, bridge, loadConfig: () => apiConfigStore.load().config || {},
+        loadModelConfig: () => { throw Object.assign(new Error('请先读取已生效 CONFIG 快照'), { code: 'MODEL_CONFIG_UNAVAILABLE' }); },
+        refreshModelConfig: readModelConfig, fallbackDir: getSaveDir() });
     const { installGenerationRecoveryBoard } = await import('./generation-recovery-board.mjs');
     installGenerationRecoveryBoard(bridge, board);
+    const { installGenerationNodeLanding } = await import('./generation-node-landing.mjs');
+    installGenerationNodeLanding(bridge, board);
     let decoder = null;
     let frameQueue = Promise.resolve();
     const media = new AgentMedia({ board, directory: path.join(dataDir, 'agent-media'), extraRoots: () => {
@@ -54,8 +60,9 @@ async function createAgentServices({ store, bridge, apiConfigStore, dataDir, get
         boardDefinitions: BOARD_TOOL_DEFINITIONS,
         resolveProvider: (binding, kind) => generation.resolveProvider(binding, kind),
         callProvider: request => callAgentProvider({ ...request, fetchImpl: (...args) => net.fetch(...args) }),
-        listModels: () => generation.listModels(), readMedia: (...args) => media.read(...args),
-        prepareGraph: (...args) => generation.prepare(...args), executeStep: (...args) => generation.execute(...args),
+        listModels: async () => generation.listModels(await readModelConfig()), readMedia: (...args) => media.read(...args),
+        prepareGraph: async (run, input) => generation.prepare(run, input, await readModelConfig()),
+        executeStep: (...args) => generation.execute(...args),
         onEvent: event => {
             if (!/delta|token/i.test(event.type)) {require('./diagnostics.cjs').diagnostic(
                 event.data?.error ? 'error' : 'info', 'agent.event', {

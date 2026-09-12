@@ -11,6 +11,13 @@ const ASSET_CATEGORY_ORDER = ['角色', '场景', '道具', '风格', '音效', 
 
 export class SidebarManager {
     constructor(storeData, assetLibraryContext = {}) {
+        if (!document.getElementById('sidebar-interaction-styles')) {
+            const styles = document.createElement('link');
+            styles.id = 'sidebar-interaction-styles';
+            styles.rel = 'stylesheet';
+            styles.href = new URL('./sidebar-interactions.css', import.meta.url).href;
+            document.head.appendChild(styles);
+        }
         this.storeData = storeData;
         this.listeners = {};
         this.pendingMove = null;
@@ -398,33 +405,63 @@ export class SidebarManager {
         }
     }
 
-    _showAssetClassificationMenu(filePath, clientX, clientY) {
-        document.querySelector('.asset-classification-menu')?.remove();
+    _showAssetClassificationMenu(filePath, clientX, clientY, trigger = document.activeElement) {
+        this._closeAssetClassificationMenu?.();
         const metadata = this._assetMetadata(filePath) || {};
         const explicitCategories = this._metadataValues(metadata.categories)
             .map(category => this._normalizeAssetCategory(category));
         const activeCategories = new Set(explicitCategories.length ? explicitCategories : this._assetCategories(filePath));
         const menu = document.createElement('div');
         menu.className = 'asset-classification-menu';
+        menu.setAttribute('role', 'group');
+        menu.setAttribute('aria-label', '素材分类');
         menu.innerHTML = `
             <div class="asset-classification-menu-head"><span>素材分类</span><small>可多选</small></div>
-            <button type="button" data-favorite class="asset-classification-favorite ${metadata.favorite ? 'active' : ''}">
+            <button type="button" data-favorite aria-pressed="${metadata.favorite === true}" class="asset-classification-favorite ${metadata.favorite ? 'active' : ''}">
                 <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-favorite"></use></svg>
                 <span>${metadata.favorite ? '取消收藏' : '加入收藏'}</span>
             </button>
             <div class="asset-classification-options">
-                ${ASSET_CATEGORY_ORDER.map(category => `<button type="button" data-assign-category="${this._escapeHtml(category)}" class="${activeCategories.has(category) ? 'active' : ''}"><svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg><span>${this._escapeHtml(category)}</span></button>`).join('')}
+                ${ASSET_CATEGORY_ORDER.map(category => `<button type="button" data-assign-category="${this._escapeHtml(category)}" aria-pressed="${activeCategories.has(category)}" class="${activeCategories.has(category) ? 'active' : ''}"><svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-folder"></use></svg><span>${this._escapeHtml(category)}</span></button>`).join('')}
             </div>`;
         document.body.appendChild(menu);
         const rect = menu.getBoundingClientRect();
         menu.style.left = `${Math.max(8, Math.min(clientX, window.innerWidth - rect.width - 8))}px`;
         menu.style.top = `${Math.max(8, Math.min(clientY, window.innerHeight - rect.height - 8))}px`;
 
+        const closeMenu = (restoreFocus = false) => {
+            menu.remove();
+            document.removeEventListener('pointerdown', onPointerDown, true);
+            document.removeEventListener('focusin', onFocusIn);
+            this._closeAssetClassificationMenu = null;
+            trigger?.setAttribute('aria-expanded', 'false');
+            if (restoreFocus) {
+                const card = [...(this.dom.assetLibraryGrid?.querySelectorAll('.asset-library-card') || [])]
+                    .find(entry => this._normalizePath(entry.dataset.assetPath) === this._normalizePath(filePath));
+                const target = trigger?.isConnected ? trigger : card?.querySelector('[data-classify-asset]') || card;
+                (target || this.dom.assetLibrarySearch)?.focus();
+            }
+        };
+        const onPointerDown = event => { if (!menu.contains(event.target)) closeMenu(); };
+        const onFocusIn = event => { if (!menu.contains(event.target)) closeMenu(); };
+        this._closeAssetClassificationMenu = closeMenu;
+        trigger?.setAttribute('aria-expanded', 'true');
+        menu.querySelector('button')?.focus();
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('focusin', onFocusIn);
+        menu.addEventListener('keydown', event => {
+            event.stopPropagation();
+            if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); }
+        });
+        const updateClassification = async patch => {
+            await this._updateAssetClassification(filePath, patch);
+            if (this._closeAssetClassificationMenu === closeMenu) closeMenu(true);
+        };
+
         menu.addEventListener('click', event => {
             const favoriteButton = event.target.closest('[data-favorite]');
             if (favoriteButton) {
-                void this._updateAssetClassification(filePath, { favorite: metadata.favorite !== true });
-                menu.remove();
+                void updateClassification({ favorite: metadata.favorite !== true });
                 return;
             }
             const categoryButton = event.target.closest('[data-assign-category]');
@@ -434,19 +471,11 @@ export class SidebarManager {
             if (categories.length === 0 && category === 'Others') categories = ['Others'];
             else if (categories.includes(category)) categories = categories.filter(item => item !== category);
             else categories.push(category);
-            void this._updateAssetClassification(filePath, {
+            void updateClassification({
                 categories,
                 classification: { manuallyUpdatedAt: new Date().toISOString() }
             });
-            menu.remove();
         });
-
-        const closeMenu = event => {
-            if (menu.contains(event.target)) return;
-            menu.remove();
-            document.removeEventListener('pointerdown', closeMenu, true);
-        };
-        setTimeout(() => document.addEventListener('pointerdown', closeMenu, true), 0);
     }
 
     _dedupeAssetFiles(files = []) {
@@ -754,13 +783,16 @@ export class SidebarManager {
                     ? `<div class="asset-library-card-preview asset-kind-video"><video data-asset-video-thumbnail aria-hidden="true" tabindex="-1" muted playsinline preload="metadata"></video><svg class="flow-icon flow-icon-lg asset-library-card-fallback" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-video"></use></svg><span>${this._escapeHtml(extension)}</span><i class="asset-library-video-badge" aria-hidden="true"></i></div>`
                     : `<div class="asset-library-card-preview asset-kind-${type}"><svg class="flow-icon flow-icon-lg" aria-hidden="true"><use href="./icons/flow-icons.svg#${this._assetTypeIcon(type)}"></use></svg><span>${this._escapeHtml(extension)}</span></div>`;
             return `
-                <article class="asset-library-card ${onCanvas ? 'is-on-canvas' : ''} ${metadata?.favorite ? 'is-favorite' : ''} ${classificationStatus ? `classification-${this._escapeHtml(classificationStatus)}` : ''}" draggable="true"
+                <article class="asset-library-card ${onCanvas ? 'is-on-canvas' : ''} ${metadata?.favorite ? 'is-favorite' : ''} ${classificationStatus ? `classification-${this._escapeHtml(classificationStatus)}` : ''}" draggable="true" tabindex="0" aria-label="${this._escapeHtml(`定位画布：${fileName}`)}"
                     data-asset-path="${this._escapeHtml(filePath)}" title="${this._escapeHtml(metadata?.summary || filePath)}">
                     ${preview}
                     <div class="asset-library-card-meta">
                         <span class="asset-library-card-name">${this._escapeHtml(fileName)}</span>
                         ${metadata?.favorite ? '<svg class="flow-icon flow-icon-xs asset-library-favorite" aria-label="已收藏"><use href="./icons/flow-icons.svg#icon-favorite"></use></svg>' : ''}
                         <i class="asset-library-canvas-state" title="${onCanvas ? '已在画布' : '未放入画布'}" aria-hidden="true"></i>
+                        <button type="button" class="asset-library-classify" data-classify-asset title="素材分类" aria-label="${this._escapeHtml(`素材分类：${fileName}`)}" aria-expanded="false">
+                            <svg class="flow-icon flow-icon-xs" aria-hidden="true"><use href="./icons/flow-icons.svg#icon-tag"></use></svg>
+                        </button>
                     </div>
                     ${categories.length || ['pending', 'running', 'failed'].includes(classificationStatus) ? `<div class="asset-library-card-tags">
                         ${categories.map(category => `<span>${this._escapeHtml(category)}</span>`).join('')}
@@ -1040,7 +1072,7 @@ export class SidebarManager {
                 const clickedFolderItem = e.target.closest('.folder-item');
                 if (clickedFolderItem) {
                     const groupItem = clickedFolderItem.closest('.folder-group-item');
-                    if (this.pendingMove && groupItem?.dataset.groupId === this.storeData.activeGroupId) {
+                    if (this.pendingMove && groupItem) {
                         e.stopPropagation();
                         const folderPath = clickedFolderItem.dataset.path || clickedFolderItem.querySelector('.folder-remove')?.dataset.path;
                         if (folderPath) this._completeMoveTarget(folderPath);
@@ -1202,9 +1234,31 @@ export class SidebarManager {
                 }
                 const card = event.target.closest('.asset-library-card');
                 if (!card?.dataset.assetPath) return;
+                const classify = event.target.closest('[data-classify-asset]');
+                if (classify) {
+                    const rect = classify.getBoundingClientRect();
+                    this._showAssetClassificationMenu(card.dataset.assetPath, rect.right, rect.bottom, classify);
+                    return;
+                }
                 this.emit('revealAsset', { filePath: card.dataset.assetPath });
             });
+            this.dom.assetLibraryGrid.addEventListener('keydown', event => {
+                const card = event.target.closest('.asset-library-card');
+                if (!card?.dataset.assetPath) return;
+                if (!['Enter', ' ', 'ContextMenu'].includes(event.key) && !(event.shiftKey && event.key === 'F10')) return;
+                event.stopPropagation();
+                if (event.target !== card) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    this.emit('revealAsset', { filePath: card.dataset.assetPath });
+                } else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                    event.preventDefault();
+                    const rect = card.getBoundingClientRect();
+                    this._showAssetClassificationMenu(card.dataset.assetPath, rect.right, rect.top, card);
+                }
+            });
             this.dom.assetLibraryGrid.addEventListener('dragstart', event => {
+                if (event.target.closest('[data-classify-asset]')) { event.preventDefault(); return; }
                 const card = event.target.closest('.asset-library-card');
                 if (!card?.dataset.assetPath || !event.dataTransfer) return;
                 event.dataTransfer.setData('application/x-flow-asset', card.dataset.assetPath);
@@ -1214,7 +1268,7 @@ export class SidebarManager {
                 const card = event.target.closest('.asset-library-card');
                 if (!card?.dataset.assetPath) return;
                 event.preventDefault();
-                this._showAssetClassificationMenu(card.dataset.assetPath, event.clientX, event.clientY);
+                this._showAssetClassificationMenu(card.dataset.assetPath, event.clientX, event.clientY, card);
             });
         }
 
@@ -1407,7 +1461,7 @@ export class SidebarManager {
         this._acknowledgeGroupTaskState(groupId);
         this._ensureGroupDefaultFolder(newGroup);
 
-        if (oldGroup && oldGroup.id !== groupId) {
+        if (!oldGroup || oldGroup.id !== groupId) {
             this.storeData.items = newGroup.savedItems || [];
             this.storeData.connections = [...(newGroup.connections || [])];
             this.storeData.boardRevision = Number(newGroup.boardRevision) || 0;
@@ -1481,9 +1535,9 @@ export class SidebarManager {
 
     // ── 组右键菜单（纯 DOM 方式，不依赖 Electron 原生菜单） ──
     beginMoveToFolder(payload) {
-        const group = this.getActiveGroup();
-        if (!group || !group.folders || group.folders.length === 0) {
-            this._showMoveHint('当前文件夹组没有可用文件夹');
+        const targetFolders = (this.storeData.folderGroups || []).flatMap(group => group.folders || []);
+        if (targetFolders.length === 0) {
+            this._showMoveHint('没有可用的目标文件夹');
             return;
         }
 
@@ -1498,8 +1552,8 @@ export class SidebarManager {
         this.renderGroups();
         this._expandActiveGroup();
         this._showMoveHint(this.pendingMove.mode === 'copy'
-            ? '点击当前文件夹组里的目标文件夹复制'
-            : '点击当前文件夹组里的目标文件夹剪切');
+            ? '点击任意文件夹组中的目标文件夹复制'
+            : '点击任意文件夹组中的目标文件夹剪切');
     }
 
     cancelMoveToFolder() {
@@ -1510,9 +1564,9 @@ export class SidebarManager {
 
     _completeMoveTarget(targetFolder) {
         if (!this.pendingMove) return;
-        const activeGroup = this.getActiveGroup();
-        if (!activeGroup || !activeGroup.folders.includes(targetFolder)) {
-            this._showMoveHint('只能移动到当前文件夹组中的文件夹');
+        const targetFolders = (this.storeData.folderGroups || []).flatMap(group => group.folders || []);
+        if (!targetFolders.includes(targetFolder)) {
+            this._showMoveHint('目标文件夹不存在，请重新选择');
             return;
         }
 
@@ -1680,7 +1734,7 @@ export class SidebarManager {
                 });
             });
             item.addEventListener('mouseleave', () => {
-                if (this.pendingMove && item.classList.contains('active')) return;
+                if (this.pendingMove) return;
                 gsap.to(accordionContent, {
                     height: 0,
                     duration: 0.3,

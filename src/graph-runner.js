@@ -2,7 +2,7 @@
 // Flow Canvas — Graph Runner (拓扑执行器)
 // ============================================================
 // 从目标节点回溯上游依赖，按拓扑序逐个执行。
-// 首版是同步 await：长任务会超时，刷新丢失。异步任务表是下一版的事。
+// 请求与结果绑定运行开始时的项目；已提交任务由主进程持久化以便恢复。
 // ============================================================
 
 import { NODE_TYPES } from './node-types.js';
@@ -74,6 +74,10 @@ export class GraphRunner {
         return raw instanceof Map ? raw : new Map((raw || []).map(i => [i.id, i]));
     }
 
+    _key(id, context = this.ctx.captureRunContext?.() || {}) {
+        return context.projectId ? `${context.projectId}:${id}` : id;
+    }
+
     _setStatus(item, status, error = '') {
         if (status === STATUS.QUEUED || (status === STATUS.RUNNING && !(Number(item.runStartedAt) > 0))) {
             item.runStartedAt = Date.now();
@@ -86,7 +90,7 @@ export class GraphRunner {
         // finally 就不会执行，activeNodes 永久残留 → 该节点链在本会话内
         // 再也跑不起来（只能重启）。状态已经写入 item，重绘失败不影响正确性。
         try {
-            this.ctx.onStatus?.(item.id);
+            this.ctx.onStatus?.(item.id, item);
         } catch (statusError) {
             console.error('[Runner] onStatus 回调失败（已忽略）:', statusError);
         }
@@ -97,6 +101,7 @@ export class GraphRunner {
      * @returns {{ ok: boolean, reason?: string, ran?: string[] }}
      */
     async runFrom(targetId, options = {}) {
+        const context = this.ctx.captureRunContext?.() || {};
         const items = this._items();
         const connections = this.ctx.getConnections() || [];
         const target = items.get(targetId);
@@ -109,7 +114,7 @@ export class GraphRunner {
             console.warn('[Runner] 连线引用了已删除的节点:', missing);
         }
 
-        if (order.some(id => this.activeNodes.has(id))) {
+        if (order.some(id => this.activeNodes.has(this._key(id, context)))) {
             return { ok: false, reason: '该节点链正在执行' };
         }
 
@@ -127,9 +132,10 @@ export class GraphRunner {
             return readOnly ? [[id, { item: { ...item, config }, product }]] : [];
         }));
         const ownedNodes = order.filter(id => !readOnlyInputs.has(id));
-        ownedNodes.forEach(id => this.activeNodes.add(id));
-        const runState = { targetId, order, ownedNodes, items, canceled: false };
-        this.activeRuns.set(targetId, runState);
+        ownedNodes.forEach(id => this.activeNodes.add(this._key(id, context)));
+        const runState = { id: crypto.randomUUID(), targetId, order, ownedNodes, items, context, canceled: false,
+            snapshots: new Map([...items].map(([id, item]) => [id, structuredClone(item)])) };
+        this.activeRuns.set(this._key(targetId, context), runState);
         const runCache = new Map();
 
         ownedNodes.forEach(id => {
@@ -138,6 +144,7 @@ export class GraphRunner {
         });
 
         try {
+            if (this.ctx.beforeRun && await this.ctx.beforeRun(context) === false) throw new Error('画板保存失败，生成任务未提交');
             for (const id of order) {
                 const source = readOnlyInputs.get(id);
                 const item = source?.item || items.get(id);
@@ -159,12 +166,17 @@ export class GraphRunner {
                         : options?.configOverrides?.[id];
                     const persistedProduct = source ? source.product : id !== targetId ? generatorResultOutput(item) : {};
                     const reusedProduct = Object.keys(persistedProduct).length > 0;
+                    let executionError;
                     const output = reusedProduct
                         ? persistedProduct
-                        : await this._execute(item, connections, runCache, configOverride, runState);
+                        : await this._execute(item, connections, runCache, configOverride, runState).catch(error => {
+                            if (!error.partialOutput || isCancellationError(error)) throw error;
+                            executionError = error;
+                            return error.partialOutput;
+                        });
                     if (runState.canceled) throw cancellationError();
                     runCache.set(id, output);
-                    this.resultCache.set(id, output);
+                    this.resultCache.set(this._key(id, context), output);
                     // 生成结果自动落地成新节点。没有 onResult 时静默跳过，
                     // 保证 runner 在无宿主画布的测试里仍可独立运行。
                     // await：落地是异步的（要建卡片再连溯源边），不等的话
@@ -177,7 +189,9 @@ export class GraphRunner {
                                 : [output];
                             for (const landedOutput of landedOutputs) {
                                 if (runState.canceled) throw cancellationError();
-                                await this.ctx.onResult(item, landedOutput);
+                                await this.ctx.onResult(item, landedOutput, { ...context,
+                                    expectedNode: runState.snapshots.get(id), runState });
+                                runState.snapshots.set(id, structuredClone(item));
                             }
                         } catch (landErr) {
                             if (runState.canceled || isCancellationError(landErr)) throw landErr;
@@ -186,6 +200,7 @@ export class GraphRunner {
                         }
                     }
                     if (runState.canceled) throw cancellationError();
+                    if (executionError) throw executionError;
                     if (!readOnlyInputs.has(id)) this._setStatus(item, STATUS.DONE);
                 } catch (err) {
                     const message = err?.message || String(err);
@@ -207,6 +222,9 @@ export class GraphRunner {
                     return { ok: false, reason: message, failedAt: id, ran: order };
                 }
             }
+        } catch (error) {
+            this._setStatus(target, STATUS.ERROR, error.message);
+            return { ok: false, reason: error.message, failedAt: targetId };
         } finally {
             ownedNodes.forEach(id => {
                 const item = items.get(id);
@@ -214,8 +232,18 @@ export class GraphRunner {
                     this._setStatus(item, STATUS.CANCELED, runState.canceled ? '生成任务已中断' : '本次任务已停止，节点未执行');
                 }
             });
-            ownedNodes.forEach(id => this.activeNodes.delete(id));
-            this.activeRuns.delete(targetId);
+            for (const id of ownedNodes) {
+                const item = items.get(id);
+                if (!item || !this.ctx.onSettled) continue;
+                try {
+                    await this.ctx.onSettled(item, { ...context, expectedNode: runState.snapshots.get(id),
+                        operationId: `${runState.id}:${id}:${item.runStatus}` });
+                } catch (error) {
+                    console.warn('[GraphRunner] 运行状态保存失败', error);
+                }
+            }
+            ownedNodes.forEach(id => this.activeNodes.delete(this._key(id, context)));
+            this.activeRuns.delete(this._key(targetId, context));
         }
 
         return { ok: true, ran: order };
@@ -240,11 +268,11 @@ export class GraphRunner {
         if (!def) throw new Error(`未知节点类型：${item.nodeType}`);
         if (typeof def.execute !== 'function') throw new Error('该节点类型未实现 execute');
 
-        const items = this._items();
+        const items = runState?.snapshots || this._items();
         const inputs = collectInputs(item, connections, resultCache);
         const inputContext = collectInputContext(item, connections, resultCache, items);
         const config = this._resolvedConfig(def, {
-            ...(item.config || {}),
+            ...(runState?.snapshots.get(item.id)?.config || item.config || {}),
             ...(configOverride && typeof configOverride === 'object' ? configOverride : {})
         });
 
@@ -258,7 +286,7 @@ export class GraphRunner {
             validateGenerationRequest: this.ctx.validateGenerationRequest,
             prepareImageReferences: this.ctx.prepareImageReferences,
             getImageIntentPipelineMode: this.ctx.getImageIntentPipelineMode,
-            createGenerationTask: this.ctx.createGenerationTask,
+            createGenerationTask: details => this.ctx.createGenerationTask?.({ ...details, ...runState?.context }),
             updateGenerationTask: this.ctx.updateGenerationTask,
             recordGenerationError: this.ctx.recordGenerationError,
             isCancelled: () => runState?.canceled === true,
@@ -268,14 +296,15 @@ export class GraphRunner {
     }
 
     async cancel(targetId) {
-        const runState = this.activeRuns.get(targetId)
-            || [...this.activeRuns.values()].find(run => run.ownedNodes.includes(targetId));
+        const context = this.ctx.captureRunContext?.() || {};
+        const runState = this.activeRuns.get(this._key(targetId, context))
+            || [...this.activeRuns.values()].find(run => run.context.projectId === context.projectId && run.ownedNodes.includes(targetId));
         if (!runState || runState.canceled) return false;
         runState.canceled = true;
         const pendingIds = runState.ownedNodes.filter(id =>
             [STATUS.QUEUED, STATUS.RUNNING].includes(runState.items.get(id)?.runStatus));
         pendingIds.forEach(id => this._setStatus(runState.items.get(id), STATUS.CANCELED, '生成任务已中断'));
-        const canceled = await Promise.allSettled(pendingIds.map(id => Promise.resolve().then(() => this.ctx.cancelGenerationTasks?.(id))));
+        const canceled = await Promise.allSettled(pendingIds.map(id => Promise.resolve().then(() => this.ctx.cancelGenerationTasks?.(id, runState.context))));
         canceled.filter(result => result.status === 'rejected').forEach(result => {
             console.warn('[GraphRunner] 中断本地等待失败', result.reason);
         });
@@ -299,7 +328,7 @@ export class GraphRunner {
      * 取某节点最近一次的执行结果，供预览节点渲染。
      */
     getResult(nodeId) {
-        return this.resultCache.get(nodeId) || null;
+        return this.resultCache.get(this._key(nodeId)) || null;
     }
 
     /** 把所有节点的运行态重置为 idle（加载数据后调用）。 */

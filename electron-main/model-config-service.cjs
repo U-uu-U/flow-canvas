@@ -125,10 +125,39 @@ async function fetchModelConfig({ url, fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS
     return { success: true, config, status: response.status };
 }
 
+// Read the applied store, not the fetch response or a second main-process cache.
+// Renderer contract: window.__flowCanvasGetModelConfigSnapshot() -> { config, status }.
+function createEffectiveModelConfigReader({ getMainWindow } = {}) {
+    return async function readEffectiveModelConfig() {
+        const unavailable = message => Object.assign(new Error(message), { code: 'MODEL_CONFIG_UNAVAILABLE' });
+        const window = getMainWindow?.();
+        if (!window || window.isDestroyed() || window.webContents.isDestroyed?.()) {
+            throw unavailable('模型 CONFIG 窗口不可用，请打开画布后重试');
+        }
+        const { readModelConfig } = await import('../src/model-config.js');
+        let snapshot;
+        try {
+            snapshot = await window.webContents.executeJavaScript(
+                'globalThis.__flowCanvasGetModelConfigSnapshot?.() ?? null');
+        } catch (cause) {
+            throw unavailable(`读取已生效模型 CONFIG 失败：${cause.message}`);
+        }
+        if (getMainWindow() !== window || window.isDestroyed() || window.webContents.isDestroyed?.()) {
+            throw unavailable('画布窗口已切换，请重试');
+        }
+        // Cache entries already passed through this same parser in the renderer.
+        // Reapplying the remote schema here would reject accepted legacy caches.
+        const config = readModelConfig(snapshot?.config);
+        if (!config) throw unavailable('已生效模型 CONFIG 尚未就绪，请等待画布加载完成');
+        return structuredClone(config);
+    };
+}
+
 module.exports = {
     DEFAULT_TIMEOUT_MS,
     MAX_BYTES,
     SCHEMA_PATH,
+    createEffectiveModelConfigReader,
     fetchModelConfig,
     isAllowedModelConfigUrl,
     validateModelConfig
